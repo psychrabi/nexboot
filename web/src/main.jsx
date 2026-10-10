@@ -62,7 +62,7 @@ const PAGES = [
 
   { section: "System Administration" },
   { id: "logs",      label: "Operation Logs",     icon: Icons.Log, component: PageLogs,
-    header: { h: "Audit Logs", s: "按用户、时间、模块查询Operation Logs与Login Logs" } },
+    header: { h: "Audit Logs", s: "Filter operation and login logs by user, time, and module" } },
   { id: "settings",  label: "User Management",     icon: Icons.User, component: PageSettings,
     header: { h: "User Management", s: "Manage accounts, passwords, and administrators" } },
   { id: "system-params", label: "System Settings", icon: Icons.Cog, component: PageSystemParams,
@@ -178,7 +178,7 @@ function ChangePasswordModal({ open, account, onClose, onChanged }) {
     if (!form.old_password || !form.new_password) { store.toast("Enter the current and new passwords", "err"); return; }
     if (form.new_password.length < 6) { store.toast("The new password must be at least 6 characters", "err"); return; }
     const id = account?.id || account?.ID;
-    if (!id) { store.toast("未识别当前用户，请在「User Management」中修改", "err"); return; }
+    if (!id) { store.toast("Current user not found. Change the password under User Management", "err"); return; }
     setBusy(true);
     try {
       await api.changeUserPassword(id, { old_password: form.old_password, new_password: form.new_password });
@@ -240,9 +240,9 @@ function SystemHealthChip() {
   const errors = active.filter(a => a.severity === "error").length;
   const cls = errors > 0 ? "rose" : active.length > 0 ? "amber" : "emerald";
   const dot = errors > 0 ? "err" : active.length > 0 ? "warn" : "live";
-  const text = active.length > 0 ? `${active.length}  alerts` : "System healthy";
+  const text = active.length > 0 ? `${active.length} active alerts` : "System healthy";
   return (
-    <span className={`chip ${cls}`} style={{ cursor: "pointer" }} title="点击查看Alert Center"
+    <span className={`chip ${cls}`} style={{ cursor: "pointer" }} title="Open Alert Center"
       onClick={() => store.goto("alarms")}>
       <span className={`dot ${dot}`}/> {text}
     </span>
