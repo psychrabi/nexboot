@@ -7,8 +7,8 @@ import { StoreProvider } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageDrivers } from './drivers.jsx';
 
-// 驱动组能装什么由服务端定，但页面只能列出可选的包：列出停用或非启动关键的包，
-// 操作者在表单里拿到的拒绝无从处理。
+// The server validates driver bundles; the UI must only offer eligible driver packs.
+// Showing disabled or non-boot-critical packs would lead to avoidable rejections.
 
 const list = (items) => ({ items, total: items.length });
 const packItem = (over) => ({
@@ -22,8 +22,8 @@ const packItem = (over) => ({
 const PACKS = [
   packItem({}),
   packItem({ ID: 'p-2', Name: 'Realtek RTL8168', Vendor: 'Realtek' }),
-  packItem({ ID: 'p-3', Name: '已禁用网卡', Status: 'disabled' }),
-  packItem({ ID: 'p-4', Name: '显卡驱动', Category: 'gpu' }),
+  packItem({ ID: 'p-3', Name: 'Disabled NIC', Status: 'disabled' }),
+  packItem({ ID: 'p-4', Name: 'Graphics Driver', Category: 'gpu' }),
 ];
 
 function stubApi(overrides = {}) {
@@ -46,85 +46,85 @@ const renderPage = () => render(
   <StoreProvider><ConfirmProvider><PageDrivers/></ConfirmProvider></StoreProvider>,
 );
 
-describe('驱动中心', () => {
+describe('Driver Center', () => {
   beforeEach(() => stubApi());
   afterEach(() => vi.restoreAllMocks());
 
-  it('列出驱动包并按名称/厂商搜索', async () => {
+  it('Lists driver packs and searches by name/vendor', async () => {
     renderPage();
     await screen.findByText('Intel I219');
 
-    await userEvent.type(screen.getByPlaceholderText(/搜索名称/), 'realtek');
+    await userEvent.type(screen.getByPlaceholderText(/Search name/), 'realtek');
     await waitFor(() => expect(screen.queryByText('Intel I219')).toBeNull());
     expect(screen.getByText('Realtek RTL8168')).toBeTruthy();
   });
 
-  it('没选文件时不提交上传', async () => {
+  it('Does not upload without a file', async () => {
     const uploadDriverPack = vi.fn();
     stubApi({ uploadDriverPack });
     renderPage();
     await screen.findByText('Intel I219');
 
-    await userEvent.click(screen.getByRole('button', { name: /上传驱动包/ }));
-    await userEvent.click(await screen.findByRole('button', { name: '上传并解析' }));
+    await userEvent.click(screen.getByRole('button', { name: /Upload Driver Pack/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Upload and Parse' }));
     expect(uploadDriverPack).not.toHaveBeenCalled();
   });
 
-  it('上传把表单字段一并带上', async () => {
+  it('Includes form fields in uploads', async () => {
     const uploadDriverPack = vi.fn(async () => ({}));
     stubApi({ uploadDriverPack });
     renderPage();
     await screen.findByText('Intel I219');
 
-    await userEvent.click(screen.getByRole('button', { name: /上传驱动包/ }));
-    await userEvent.type(await screen.findByPlaceholderText('Intel I219 v12.19'), '螃蟹网卡');
+    await userEvent.click(screen.getByRole('button', { name: /Upload Driver Pack/ }));
+    await userEvent.type(await screen.findByPlaceholderText('Intel I219 v12.19'), 'Realtek NIC');
     const file = new File([new Uint8Array([0x50, 0x4b, 3, 4])], 'rtl.zip', { type: 'application/zip' });
     await userEvent.upload(document.querySelector('input[type=file]'), file);
-    await userEvent.click(screen.getByRole('button', { name: '上传并解析' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Upload and Parse' }));
 
     await waitFor(() => expect(uploadDriverPack).toHaveBeenCalled());
     const form = uploadDriverPack.mock.calls[0][0];
-    expect(form.get('name')).toBe('螃蟹网卡');
+    expect(form.get('name')).toBe('Realtek NIC');
     expect(form.get('category')).toBe('boot_critical_nic');
     expect(form.get('file').name).toBe('rtl.zip');
   });
 
-  // 驱动组只收已启用的启动关键网卡驱动，其余服务端会拒绝，表单不应列出。
-  it('组驱动集时只列出启用中的启动网卡包', async () => {
+  // Bundles only accept enabled boot-critical NIC drivers; filter out all other packs.
+  it('Only offers enabled boot NIC packs when creating a bundle', async () => {
     renderPage();
     await screen.findByText('Intel I219');
-    // 驱动组在单独的页签里。
-    await userEvent.click(screen.getByText(/启动驱动集/));
-    await userEvent.click(await screen.findByRole('button', { name: /组合驱动集/ }));
+    // Driver bundles are managed in a separate tab.
+    await userEvent.click(screen.getByText(/Boot Driver Bundles/));
+    await userEvent.click(await screen.findByRole('button', { name: /Create Bundle/ }));
 
-    await screen.findByPlaceholderText('2026 主流网卡启动集');
-    // 对话框里可选的全部驱动包。
+    await screen.findByPlaceholderText('2026 Common NIC Boot Drivers');
+    // All driver packs offered in the dialog.
     const options = document.body.textContent;
     expect(options).toContain('Intel I219');
     expect(options).toContain('Realtek RTL8168');
-    expect(options).not.toContain('已禁用网卡');
-    expect(options).not.toContain('显卡驱动');
+    expect(options).not.toContain('Disabled NIC');
+    expect(options).not.toContain('Graphics Driver');
   });
 
-  it('驱动集必须有名字和至少一个包', async () => {
+  it('Requires a name and at least one pack for a bundle', async () => {
     const createDriverBundle = vi.fn(async () => ({}));
     stubApi({ createDriverBundle });
     renderPage();
     await screen.findByText('Intel I219');
-    // 驱动组在单独的页签里。
-    await userEvent.click(screen.getByText(/启动驱动集/));
-    await userEvent.click(await screen.findByRole('button', { name: /组合驱动集/ }));
+    // Driver bundles are managed in a separate tab.
+    await userEvent.click(screen.getByText(/Boot Driver Bundles/));
+    await userEvent.click(await screen.findByRole('button', { name: /Create Bundle/ }));
 
-    const submit = await screen.findByRole('button', { name: '创建' });
+    const submit = await screen.findByRole('button', { name: 'Create' });
     await userEvent.click(submit);
     expect(createDriverBundle).not.toHaveBeenCalled();
 
-    await userEvent.type(screen.getByPlaceholderText('2026 主流网卡启动集'), '教学一班网卡');
+    await userEvent.type(screen.getByPlaceholderText('2026 Common NIC Boot Drivers'), 'Classroom NIC Bundle');
     await userEvent.click(submit);
-    expect(createDriverBundle).not.toHaveBeenCalled(); // 填了名称但没选驱动包
+    expect(createDriverBundle).not.toHaveBeenCalled(); // Name entered but no driver pack selected
 
     await userEvent.click(screen.getByText('Intel I219'));
     await userEvent.click(submit);
-    await waitFor(() => expect(createDriverBundle).toHaveBeenCalledWith({ name: '教学一班网卡', pack_ids: ['p-1'] }));
+    await waitFor(() => expect(createDriverBundle).toHaveBeenCalledWith({ name: 'Classroom NIC Bundle', pack_ids: ['p-1'] }));
   });
 });
