@@ -176,7 +176,7 @@ function PageGroups() {
   const onDelete = async (g) => {
     const n = termsOf(g.ID).length;
     const message = n > 0
-      ? `Groups ${g.Name} still has ${n} clients. Move or delete them before deleting the group.`
+      ? `Group ${g.Name} still has ${n} clients. Move or delete them before deleting the group.`
       : `Delete group ${g.Name}？`;
     const ok = await conf.ask({ title: "Delete Group", message, danger: true });
     if (!ok) return;
@@ -207,7 +207,7 @@ function PageGroups() {
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div className="card" style={{ padding: 14, display: "flex", alignItems: "center", gap: 12 }}>
         <SearchBox value={search} onChange={setSearch} placeholder="Search group name / IP range" width={280}/>
-        <span className="chip">{groups.length} Groups</span>
+        <span className="chip">{groups.length} groups</span>
         <span className="chip emerald">{groups.reduce((s, g) => s + onlineOf(g.ID), 0)} Online</span>
         <span className="chip">{groups.reduce((s, g) => s + (g.ClientMax || 0), 0)} Client capacity</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
@@ -218,7 +218,7 @@ function PageGroups() {
 
       {!filtered.length && (
         <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--fg-faint)", fontSize: 13 }}>
-          {loading ? "Loading…" : error ? `Load failed: ${error}` : "No Groups"}
+          {loading ? "Loading…" : error ? `Load failed: ${error}` : "No groups"}
         </div>
       )}
 
@@ -545,7 +545,7 @@ function NetworkStatusLine({ status, form, network, onFill, toast }) {
     try { setProbe(await api.probeNetwork(ip)); } catch (e) { setProbe({ ip, error: e.message || "Test failed" }); }
   };
   return box("var(--amber)", "var(--amber-soft)", <>
-    <b>Cross-subnet · DHCP Relay</b> · Clients in {range} subnet have requests relayed to server {network.boot_host || nets}.Set gateway to the relay switch's Layer 3 interface for this subnet.
+    <b>Cross-subnet · DHCP Relay</b> · Clients in {range} subnet have requests relayed to server {network.boot_host || nets}. Set gateway to the relay switch's Layer 3 interface for this subnet.
     <span style={{ display: "inline-flex", gap: 8, marginLeft: 6 }}>
       <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={doProbe}>Test</button>
       <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={() => setShowSnippet(v => !v)}>{showSnippet ? "Collapse" : "View Switch Configuration"}</button>
