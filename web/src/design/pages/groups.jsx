@@ -294,7 +294,7 @@ function PageGroups() {
         footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || netStatus === "blocked"} title={netStatus === "blocked" ? "The group subnet is outside the server client subnet. Move it or enable cross-subnet groups." : ""} onClick={save}>{busy ? "Saving…" : "Save"}</button></>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Group Name" required><input className="input" aria-label="Group Name" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })}/></Field>
-          <Field label="Set as Default Group"><Toggle checked={!!form.is_default} onChange={v => setForm({ ...form, is_default: v })} onLabel="是" offLabel="否"/></Field>
+          <Field label="Set as Default Group"><Toggle checked={!!form.is_default} onChange={v => setForm({ ...form, is_default: v })} onLabel="Yes" offLabel="No"/></Field>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="Starting IP" required><input className="input mono" aria-label="Starting IP" style={{ width: "100%" }} value={form.start_ip || ""} onChange={e => setForm({ ...form, start_ip: e.target.value })}/></Field>
@@ -347,12 +347,12 @@ function PageGroups() {
                 {/* Running clients change IPs upon lease renewal, potentially disconnecting Windows iSCSI. */}
                 {fix.preview.online_count > 0 && (
                   <div className="hint" style={{ marginBottom: 6, color: "var(--amber)" }}>
-                    其中 {fix.preview.online_count} running clients will change IPs at lease renewal, not immediately, potentially disconnecting and rebooting.
+                    Among them, {fix.preview.online_count} running clients will change IPs at lease renewal, not immediately, potentially disconnecting and rebooting.
                     Wait until these clients are shut down before making this change.
                   </div>
                 )}
                 <div style={{ overflowX: "auto" }}><table className="t">
-                  <thead><tr><th>Client</th><th>MAC</th><th>Current</th><th>Change to</th><th>状态</th></tr></thead>
+                  <thead><tr><th>Client</th><th>MAC</th><th>Current</th><th>Change to</th><th>Status</th></tr></thead>
                   <tbody>{fix.preview.terminals.map(t => <tr key={t.id}><td>{t.name || t.id}</td><td className="mono">{t.mac}</td><td className="mono">{t.old_ip}</td><td className="mono">{t.new_ip}</td>
                     <td>{t.online ? <span className="chip amber">Running</span> : <span className="meta">Off</span>}</td></tr>)}</tbody>
                 </table></div>
@@ -399,8 +399,8 @@ function useImageConfigs(images, imageId, configId, onChange) {
   return configs;
 }
 
-const imageOptions = (images) => (images.length ? images.map(i => ({ value: i.ID, label: `${i.Name} · ${i.OSType}` })) : [{ value: "", label: "None可用Image" }]);
-const configOptions = (configs) => (configs.length ? configs.map(c => ({ value: c.ID, label: c.Name })) : [{ value: "", label: "None可用Configuration" }]);
+const imageOptions = (images) => (images.length ? images.map(i => ({ value: i.ID, label: `${i.Name} · ${i.OSType}` })) : [{ value: "", label: "No images available" }]);
+const configOptions = (configs) => (configs.length ? configs.map(c => ({ value: c.ID, label: c.Name })) : [{ value: "", label: "No configurations available" }]);
 
 function ImageBindingPicker({ images, imageId, configId, onChange, imageLabel = "System Image", configLabel = "Boot Configuration", configHelp }) {
   const configs = useImageConfigs(images, imageId, configId, onChange);
@@ -534,7 +534,7 @@ function NetworkStatusLine({ status, form, network, onFill, toast }) {
   if (status === "blocked") {
     const sug = network.suggest;
     return box("var(--rose)", "var(--rose-soft)", <>
-      <b>不在服务器的客户机网段</b> · Server client interface: {iface} ({nets}), {range} clients cannot get addresses or boot.<br/>
+      <b>Outside the server client subnet</b> · Server client interface: {iface} ({nets}), {range} clients cannot get addresses or boot.<br/>
       Move to server subnet{sug ? <> (<button type="button" className="btn" style={{ padding: "1px 8px", marginLeft: 2 }} onClick={onFill}>Use {rangeText(sug.start_ip, Number(form.client_max) || sug.client_max)}</button>)</> : ""}, 
       Alternatively, for another VLAN, enable Cross-subnet Groups in System Settings.
     </>);
