@@ -208,7 +208,7 @@ function LoginForm({ onLogin }) {
         Console Login
         <span className="login-title-cursor"/>
       </h2>
-      <div className="login-sub">Sign in with an administrator account to access {BRAND.name} 控制台</div>
+      <div className="login-sub">Sign in with an administrator account to access {BRAND.name} console</div>
 
       <label className="login-field">
         <span className="login-field-label">
