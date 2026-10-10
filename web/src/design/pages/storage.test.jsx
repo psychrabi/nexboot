@@ -649,7 +649,7 @@ describe('Storage Pool Management', () => {
 describe('Remote pool details', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('Uses the owning node's free disks for pool expansion', async () => {
+  it("Uses the owning node's free disks for pool expansion", async () => {
     const CLUSTER_NODES = [
       { id: 'n1', ip: '192.168.10.3', ha_state: 'active', online: true },
       { id: 'n2', ip: '192.168.10.4', ha_state: 'standby', online: true },
