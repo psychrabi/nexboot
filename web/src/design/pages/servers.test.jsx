@@ -273,7 +273,7 @@ describe('Cluster service matrix', () => {
     // Show a compact per-service status row with hover details.
     const standby = rowFor('192.168.10.3');
     expect(within(standby).getByTitle(/DHCP.*Provided by Active/s)).toBeTruthy();
-    expect(within(standby).getByTitle(/磁盘.*Abnormal/s)).toBeTruthy();
+    expect(within(standby).getByTitle(/Client Disks.*Abnormal/s)).toBeTruthy();
     // Active-node disk service is Running.
     expect(within(rowFor('192.168.10.4')).getAllByText('Running').length).toBeGreaterThan(0);
     // Highlight the node with a service issue.
