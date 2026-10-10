@@ -67,7 +67,7 @@ describe('Overview cluster aggregation', () => {
     expect(screen.queryByText('Cluster')).toBeNull();
   });
 
-  it('Shows each pool's node and explains unreachable nodes', async () => {
+  it("Shows each pool's node and explains unreachable nodes", async () => {
     stubApi();
     renderPage();
     const card = (await screen.findByText('Storage Pool Capacity')).closest('.card');
