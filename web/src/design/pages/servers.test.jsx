@@ -60,8 +60,8 @@ describe('数据备份的每行状态', () => {
     await screen.findByTestId('backup-nodes');
     resolveBackups({ nodes, total: 1, protected: 0 });
     const row = await rowPending;
-    expect(within(row).queryByText('正常')).toBeNull();
-    expect(within(row).getByText('没有备份池')).toBeTruthy();
+    expect(within(row).queryByText('Healthy')).toBeNull();
+    expect(within(row).getByText('No Backup Pool')).toBeTruthy();
     // 空的池名会让整列没有内容，看着像坏了；缺值一律用 — 占位
     expect(row.cells[2].textContent).toBe('—');
   });
@@ -70,8 +70,8 @@ describe('数据备份的每行状态', () => {
     stubNodes([{ node_id: 'b', ip: '192.168.10.3', role: 'active', online: true, reachable: true, backup_pool: 'w' }]);
     renderPage();
     const row = await rowOfNode('192.168.10.3');
-    expect(within(row).queryByText('正常')).toBeNull();
-    expect(within(row).getByText('待备份')).toBeTruthy();
+    expect(within(row).queryByText('Healthy')).toBeNull();
+    expect(within(row).getByText('Pending Backup')).toBeTruthy();
     expect(within(row).getByText('w')).toBeTruthy();
   });
 
@@ -80,15 +80,15 @@ describe('数据备份的每行状态', () => {
                  backup_pool: 'w', last_backup_at: '2026-08-23T03:00:00Z' }]);
     renderPage();
     const row = await rowOfNode('192.168.10.3');
-    expect(within(row).getByText('正常')).toBeTruthy();
+    expect(within(row).getByText('Healthy')).toBeTruthy();
   });
 
   it('读不到那台的状态就说读不到，不拿旧值充数', async () => {
     stubNodes([{ node_id: 'c', ip: '192.168.10.5', role: 'standby', online: false, reachable: false, error: '节点失联' }]);
     renderPage();
     const row = await rowOfNode('192.168.10.5');
-    expect(within(row).getByText('节点失联')).toBeTruthy();
-    expect(within(row).queryByText('正常')).toBeNull();
+    expect(within(row).getByText('Node unreachable')).toBeTruthy();
+    expect(within(row).queryByText('Healthy')).toBeNull();
   });
 });
 
@@ -113,17 +113,17 @@ describe('集群节点', () => {
     ]);
     renderPage();
     // 规模写在徽章上，不再是写死的「单节点」
-    const badge = await screen.findAllByText(/3\s*节点/);
+    const badge = await screen.findAllByText(/3\s*Node/);
     expect(badge.length).toBeGreaterThan(0);
-    expect(screen.queryByText(/单节点/)).toBeNull();
+    expect(screen.queryByText(/single node/)).toBeNull();
     // 一行一台：节点多了也不会把服务名重复印 N 遍
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr'))
       .find(tr => tr.textContent.includes(ip));
     const self = rowFor('192.168.10.4');
-    expect(within(self).getByText(/主机/)).toBeTruthy();
-    expect(within(rowFor('192.168.10.5')).getByText('离线')).toBeTruthy();
-    expect(within(rowFor('192.168.10.3')).getByText(/备机/)).toBeTruthy();
+    expect(within(self).getByText(/Active/)).toBeTruthy();
+    expect(within(rowFor('192.168.10.5')).getByText('Offline')).toBeTruthy();
+    expect(within(rowFor('192.168.10.3')).getByText(/Standby/)).toBeTruthy();
   });
 
   // 每个服务必须是真列，表头和格子由表格自己对齐。
@@ -182,11 +182,11 @@ describe('集群节点', () => {
     await userEvent.click(rowFor('192.168.10.4'));
 
     const panel = await screen.findByTestId('node-services');
-    await userEvent.click(within(panel).getByRole('button', { name: '重启' }));
+    await userEvent.click(within(panel).getByRole('button', { name: 'Restart' }));
     // 危险动作先问一句，问的是哪台机器上的哪个服务
-    const dialog = (await screen.findByText('重启服务')).closest('.card');
+    const dialog = (await screen.findByText('RestartService')).closest('.card');
     expect(dialog.textContent).toContain('192.168.10.4');
-    await userEvent.click(within(dialog).getByRole('button', { name: '重启' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Restart' }));
 
     await waitFor(() => expect(act).toHaveBeenCalledWith('b', 'target', 'restart'));
   });
@@ -205,13 +205,13 @@ describe('集群节点', () => {
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(ip));
 
     // 在线的那台不给移除入口：移除在线节点几乎总是误操作
-    expect(within(rowFor('192.168.10.3')).queryByRole('button', { name: /移除/ })).toBeNull();
+    expect(within(rowFor('192.168.10.3')).queryByRole('button', { name: /Remove/ })).toBeNull();
 
-    await userEvent.click(within(rowFor('192.168.10.5')).getByRole('button', { name: /移除/ }));
-    const dialog = (await screen.findByText(/移出集群/)).closest('.card');
+    await userEvent.click(within(rowFor('192.168.10.5')).getByRole('button', { name: /Remove/ }));
+    const dialog = (await screen.findByText(/Remove from Cluster/)).closest('.card');
     expect(dialog.textContent).toContain('192.168.10.5');
     await userEvent.type(dialog.querySelector('input'), '192.168.10.5');
-    await userEvent.click(within(dialog).getByRole('button', { name: /移除|确认/ }));
+    await userEvent.click(within(dialog).getByRole('button', { name: /Remove|Confirm/ }));
     await waitFor(() => expect(forget).toHaveBeenCalledWith('c'));
   });
 
@@ -225,7 +225,7 @@ describe('集群节点', () => {
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     expect(list.querySelectorAll('tbody tr').length).toBe(1);
-    expect(screen.queryByText(/单节点/)).toBeNull();
+    expect(screen.queryByText(/single node/)).toBeNull();
     const row = list.querySelector('tbody tr');
     expect(within(row).getByText('9.9.9')).toBeTruthy();
     expect(row.getAttribute('title')).toMatch(/only-one/);
@@ -272,23 +272,23 @@ describe('集群服务矩阵', () => {
 
     // 每台的服务浓缩成一排状态点，逐个可悬停问「它是什么、现在怎样」
     const standby = rowFor('192.168.10.3');
-    expect(within(standby).getByTitle(/DHCP.*由主机提供/s)).toBeTruthy();
-    expect(within(standby).getByTitle(/磁盘.*异常/s)).toBeTruthy();
+    expect(within(standby).getByTitle(/DHCP.*Provided by Active/s)).toBeTruthy();
+    expect(within(standby).getByTitle(/磁盘.*Abnormal/s)).toBeTruthy();
     // 主机那台的磁盘就是「运行中」
-    expect(within(rowFor('192.168.10.4')).getAllByText('运行中').length).toBeGreaterThan(0);
+    expect(within(rowFor('192.168.10.4')).getAllByText('Running').length).toBeGreaterThan(0);
     // 有异常的那台在行上直接标出来
-    expect(within(standby).getByText(/1 处异常/)).toBeTruthy();
+    expect(within(standby).getByText(/1  issues/)).toBeTruthy();
     // 行末的总判定仍是「正常」，格子里是「运行中」
-    expect(within(rowFor('192.168.10.4')).getByText('正常')).toBeTruthy();
+    expect(within(rowFor('192.168.10.4')).getByText('Healthy')).toBeTruthy();
     // 顶部汇总与出问题的那一行各标一次
-    expect(within(list).getAllByText(/1 处异常/).length).toBe(2);
+    expect(within(list).getAllByText(/1  issues/).length).toBe(2);
   });
 
   it('全部符合预期时说「全部就绪」，不数「几个在跑」', async () => {
     const allOK = { nodes: MATRIX.nodes.map(n => ({ ...n, services: n.services.map(s => ({ ...s, ok: true })) })) };
     stubMatrix(allOK);
     renderPage();
-    expect(await screen.findByText('全部就绪')).toBeTruthy();
+    expect(await screen.findByText('All Ready')).toBeTruthy();
   });
 
   it('节点不可达时该列标出来，不把它算成服务故障', async () => {
@@ -299,9 +299,9 @@ describe('集群服务矩阵', () => {
     const row = Array.from(list2.querySelectorAll('tbody tr'))
       .find(tr => tr.textContent.includes('192.168.10.3'));
     // 那台自己报了原因就显示原因，比笼统的「读取不到」更能指路
-    expect(within(row).getByText('节点无响应')).toBeTruthy();
+    expect(within(row).getByText('Node not responding')).toBeTruthy();
     // 读不到服务状态 ≠ 服务故障，不该计入异常数
-    expect(screen.queryByText(/处异常/)).toBeNull();
+    expect(screen.queryByText(/ issues/)).toBeNull();
   });
 });
 
@@ -327,10 +327,10 @@ describe('服务状态的判定', () => {
     }]);
     renderPage();
     const row = (await screen.findByText('iSCSI Target · LIO')).closest('tr');
-    expect(within(row).getByText('运行中')).toBeTruthy();
-    expect(within(row).queryByText('已停止')).toBeNull();
-    expect(within(row).queryByText('就绪')).toBeNull();
-    await userEvent.click(within(row).getByLabelText('展开详情'));
+    expect(within(row).getByText('Running')).toBeTruthy();
+    expect(within(row).queryByText('Stopped')).toBeNull();
+    expect(within(row).queryByText('Ready')).toBeNull();
+    await userEvent.click(within(row).getByLabelText('Expand Details'));
     expect(await screen.findByText('target.service')).toBeTruthy();
   });
 
@@ -340,8 +340,8 @@ describe('服务状态的判定', () => {
       { key: 'b', capability: 'B 能力', label: 'B', unit: 'b.service', status: 'stopped', expected: 'ready', ok: true, provided: true, installed: true },
     ]);
     renderPage();
-    expect(await screen.findByText('全部运行中')).toBeTruthy();
-    expect(screen.queryByText(/\d\/\d 运行中/)).toBeNull();
+    expect(await screen.findByText('All Running')).toBeTruthy();
+    expect(screen.queryByText(/\d\/\d Running/)).toBeNull();
   });
 });
 
@@ -412,8 +412,8 @@ describe('能力视角', () => {
     const cap = screen.getByText('iSCSI Target · LIO').closest('.card');
     // 常态下实现细节不出现在版面上；「已禁用」在备份卡片里另有含义，所以只在服务区里查。
     expect(within(cap).queryByText('target.service')).toBeNull();
-    expect(within(cap).queryByText('已禁用')).toBeNull();
-    expect(within(cap).queryByText('systemd 单元')).toBeNull();
+    expect(within(cap).queryByText('Disabled')).toBeNull();
+    expect(within(cap).queryByText('systemd Unit')).toBeNull();
     expect(within(cap).queryByText(/开机跑完即退出/)).toBeNull();
   });
 
@@ -421,9 +421,9 @@ describe('能力视角', () => {
     stub(items);
     const user = userEvent.setup();
     renderPage();
-    await user.click((await screen.findByText('iSCSI Target · LIO')).closest('tr').querySelector('button[aria-label="展开详情"]'));
+    await user.click((await screen.findByText('iSCSI Target · LIO')).closest('tr').querySelector('button[aria-label="Expand Details"]'));
     expect(await screen.findByText('target.service')).toBeTruthy();
-    expect(screen.getByText(/开机自启/)).toBeTruthy();
+    expect(screen.getByText(/Enable at boot/)).toBeTruthy();
   });
 
   it('备机说「由主机提供」，而不是让人猜一个停掉的服务', async () => {
@@ -431,8 +431,8 @@ describe('能力视角', () => {
     renderPage();
     // 表格格子和服务区都会说这句：同一判定，两处呈现，都不该冒出「已停止」
     const svc = await screen.findByTestId('node-services');
-    expect(within(svc).getByText('由主机提供')).toBeTruthy();
-    expect(screen.queryByText('已停止')).toBeNull();
+    expect(within(svc).getByText('Provided by Active')).toBeTruthy();
+    expect(screen.queryByText('Stopped')).toBeNull();
   });
 });
 
@@ -466,12 +466,12 @@ describe('服务器页以节点为中心', () => {
     renderPage();
     await screen.findByTestId('cluster-nodes');
     // 「本机信息」卡和「本机」标记都不该再出现
-    expect(screen.queryByText('本机信息')).toBeNull();
-    expect(screen.queryByText('本机')).toBeNull();
+    expect(screen.queryByText('Local node information')).toBeNull();
+    expect(screen.queryByText('Local node')).toBeNull();
     // 服务区的标题写死是哪一台：重启按的是它，不能靠「当前高亮那行」意会
     const svc = await screen.findByTestId('node-services');
     expect(within(svc).getAllByText(/192\.168\.10\.4/).length).toBeGreaterThan(0);
-    expect(within(svc).getAllByText(/主机/).length).toBeGreaterThan(0);
+    expect(within(svc).getAllByText(/Active/).length).toBeGreaterThan(0);
   });
 
   it('选另一台，服务区就跟过去——标题写死是哪台', async () => {
@@ -486,7 +486,7 @@ describe('服务器页以节点为中心', () => {
     await waitFor(() => expect(
       within(screen.getByTestId('node-services')).getAllByText(/192\.168\.10\.3/).length).toBeGreaterThan(0));
     // 换过去之后，操作打的就是这台：标题里的角色也跟着变
-    expect(within(screen.getByTestId('node-services')).getAllByText(/备机/).length).toBeGreaterThan(0);
+    expect(within(screen.getByTestId('node-services')).getAllByText(/Standby/).length).toBeGreaterThan(0);
   });
 
   it('版本和已运行在节点表里就能比，不必逐台点开', async () => {
@@ -497,8 +497,8 @@ describe('服务器页以节点为中心', () => {
     expect(within(rowFor('192.168.10.4')).getByText('dev')).toBeTruthy();
     expect(within(rowFor('192.168.10.3')).getByText('1.2.3')).toBeTruthy();
     // 已运行要能横向比较：一台刚起来而别人没动过，说明它自己重启了。
-    expect(within(rowFor('192.168.10.4')).getByText(/1\s*天/)).toBeTruthy();
-    expect(within(rowFor('192.168.10.3')).getByText(/1\s*小时/)).toBeTruthy();
+    expect(within(rowFor('192.168.10.4')).getByText(/1\s*d/)).toBeTruthy();
+    expect(within(rowFor('192.168.10.3')).getByText(/1\s*h/)).toBeTruthy();
   });
 
   // 主机名和系统只进悬停，不在服务区占一行。
@@ -506,9 +506,9 @@ describe('服务器页以节点为中心', () => {
     stubHosts();
     renderPage();
     const svc = await screen.findByTestId('node-services');
-    expect(within(svc).queryByText('主机名')).toBeNull();
-    expect(within(svc).queryByText('操作系统')).toBeNull();
-    expect(within(svc).queryByText('ndiskless 版本')).toBeNull();
+    expect(within(svc).queryByText('Hostname')).toBeNull();
+    expect(within(svc).queryByText('Operating System')).toBeNull();
+    expect(within(svc).queryByText('ndiskless Version')).toBeNull();
     // 但不是丢掉：挂在节点行的悬停里
     const list = screen.getByTestId('cluster-nodes');
     const row = Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('192.168.10.4'));
@@ -520,9 +520,9 @@ describe('服务器页以节点为中心', () => {
     stubHosts();
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
-    expect(within(list).queryByRole('button', { name: '详情' })).toBeNull();
-    expect(screen.queryByText(/回退到主机/)).toBeNull();
-    expect(screen.queryByText(/备机不跑 DHCP 是对的/)).toBeNull();
+    expect(within(list).queryByRole('button', { name: 'Details' })).toBeNull();
+    expect(screen.queryByText(/回退到Active/)).toBeNull();
+    expect(screen.queryByText(/Standby不跑 DHCP 是对的/)).toBeNull();
   });
 });
 
@@ -565,27 +565,27 @@ describe('数据备份以节点为单位', () => {
     ] });
     renderPage();
     const first = (await screen.findByText('192.168.10.4')).closest('tr');
-    expect(within(first).getByText('备份中')).toBeTruthy();
+    expect(within(first).getByText('Backing Up')).toBeTruthy();
     const never = screen.getByText('192.168.10.5').closest('tr');
-    expect(within(never).getByText('备份中')).toBeTruthy();
-    expect(within(never).queryByText('待备份')).toBeNull();
+    expect(within(never).getByText('Backing Up')).toBeTruthy();
+    expect(within(never).queryByText('Pending Backup')).toBeNull();
   });
 
   it('不再让人手填备份目标池——那是机器已经知道的事', async () => {
     stubBackups();
     renderPage();
-    await screen.findByText(/数据备份/);
-    expect(screen.queryByLabelText('备份目标池')).toBeNull();
+    await screen.findByText(/Data Backup/);
+    expect(screen.queryByLabelText('Backup target pool')).toBeNull();
     expect(screen.queryByPlaceholderText('backup')).toBeNull();
   });
 
   it('不再假装支持 cron，用「每天几点」说话', async () => {
     stubBackups();
     renderPage();
-    await screen.findByText(/数据备份/);
+    await screen.findByText(/Data Backup/);
     expect(screen.queryByText(/cron/i)).toBeNull();
     expect(screen.queryByPlaceholderText('0 3 * * *')).toBeNull();
-    expect(await screen.findByLabelText('时刻')).toBeTruthy();
+    expect(await screen.findByLabelText('Time')).toBeTruthy();
   });
 
   it('一台一行：谁存着副本、存的什么时候、谁还没有地方存', async () => {
@@ -598,10 +598,10 @@ describe('数据备份以节点为单位', () => {
     // 欠着一轮的那台要说出来，而不是画成正常
     expect(within(rowFor('192.168.10.4')).getByText(/待同步|落后/)).toBeTruthy();
     // 没有备份池的那台不能画成正常
-    expect(within(rowFor('192.168.10.5')).getByText(/没有备份池/)).toBeTruthy();
-    expect(within(rowFor('192.168.10.5')).queryByText('正常')).toBeNull();
+    expect(within(rowFor('192.168.10.5')).getByText(/No Backup Pool/)).toBeTruthy();
+    expect(within(rowFor('192.168.10.5')).queryByText('Healthy')).toBeNull();
     // 表里已逐台说明，上面不再挂只有一枚标签的横幅。
-    expect(within(panel).queryByText(/台存有副本/)).toBeNull();
+    expect(within(panel).queryByText(/ nodes存有副本/)).toBeNull();
   });
 });
 
@@ -624,8 +624,8 @@ describe('版面继续收敛', () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true, portal_ip: '192.168.10.250' }], []);
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
-    expect(within(list).getByText(/虚 IP\s+192\.168\.10\.250/)).toBeTruthy();
-    expect(screen.queryByText('持有虚 IP')).toBeNull();
+    expect(within(list).getByText(/Virtual IP\s+192\.168\.10\.250/)).toBeTruthy();
+    expect(screen.queryByText('HoldingVirtual IP')).toBeNull();
   });
 
   // 备机的 dnsmasq 必须停着（两个 authoritative 的 DHCP 会互相拒绝客户机），
@@ -643,9 +643,9 @@ describe('版面继续收敛', () => {
     renderPage();
     const svc = await screen.findByTestId('node-services');
     const rowOf = (name) => Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(name));
-    expect(within(rowOf('DNSMASQ')).queryByRole('button', { name: '重启' })).toBeNull();
+    expect(within(rowOf('DNSMASQ')).queryByRole('button', { name: 'Restart' })).toBeNull();
     // 该跑的服务照旧可以重启
-    expect(within(rowOf('ZFS')).getByRole('button', { name: '重启' })).toBeTruthy();
+    expect(within(rowOf('ZFS')).getByRole('button', { name: 'Restart' })).toBeTruthy();
   });
 
   // 备机的 dnsmasq 若真的在跑就是错的，要能停掉它。
@@ -660,19 +660,19 @@ describe('版面继续收敛', () => {
     renderPage();
     const svc = await screen.findByTestId('node-services');
     const row = Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('DNSMASQ'));
-    expect(within(row).queryByRole('button', { name: '重启' })).toBeNull();
-    expect(within(row).getByRole('button', { name: '停止' })).toBeTruthy();
+    expect(within(row).queryByRole('button', { name: 'Restart' })).toBeNull();
+    expect(within(row).getByRole('button', { name: 'Stop' })).toBeTruthy();
   });
 
   // 启用开关并进频率：未保存时亮着「已启用」会误导。
   it('用一个选择表达计划，没有单独的启用开关', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
-    await screen.findByText(/数据备份/);
-    expect(screen.queryByRole('button', { name: '已启用' })).toBeNull();
-    expect(screen.queryByRole('button', { name: '已禁用' })).toBeNull();
-    const sel = screen.getByLabelText('备份计划');
-    expect(Array.from(sel.options).map(o => o.textContent)).toEqual(['禁用', '每天', '每周']);
+    await screen.findByText(/Data Backup/);
+    expect(screen.queryByRole('button', { name: 'Enabled' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Disabled' })).toBeNull();
+    const sel = screen.getByLabelText('Backup Schedule');
+    expect(Array.from(sel.options).map(o => o.textContent)).toEqual(['Disabled', 'Daily', 'Weekly']);
   });
 
   // 改动按保存才生效；没有改动时保存按钮置灰。
@@ -681,24 +681,24 @@ describe('版面继续收敛', () => {
     const save = vi.fn().mockResolvedValue({});
     vi.spyOn(api, 'saveBackupConfig').mockImplementation(save);
     renderPage();
-    await screen.findByText(/数据备份/);
+    await screen.findByText(/Data Backup/);
 
-    expect(screen.getByRole('button', { name: /保存/ }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: /Save/ }).disabled).toBe(true);
 
-    await userEvent.selectOptions(screen.getByLabelText('备份计划'), 'off');
+    await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'off');
     expect(save).not.toHaveBeenCalled();
-    await waitFor(() => expect(screen.getByRole('button', { name: /保存/ }).disabled).toBe(false));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Save/ }).disabled).toBe(false));
     // 禁用就没有时刻可填——这一格跟着消失，而不是灰在那里让人猜
-    expect(screen.queryByLabelText('时刻')).toBeNull();
+    expect(screen.queryByLabelText('Time')).toBeNull();
 
     // 改回去：又没什么可保存了
-    await userEvent.selectOptions(screen.getByLabelText('备份计划'), 'daily');
-    await waitFor(() => expect(screen.getByRole('button', { name: /保存/ }).disabled).toBe(true));
+    await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'daily');
+    await waitFor(() => expect(screen.getByRole('button', { name: /Save/ }).disabled).toBe(true));
     expect(save).not.toHaveBeenCalled();
 
     // 真的要改，按保存才下发
-    await userEvent.selectOptions(screen.getByLabelText('备份计划'), 'weekly');
-    await userEvent.click(screen.getByRole('button', { name: /保存/ }));
+    await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'weekly');
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(
       expect.objectContaining({ enabled: true, schedule: expect.stringMatching(/^weekly@/) })));
   });
@@ -708,9 +708,9 @@ describe('版面继续收敛', () => {
     const save = vi.fn().mockResolvedValue({});
     vi.spyOn(api, 'saveBackupConfig').mockImplementation(save);
     renderPage();
-    await screen.findByText(/数据备份/);
-    await userEvent.selectOptions(screen.getByLabelText('备份计划'), 'off');
-    await userEvent.click(screen.getByRole('button', { name: /保存/ }));
+    await screen.findByText(/Data Backup/);
+    await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'off');
+    await userEvent.click(screen.getByRole('button', { name: /Save/ }));
     // 时刻仍旧带上：下次再开的时候还是原来那个点，不必重填
     await waitFor(() => expect(save).toHaveBeenCalledWith({ enabled: false, schedule: 'daily@03:00' }));
   });
@@ -719,8 +719,8 @@ describe('版面继续收敛', () => {
   it('这排控件占一行，下拉不撑满', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
-    await screen.findByText(/数据备份/);
-    const sel = screen.getByLabelText('备份计划');
+    await screen.findByText(/Data Backup/);
+    const sel = screen.getByLabelText('Backup Schedule');
     expect(sel.style.width).not.toBe('100%');
     const row = screen.getByTestId('backup-controls');
     expect(row.style.flexWrap).not.toBe('wrap');
@@ -729,14 +729,14 @@ describe('版面继续收敛', () => {
   it('备份的表单不再挂标签文字', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
-    await screen.findByText(/数据备份/);
-    expect(screen.queryByText('定时备份')).toBeNull();
-    expect(screen.queryByText('什么时候跑')).toBeNull();
+    await screen.findByText(/Data Backup/);
+    expect(screen.queryByText('Scheduled Backup')).toBeNull();
+    expect(screen.queryByText('When to run')).toBeNull();
     // 右边只补控件算不出来的「下次」，按服务器的钟显示：备份在那台机器上跑。
     const line = screen.getByTestId('backup-controls');
-    expect(line.textContent).toMatch(/下次 2026-08-24 03:00/);
-    expect(line.textContent.match(/每天/g).length).toBe(1);
-    expect(within(line).getByRole('button', { name: /保存/ })).toBeTruthy();
+    expect(line.textContent).toMatch(/Next 2026-08-24 03:00/);
+    expect(line.textContent.match(/Daily/g).length).toBe(1);
+    expect(within(line).getByRole('button', { name: /Save/ })).toBeTruthy();
   });
 });
 
@@ -767,19 +767,19 @@ describe('只读服务的说明挂在它自己身上', () => {
     const rowOf = (name) => Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(name));
 
     // 没点之前，页面上任何地方都没有这句话
-    expect(screen.queryByText(/控制服务自身只读/)).toBeNull();
+    expect(screen.queryByText(/The control service is read-only here/)).toBeNull();
 
-    const mark = within(rowOf('ndiskless')).getByRole('button', { name: /说明$/ });
+    const mark = within(rowOf('ndiskless')).getByRole('button', { name: /Help$/ });
     await userEvent.click(mark);
-    const tip = await screen.findByText(/控制服务自身只读/);
+    const tip = await screen.findByText(/The control service is read-only here/);
     expect(tip.textContent).toMatch(/systemctl restart ndiskless/);
 
     // 再点一次收起
     await userEvent.click(mark);
-    await waitFor(() => expect(screen.queryByText(/控制服务自身只读/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/The control service is read-only here/)).toBeNull());
 
     // 能重启的服务不挂这个问号
-    expect(within(rowOf('ZFS')).queryByRole('button', { name: /说明$/ })).toBeNull();
+    expect(within(rowOf('ZFS')).queryByRole('button', { name: /Help$/ })).toBeNull();
   });
 
   it('点页面别处也收起，不用回去再点一次', async () => {
@@ -787,10 +787,10 @@ describe('只读服务的说明挂在它自己身上', () => {
     renderPage();
     const svc = await screen.findByTestId('node-services');
     const row = Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('ndiskless'));
-    await userEvent.click(within(row).getByRole('button', { name: /说明$/ }));
-    await screen.findByText(/控制服务自身只读/);
+    await userEvent.click(within(row).getByRole('button', { name: /Help$/ }));
+    await screen.findByText(/The control service is read-only here/);
     await userEvent.click(screen.getByTestId('tip-backdrop'));
-    await waitFor(() => expect(screen.queryByText(/控制服务自身只读/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/The control service is read-only here/)).toBeNull());
   });
 
   // 矩阵未返回时每个节点 reachable 都是 undefined，不能画成「读取不到」。
@@ -814,11 +814,11 @@ describe('只读服务的说明挂在它自己身上', () => {
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     // 矩阵还在路上：不能说「读取不到」
-    expect(within(list).queryByText(/读取不到/)).toBeNull();
-    expect(within(list).getAllByText(/读取中/).length).toBeGreaterThan(0);
+    expect(within(list).queryByText(/Unavailable/)).toBeNull();
+    expect(within(list).getAllByText(/Loading/).length).toBeGreaterThan(0);
 
     release();
-    await waitFor(() => expect(within(screen.getByTestId('cluster-nodes')).queryByText(/读取中/)).toBeNull());
+    await waitFor(() => expect(within(screen.getByTestId('cluster-nodes')).queryByText(/Loading/)).toBeNull());
   });
 });
 
@@ -845,14 +845,14 @@ describe('集群节点 · 添加节点', () => {
     const user = userEvent.setup();
     renderPage();
 
-    await user.click(await screen.findByRole('button', { name: /添加节点/ }));
+    await user.click(await screen.findByRole('button', { name: /Add Node/ }));
     expect(await screen.findByText(/192\.168\.10\.4:8080/)).toBeTruthy();
 
     const dialog = screen.getByTestId('adopt-nodes');
     expect(dialog.querySelectorAll('input[type="text"]').length).toBe(0); // 没有任何要填的字段
-    expect(dialog.textContent).not.toContain('池名要与集群一致'); // 各节点池名自己定
-    expect(dialog.textContent).toContain('存储池管理');
-    await user.click(within(dialog).getByRole('button', { name: /加入集群|纳管/ }));
+    expect(dialog.textContent).not.toContain('池名要与集群一致'); // 各Node池名自己定
+    expect(dialog.textContent).toContain('Storage Pool Management');
+    await user.click(within(dialog).getByRole('button', { name: /Join Cluster|纳管/ }));
 
     await waitFor(() => expect(adopt).toHaveBeenCalledWith({ address: '192.168.10.4:8080' }));
   });
@@ -861,7 +861,7 @@ describe('集群节点 · 添加节点', () => {
     stubCluster([], vi.fn());
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole('button', { name: /添加节点/ }));
-    expect(await screen.findByText(/没有发现|未发现/)).toBeTruthy();
+    await user.click(await screen.findByRole('button', { name: /Add Node/ }));
+    expect(await screen.findByText(/No eligible machines found|No eligible machines found/)).toBeTruthy();
   });
 });
