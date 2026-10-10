@@ -206,7 +206,7 @@ it('Disables Super Admin actions while client is online', async () => {
 it('Disables client type editor while online', async () => {
   stubApi({});
   renderPage();
-  const row = (await screen.findByText('Client One')).closest('tr');   // terminal-A: Online、普通
+  const row = (await screen.findByText('Client One')).closest('tr');   // terminal-A: online, regular client
   await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
   expect((await screen.findByRole('button', { name: 'Super Admin' })).disabled).toBe(true);
   expect(screen.getByRole('button', { name: 'Regular Client' }).disabled).toBe(true);
