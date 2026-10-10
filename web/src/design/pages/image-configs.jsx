@@ -10,7 +10,7 @@ import { useResource, useMutation, usePaged } from '../../lib/hooks.js';
 const { useState, useEffect } = React;
 
 const RED_STATE = { ready: { t: "Ready", c: "emerald" }, creating: { t: "Creating", c: "cyan" }, error: { t: "Error", c: "rose" } };
-const namesClause = (names) => names.slice(0, 5).join(", ") + (names.length > 5 ? `  and ${names.length} items` : "");
+const namesClause = (names) => names.slice(0, 5).join(", ") + (names.length > 5 ? `, and ${names.length - 5} more` : "");
 const byTime = (a, b) => (Date.parse(a.CreatedAt) || 0) - (Date.parse(b.CreatedAt) || 0);
 // Match backend rules: the active or sole restore point cannot be deleted; backend handles damaged snapshots.
 const deleteLock = (rp) => {
@@ -232,14 +232,14 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
     const refs = (await listGroups()).filter(g => g.SystemReductionID === rp.ID).map(g => g.Name);
     const warnings = [];
     if (refs.length) warnings.push(`Used by groups ${namesClause(refs)} as a restore point; deletion will fail`);
-    const message = warnings.length ? `Restore point ${redName(rp)}: ${warnings.join("; ")}。确定Delete？` : `Delete restore point ${redName(rp)}？`;
+    const message = warnings.length ? `Restore point ${redName(rp)}: ${warnings.join("; ")}. Delete it?` : `Delete restore point ${redName(rp)}?`;
     if (!(await conf.ask({ title: "Delete Restore Point", message, danger: true, confirmText: "Delete" }))) return;
     await run(() => api.deleteReduction(rp.ID), "Restore-point deletion task submitted", { reload, errMsg: "Deletion failed" });
   };
 
   const deleteSelected = async () => {
     const picked = chosen;
-    if (!(await conf.ask({ title: "Delete Restore Point", message: `Delete ${picked.length} restore points: ${namesClause(picked.map(r => `${r.cfg.Name}/${redName(r)}`))}？Deletion cannot be undone.`, danger: true, confirmText: "Delete" }))) return;
+    if (!(await conf.ask({ title: "Delete Restore Point", message: `Delete ${picked.length} restore points: ${namesClause(picked.map(r => `${r.cfg.Name}/${redName(r)}`))}? Deletion cannot be undone.`, danger: true, confirmText: "Delete" }))) return;
     const failed = [];
     for (const rp of picked) {
       try { await api.deleteReduction(rp.ID); } catch (e) { failed.push(`${redName(rp)}: ${e.message || "Deletion failed"}`); }
@@ -255,9 +255,9 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
     const siblings = catalogue.filter(c => c.ImageID === rp.cfg.ImageID && c.ID !== rp.cfg.ID).map(c => c.Name);
     const later = rp.cfg.reductions.filter(r => byTime(r, rp) > 0).map(redName);
     const message = [
-      `Replace the original contents of image ${redName(rp)} using restore point ${image?.Name || rp.cfg.ImageID}.`,
+      `Replace the original contents of image ${image?.Name || rp.cfg.ImageID} using restore point ${redName(rp)}.`,
       siblings.length ? `Other configurations of this image (${namesClause(siblings)}) will be deleted.` : null,
-      `Configuration ${rp.cfg.Name}'s restore points will be removed, leaving only a new starting point${later.length ? `; newer points ${namesClause(later)} are included` : ""}。`,
+      `Configuration ${rp.cfg.Name}'s restore points will be removed, leaving only a new starting point${later.length ? `; newer points ${namesClause(later)} are included` : ""}.`,
       "Groups using this configuration will switch to the new starting point. This cannot be undone.",
     ].filter(Boolean).join("\n");
     if (!(await conf.ask({ title: "Overwrite Original Image", message, danger: true, confirmText: "Overwrite" }))) return;
@@ -280,7 +280,7 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
       <div className="card" style={{ padding: 0 }}>
         <div style={{ overflowX: "auto" }}><table className="t">
           <thead><tr>
-            <th style={{ width: 36 }}><input type="checkbox" aria-label="选择本页全部Restore Point" checked={allOnPage} disabled={!pageIds.length} onChange={e => setSelected(e.target.checked ? pageIds : [])}/></th>
+            <th style={{ width: 36 }}><input type="checkbox" aria-label="Select all restore points on this page" checked={allOnPage} disabled={!pageIds.length} onChange={e => setSelected(e.target.checked ? pageIds : [])}/></th>
             <th>Restore Point</th><th>Image</th><th>Configuration</th><th>Status</th><th>Created At</th><th className="t-actions"></th>
           </tr></thead>
           <tbody>
@@ -293,7 +293,7 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
               const lock = deleteLock(rp);
               return (
                 <tr key={rp.ID}>
-                  <td><input type="checkbox" aria-label={`选择Restore point ${name}`} checked={!lock && selected.includes(rp.ID)} disabled={!!lock} title={lock || undefined}
+                  <td><input type="checkbox" aria-label={`Select restore point ${name}`} checked={!lock && selected.includes(rp.ID)} disabled={!!lock} title={lock || undefined}
                     onChange={() => setSelected(s => s.includes(rp.ID) ? s.filter(x => x !== rp.ID) : [...s, rp.ID])}/></td>
                   <td>
                     <span className="row" style={{ gap: 6, whiteSpace: "nowrap" }}>
