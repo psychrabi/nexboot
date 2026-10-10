@@ -84,7 +84,7 @@ function PageServers() {
     const where = node.ip || node.id;
     const ok = await conf.ask({
       title: `${action === "restart" ? "Restart" : action === "stop" ? "Stop" : "Start"}Service`,
-      message: `将在 ${where} 上${action === "restart" ? "Restart" : action === "stop" ? "Stop" : "Start"} ${svc.capability || svc.label} (${svc.unit})。`
+      message: `This will ${action === "restart" ? "restart" : action === "stop" ? "stop" : "start"} ${svc.capability || svc.label} (${svc.unit}) on ${where}.`
         + (svc.critical || action === "stop" ? "This is a critical diskless-boot service; connected clients on this node may be affected." : ""),
       danger: action === "stop", confirmText: action === "restart" ? "Restart" : "Confirm",
     });
@@ -122,7 +122,7 @@ function PageServers() {
   };
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* 「Local node」只是此刻持有Virtual IP 的机器，所以不单列Local node信息：表里选一台，下面显示它。 */}
+      {/* The local node simply means the current VIP holder; select a node in the table to view its details below. */}
       <ClusterNodes nodes={nodes} matrix={matrix} matrixReady={matrixReady} selected={selectedId} onSelect={setSelectedId}
         onRefresh={load} onForget={clustered ? forgetNode : null}/>
 
@@ -264,8 +264,8 @@ function scheduleOf(form) {
 
 // Status indicates whether a recoverable copy exists; no configured backup pool is a separate state.
 function nodeBackupChip(n) {
-  if (!n.reachable) return <span className="chip rose">{n.error || "读不到"}</span>;
-  if (!n.backup_pool) return <span className="chip">没有Backup Pool</span>;
+  if (!n.reachable) return <span className="chip rose">{n.error || "Unavailable"}</span>;
+  if (!n.backup_pool) return <span className="chip">No Backup Pool</span>;
   if (n.copying) return <span className="chip cyan"><span className="dot cyan"/>Backing Up</span>;
   if (!n.last_backup_at) return <span className="chip amber">Pending Backup</span>;
   if (n.pending) return <span className="chip amber">Pending Sync</span>;
@@ -395,7 +395,7 @@ function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefres
                   <td className="meta">{m.host?.uptime_sec ? fmtUptime(m.host.uptime_sec) : "—"}</td>
                   <td className="t-actions"><div>
                     {onForget && !n.online && (
-                      <button className="btn ghost icon danger" title="把这台Remove from Cluster"
+                      <button className="btn ghost icon danger" title="Remove this node from cluster"
                         aria-label={`Remove node ${n.ip || n.id}`}
                         onClick={e => { e.stopPropagation(); onForget(n); }}><Icons.Trash size={12}/></button>
                     )}
@@ -486,7 +486,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
   if (!node) {
     return (
       <div className="card" style={{ padding: 16 }}>
-        <span className="meta">还No manageable nodes</span>
+        <span className="meta">No manageable nodes yet</span>
       </div>
     );
   }
@@ -517,7 +517,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
       <>
       <table className="t" style={{ background: "transparent" }}>
         {/* Surface service capability status; keep unit, enablement and PID details collapsed. */}
-        <thead><tr><th>Service</th><th>Status</th><th className="t-actions">操作</th></tr></thead>
+        <thead><tr><th>Service</th><th>Status</th><th className="t-actions">Actions</th></tr></thead>
         <tbody>
           {services.map(svc => {
             const verdict = capabilityState(svc);
@@ -532,7 +532,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
                     {svc.critical && <span className="chip amber">Critical</span>}
                     {/* Attach help to the corresponding row instead of the table footer. */}
                     {svc.read_only && (
-                      <Tip label={`${svc.label || svc.capability}说明`} text="The control service is read-only here. Restarting it would disconnect this session; use systemctl restart ndiskless on that node."/>
+                      <Tip label={`Help for ${svc.label || svc.capability}`} text="The control service is read-only here. Restarting it would disconnect this session; use systemctl restart ndiskless on that node."/>
                     )}
                   </div>
                 </td>
@@ -543,7 +543,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
                 </td>
                 <td className="t-actions"><div>
                   {/* Do not offer Restart for services expected to be stopped: restarting standby dnsmasq
-                      会和Active互相拒绝客户机。只有它确实在跑时才给「Stop」。 */}
+                      could conflict with active DHCP and reject clients. Only offer Stop if it is running. */}
                   {!svc.read_only && svc.installed !== false && (
                     svc.expected === "stopped"
                       ? svc.status === "running" && (
@@ -564,7 +564,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
                 <tr>
                   <td colSpan={3} style={{ background: "var(--bg-0)" }}>
                     <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: 10, padding: "4px 2px" }}>
-                      <Info label="systemd 单元" value={svc.unit}/>
+                      <Info label="systemd Unit" value={svc.unit}/>
                       <Info label="Enable at boot" value={bootText(svc)}/>
                       <Info label="systemd Unit Status" value={svc.expected === "ready"
                         ? `${(SVC_STATUS[svc.status] || SVC_STATUS.unknown).t} (unit exits after boot; service is provided by the kernel)`
