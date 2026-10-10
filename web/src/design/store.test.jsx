@@ -6,15 +6,15 @@ import { api } from '../lib/api.js';
 import { StoreProvider, useStore } from './store.jsx';
 import { onMutation } from '../lib/hooks.js';
 
-// store 支撑侧栏计数、⌘K 面板和告警铃，同时从六个接口加载并持续刷新数小时：
-// 一个接口坏只影响它自己的徽标，数字必须来自后端而非编造。
+// The store supplies sidebar badges, global search and notifications by polling six independent APIs.
+// One API failure must not clear unrelated counters, which come from backend data.
 
 const list = (items) => ({ items, total: items.length });
 
 function stubApi(overrides = {}) {
   const base = {
     listImages: async () => list([{ ID: 'win11', Name: 'Win 11', OSType: 'windows', State: 'normal', Size: 1e9, CreatedAt: '2026-07-30T10:00:00Z' }]),
-    listGroups: async () => list([{ ID: 'g-1', Name: '教学一班', SystemImageID: 'win11', ClientMax: 30, StartIP: '192.168.50.1' }]),
+    listGroups: async () => list([{ ID: 'g-1', Name: 'Classroom A', SystemImageID: 'win11', ClientMax: 30, StartIP: '192.168.50.1' }]),
     listTerminals: async () => list([
       { ID: 't-1', MAC: 'AABBCCDDEE01', IP: '192.168.50.1', GroupID: 'g-1', State: 'online', IsSuper: false },
       { ID: 't-2', MAC: 'AABBCCDDEE02', IP: '192.168.50.2', GroupID: 'g-1', State: 'offline', IsSuper: true },
@@ -37,28 +37,28 @@ function Probe() {
       <span data-testid="counts">{`${s.images.length}/${s.groups.length}/${s.terminals.length}/${s.pools.length}/${s.alarms.length}`}</span>
       <span data-testid="group">{s.groups[0] ? `${s.groups[0].name}·${s.groups[0].image}·${s.groups[0].online}` : ''}</span>
       <span data-testid="route">{s.route.page}</span>
-      <button onClick={() => s.goto('images', { imageId: 'win11' })}>去镜像页</button>
-      <button onClick={() => s.toast('保存成功', 'ok')}>提示</button>
-      <button onClick={() => s.toast('删除失败：仍被占用', 'err')}>报错</button>
+      <button onClick={() => s.goto('images', { imageId: 'win11' })}>Go to Images</button>
+      <button onClick={() => s.toast('Saved successfully', 'ok')}>Notify</button>
+      <button onClick={() => s.toast('Delete failed: resource is still in use', 'err')}>Show Error</button>
     </div>
   );
 }
 
 const renderStore = () => render(<StoreProvider><Probe/></StoreProvider>);
 
-describe('全局 store', () => {
+describe('Global store', () => {
   beforeEach(() => stubApi());
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
-  it('从后端把各处徽标的数字灌进来', async () => {
+  it('Populates badge counts from backend responses', async () => {
     renderStore();
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1/2/1/1'));
-    // 分组卡片解析镜像名，只统计在线客户机。
-    expect(screen.getByTestId('group').textContent).toBe('教学一班·Win 11·1');
+    // Group cards resolve image names and count only online clients.
+    expect(screen.getByTestId('group').textContent).toBe('Classroom A·Win 11·1');
   });
 
-  // 任一页面写入成功后 store 立即重读，徽标不能等下一次 30 秒刷新。
-  it('页面操作成功后立即重读，徽标不再滞后', async () => {
+  // After successful mutations, reload immediately rather than waiting for the next 30-second poll.
+  it('Refreshes badges immediately after successful mutations', async () => {
     let images = [{ ID: 'win11', Name: 'Win 11', OSType: 'windows', State: 'normal', Size: 1e9, CreatedAt: '2026-07-30T10:00:00Z' },
       { ID: 'ubuntu', Name: 'Ubuntu', OSType: 'linux', State: 'normal', Size: 1e9, CreatedAt: '2026-07-30T10:00:00Z' }];
     stubApi({ listImages: async () => list(images) });
@@ -70,14 +70,14 @@ describe('全局 store', () => {
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1/2/1/1'));
   });
 
-  // 六个接口各自独立完成：告警接口故障不能让侧栏全空（单个 Promise.all 就会这样）。
-  it('某个接口挂了只丢它自己那一格', async () => {
+  // Independently settle all six API requests; one alert failure must not blank the sidebar.
+  it('Isolates individual API failures', async () => {
     stubApi({ listAlarms: async () => { throw new Error('500'); } });
     renderStore();
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1/2/1/0'));
   });
 
-  it('后端为空时显示真零，而不是样例数据', async () => {
+  it('Shows zero for empty backend data instead of placeholders', async () => {
     stubApi({
       listImages: async () => list([]), listGroups: async () => list([]),
       listTerminals: async () => list([]), listPools: async () => list([]),
@@ -87,33 +87,33 @@ describe('全局 store', () => {
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('0/0/0/0/0'));
   });
 
-  it('goto 带着参数换页', async () => {
+  it('Preserves route parameters in goto', async () => {
     renderStore();
-    await userEvent.click(screen.getByText('去镜像页'));
+    await userEvent.click(screen.getByText('Go to Images'));
     expect(screen.getByTestId('route').textContent).toBe('images');
   });
 
-  // 错误提示比成功提示停留更久，因为带有操作者可能要读的后端细节。
-  it('错误提示比成功提示留得久', async () => {
+  // Keep error toasts visible longer than success toasts so backend details can be read.
+  it('Keeps error toasts longer than success toasts', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
     renderStore();
 
-    await user.click(screen.getByText('提示'));
-    await user.click(screen.getByText('报错'));
-    expect(screen.getByText('保存成功')).toBeTruthy();
-    expect(screen.getByText('删除失败：仍被占用')).toBeTruthy();
+    await user.click(screen.getByText('Notify'));
+    await user.click(screen.getByText('Show Error'));
+    expect(screen.getByText('Saved successfully')).toBeTruthy();
+    expect(screen.getByText('Delete failed: resource is still in use')).toBeTruthy();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
-    expect(screen.queryByText('保存成功')).toBeNull();
-    expect(screen.getByText('删除失败：仍被占用')).toBeTruthy();
+    expect(screen.queryByText('Saved successfully')).toBeNull();
+    expect(screen.getByText('Delete failed: resource is still in use')).toBeTruthy();
 
     await act(async () => { await vi.advanceTimersByTimeAsync(4000); });
-    expect(screen.queryByText('删除失败：仍被占用')).toBeNull();
+    expect(screen.queryByText('Delete failed: resource is still in use')).toBeNull();
   });
 
-  // 会话会持续数小时，只在挂载时加载会让徽标整天过时。
-  it('任务列表持续刷新', async () => {
+  // Sessions run for hours; polling keeps sidebar counters current.
+  it('Keeps refreshing tasks', async () => {
     vi.useFakeTimers({ shouldAdvanceTime: true });
     renderStore();
     await waitFor(() => expect(api.listTasks).toHaveBeenCalled());
@@ -124,11 +124,11 @@ describe('全局 store', () => {
   });
 });
 
-// 徽标与存储池页一样按「各节点自报的池」计数，否则复制未追平时两处数字不一致。
-describe('侧边栏存储池徽标', () => {
+// Count pools reported by each node, as Storage Management does, to avoid replication lag inconsistencies.
+describe('Sidebar Storage Pool Badge', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('集群里按各节点上报的池数，和存储池页对得上', async () => {
+  it('Uses per-node pool counts in clusters', async () => {
     stubApi({
       listPools: async () => list([{ ID: 'pool-a', Name: 'tank' }, { ID: 'pool-b', Name: 'tank' }]),
       listClusterNodes: async () => list([{ id: 'n1' }, { id: 'n2' }, { id: 'n3' }]),
@@ -145,7 +145,7 @@ describe('侧边栏存储池徽标', () => {
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1/2/3/1'));
   });
 
-  it('单机不绕集群接口，仍用本机的池列表', async () => {
+  it('Uses the local pool list on standalone servers', async () => {
     stubApi({
       listPools: async () => list([{ ID: 'pool-a', Name: 'tank' }]),
       listClusterNodes: async () => list([{ id: 'n1' }]),
@@ -154,7 +154,7 @@ describe('侧边栏存储池徽标', () => {
     await waitFor(() => expect(screen.getByTestId('counts').textContent).toBe('1/1/2/1/1'));
   });
 
-  it('集群接口挂了就退回本机池列表，徽标不空掉', async () => {
+  it('Falls back to local pool list on cluster API errors', async () => {
     stubApi({
       listPools: async () => list([{ ID: 'pool-a', Name: 'tank' }, { ID: 'pool-b', Name: 'tank' }]),
       listClusterNodes: async () => list([{ id: 'n1' }, { id: 'n2' }]),
@@ -165,8 +165,8 @@ describe('侧边栏存储池徽标', () => {
   });
 });
 
-// 后端返回内容不变时，轮询重读不能产生新引用触发整棵树重渲染。
-describe('重读不该把没变的东西换个身份', () => {
+// Polling identical content must preserve references to prevent unnecessary renders.
+describe('Polling retains identity for unchanged data', () => {
   beforeEach(() => stubApi());
   afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
@@ -176,7 +176,7 @@ describe('重读不该把没变的东西换个身份', () => {
     return <span data-testid="n">{s.tasks.length}</span>;
   }
 
-  it('内容没变时，消费者拿到的还是同一批数组', async () => {
+  it('Retains stable array references when content is unchanged', async () => {
     const rows = [{ ID: 'task-1', Type: 'import_image', Status: 'running', Progress: 10, CreatedAt: '2026-08-24T00:00:00Z' }];
     stubApi({ listTasks: async () => list(rows) });
     const renders = [];
@@ -184,7 +184,7 @@ describe('重读不该把没变的东西换个身份', () => {
     await waitFor(() => expect(screen.getByTestId('n').textContent).toBe('1'));
     const settled = renders[renders.length - 1];
 
-    // 再读一遍，后端返回同样的内容
+    // Repeat the request with identical backend data.
     await act(async () => { onMutation.emit(); await Promise.resolve(); });
     await act(async () => { await Promise.resolve(); });
 
@@ -193,7 +193,7 @@ describe('重读不该把没变的东西换个身份', () => {
     expect(after.images).toBe(settled.images);
   });
 
-  it('内容真变了才换身份', async () => {
+  it('Replaces references only when content changes', async () => {
     let rows = [];
     stubApi({ listTasks: async () => list(rows) });
     const renders = [];
