@@ -225,9 +225,9 @@ describe('StandbyBanner', () => {
       takeover: { phase: 'refused', reason: 'Node node-a remains healthy and active. This node declines takeover to preserve acknowledged writes; VIP is released back to it' } }) });
     wrap(<StandbyBanner/>);
     await waitFor(() => expect(screen.getByText(/has not become active/)).toBeTruthy());
-    expect(screen.getByText(/node-a is still healthyActive/)).toBeTruthy();
+    expect(screen.getByText(/node-a remains healthy and active/)).toBeTruthy();
     expect(screen.getByText(/within a few minutes/)).toBeTruthy();
-    expect(screen.queryByText(/Perform administrative operations onActive/)).toBeNull();
+    expect(screen.queryByText(/Perform administrative operations on the active node/)).toBeNull();
   });
 
   it('Catalogue catch-up explains takeover in progress', async () => {
