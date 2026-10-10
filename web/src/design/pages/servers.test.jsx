@@ -588,7 +588,7 @@ describe('Per-node Data Backup', () => {
     expect(await screen.findByLabelText('Time')).toBeTruthy();
   });
 
-  it('Shows each node's copy availability and timestamp', async () => {
+  it("Shows each node's copy availability and timestamp", async () => {
     stubBackups();
     renderPage();
     const panel = await screen.findByTestId('backup-nodes');
