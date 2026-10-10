@@ -1,18 +1,18 @@
-// ── 浮层体系 ───────────────────────────────────────────────────────────
-// 统一管理遮罩、z-index、进场动画、ESC 关闭、点背板关闭和 body 滚动锁定，保证各弹层定位一致。
-// `placement` 选锚点：center（弹窗）、drawer（右侧）、top（命令面板）。
+// Overlay system ──────────────────────────────────────────────────────────
+// Coordinate backdrops, stacking order, transitions, Escape/backdrop dismissal, and body scroll locking.
+// The placement option selects center (modal), drawer (right), or top (command palette).
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons.jsx';
 
 const MODAL_SIZE = { sm: 440, md: 560, lg: 700, xl: 820 };
-// 共享栈保证嵌套浮层正确：ESC 只关最上层，最后一个浮层卸载后才释放 body 滚动锁定。
+// A shared stack ensures Escape closes only the topmost overlay; unlock scrolling after the final overlay closes.
 const overlayStack = [];
-// 滚动锁原值只在栈从空变非空时记一次；各层各自记录会把别层设的 "hidden" 当成原值，全关后滚动锁死。
+// Capture the original scroll style once, when the stack first becomes nonempty; otherwise nested overlays can leave scrolling locked.
 let bodyOverflowBeforeLock = "";
 
 function Overlay({ open, onClose, placement = "center", size = "md", width, closeOnBackdrop = true, className, panelStyle, children }) {
-  // 调用方多传内联 onClose；放进 effect 依赖会让每次重渲染都把本层重新压到栈顶，ESC 关错层。
+  // Callers often pass inline onClose handlers; putting them in effect dependencies would reorder the stack every render.
   const onCloseRef = React.useRef(onClose);
   onCloseRef.current = onClose;
   React.useEffect(() => {
@@ -53,8 +53,8 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
     scrim.placeItems = "center";
     panel = { width: w, maxWidth: "94vw", maxHeight: "min(85vh, 720px)" };
   }
-  // Portal 到 <body>，让 fixed 遮罩脱离带 transform/filter 的祖先（如 .main 内容区），
-  // 否则会被困住、居中弹窗偏到右边。
+  // Portal into <body> to keep fixed backdrops out of ancestors with transform/filter, such as the .main area,
+  // which would otherwise shift centered dialogs.
   return createPortal(
     <div style={scrim} onClick={() => closeOnBackdrop && onClose && onClose()}>
       <div onClick={e => e.stopPropagation()} className={className}
@@ -66,7 +66,7 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
   );
 }
 
-// Modal 是居中变体，带标准卡片框（标题 + 关闭 + 底栏）。
+// Modal is the centered variant with a standard card, title, close control, and footer.
 function Modal({ open, onClose, title, children, footer, size = "md", width }) {
   return (
     <Overlay open={open} onClose={onClose} placement="center" size={size} width={width} className="card">
@@ -80,8 +80,8 @@ function Modal({ open, onClose, title, children, footer, size = "md", width }) {
   );
 }
 
-// 确认弹窗。`typeToConfirm: "<name>"` 要求输入该名称后才解锁确认按钮，用于不可逆的数据销毁操作。
-// 弹窗自己渲染，调用方只拿到 `ask`；若要求调用方自己放置节点，漏放时 Promise 永远不会 resolve。
+// For irreversible deletion, typeToConfirm requires entering the exact resource name before confirmation is enabled.
+// Render the dialog here, exposing only ask; requiring callers to mount the node could leave promises unresolved.
 const ConfirmContext = React.createContext(null);
 
 function ConfirmProvider({ children }) {
@@ -97,16 +97,16 @@ function ConfirmProvider({ children }) {
     <ConfirmContext.Provider value={ask}>
       {children}
       {state && (
-        <Modal open size="sm" onClose={() => close(false)} title={state.title || "确认操作"}
+        <Modal open size="sm" onClose={() => close(false)} title={state.title || "Confirm Action"}
           footer={<>
-            <button className="btn" onClick={() => close(false)}>取消</button>
-            <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={locked} onClick={() => close(true)}>{state.confirmText || "确认"}</button>
+            <button className="btn" onClick={() => close(false)}>Cancel</button>
+            <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={locked} onClick={() => close(true)}>{state.confirmText || "Confirm"}</button>
           </>}>
           <div style={{ fontSize: 14, color: "var(--fg-mute)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{state.message}</div>
           {state.typeToConfirm && (
             <div style={{ marginTop: 12 }}>
               <div style={{ fontSize: 12, color: "var(--fg-faint)", marginBottom: 6 }}>
-                请输入 <span className="mono" style={{ color: "var(--rose)", fontWeight: 600 }}>{state.typeToConfirm}</span> 以确认：
+                Enter <span className="mono" style={{ color: "var(--rose)", fontWeight: 600 }}>{state.typeToConfirm}</span> to confirm:
               </div>
               <input className="input mono" style={{ width: "100%" }} value={typed} autoFocus
                 onChange={e => setTyped(e.target.value)} placeholder={state.typeToConfirm}/>
@@ -118,10 +118,10 @@ function ConfirmProvider({ children }) {
   );
 }
 
-// useConfirm 返回 ask 函数。`node` 保留为无作用的值，使现有的 `{conf.node}` 写法在页面迁移期间仍有效。
+// useConfirm returns ask. Keep the inert node property for backwards compatibility while pages migrate.
 function useConfirm() {
   const ask = React.useContext(ConfirmContext);
-  if (!ask) throw new Error("useConfirm 需要 ConfirmProvider 包裹");
+  if (!ask) throw new Error("useConfirm must be wrapped in ConfirmProvider");
   return { ask, node: null };
 }
 
