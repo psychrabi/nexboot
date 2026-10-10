@@ -139,8 +139,8 @@ export function HACard() {
           <button className="btn primary" disabled={busy} onClick={doSwitch}>{busy ? 'Switching…' : 'Switch'}</button>
         </>}>
         <div className="hint">
-          先把Catalogue Replication追平（最多等 3 分钟，追不平则保持本机为主并放弃Switch），然后本机重启为Standby、
-          Virtual IP 漂到一台Standby。<b>运行中的普通客户机会重启一次</b>（约 2~4 分钟回到桌面），超管机未保存的会话会丢失——请选无人上课的时间。
+          First catch up catalogue replication (up to 3 minutes; cancel if synchronization fails). Then this node restarts as standby and 
+          the virtual IP moves to a standby node. <b>Running regular clients will restart once</b> (approximately 2–4 minutes to return to the desktop). Unsaved Super Admin sessions will be lost; schedule this during downtime.
         </div>
       </Modal>
     </div>
@@ -164,7 +164,7 @@ function StandaloneCluster() {
 
   return (
     <>
-      <div className="hint">本机是独立节点，未加入任何集群。</div>
+      <div className="hint">This node is standalone and is not part of a cluster.</div>
       <div style={{ marginTop: 12, display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
         <button className="btn primary" onClick={() => setCreating(true)}>Create Cluster…</button>
         <span className="hint">Create the cluster on the first node; add other nodes through Server Management.</span>
@@ -238,7 +238,7 @@ export function StandbyBanner() {
       <Icons.Shield size={14}/>
       <span>This is a standby node (read-only replica). Perform administrative operations on the active node</span>
       <a className="mono" href={ha.peer_url} style={{ color: 'var(--cyan)' }}>{ha.peer_url}</a>
-      <span>进行。</span>
+      <span> .</span>
     </div>
   );
 }
