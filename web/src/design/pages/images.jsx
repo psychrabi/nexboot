@@ -339,7 +339,7 @@ function PageImages() {
         })}
         {!filtered.length && (
           <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--fg-faint)", fontSize: 13, gridColumn: "1 / -1" }}>
-            {loading ? "加载中…" : error ? `加载失败：${error}` : images.length ? "No images match the filters" : "No images. Use Import Image or Create Data Disk."}
+            {loading ? "Loading…" : error ? `Load failed: ${error}` : images.length ? "No images match the filters" : "No images. Use Import Image or Create Data Disk."}
           </div>
         )}
       </div>}
@@ -350,7 +350,7 @@ function PageImages() {
           <button className="btn danger" onClick={doDeleteImage}><Icons.Trash size={12}/> Delete Image</button>
         </>}>
         {!selImage ? (
-          <div style={{ padding: "4px 0", fontSize: 13, color: "var(--fg-faint)" }}>未选中Image</div>
+          <div style={{ padding: "4px 0", fontSize: 13, color: "var(--fg-faint)" }}>No image selected</div>
         ) : (
           <>
             <div className="row" style={{ gap: 10, marginBottom: 12, fontSize: 13 }}>
@@ -395,12 +395,12 @@ function PageImages() {
             hint={sources
               ? `Directory is on active node ${sources.node || "?"} at ${sources.import_dir} — copy files to this host via SCP to make them available.`
                 + "An HA switchover during import will fail the task; check Task Center."
-                + (sources.pool_available != null ? ` · 存储池可用 ${fmtGiB(sources.pool_available)}` : "")
+                + (sources.pool_available != null ? ` · Available pool space: ${fmtGiB(sources.pool_available)}` : "")
               : "Loading server directory…"}>
             <div style={{ border: "1px solid var(--line)", borderRadius: 6, maxHeight: 220, overflowY: "auto" }}>
               {(sources?.items || []).length === 0 && (
                 <div className="hint" style={{ padding: 12 }}>
-                  {sources ? "No importable files found in this directory" : "读取中…"}
+                  {sources ? "No importable files found in this directory" : "Loading…"}
                 </div>
               )}
               {(sources?.items || []).map(f => (
@@ -421,7 +421,7 @@ function PageImages() {
               ? "After upload, the image can be imported and synchronized to all cluster nodes"
               : "You can import after upload completes")
               + ". Upload is resumable: reselect the same file after interruption."
-              + (importPoolAvail != null ? ` · 存储池可用 ${fmtGiB(importPoolAvail)}` : "")}>
+              + (importPoolAvail != null ? ` · Available pool space: ${fmtGiB(importPoolAvail)}` : "")}>
             <input className="input" type="file" style={{ width: "100%" }} disabled={up && up.state === "uploading"}
               onChange={e => uploadFile(e.target.files && e.target.files[0])}/>
             {up && (
@@ -457,7 +457,7 @@ function PageImages() {
       {/* Create blank data disk */}
       <Modal open={modal === "blank"} onClose={() => !busy && setModal(null)} title="Create Data Disk"
         footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={doCreateBlank}>{busy ? "Submitting…" : "Create"}</button></>}>
-        <Field label="Data Disk名称" required><input className="input" aria-label="Data Disk名称" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="games-d"/></Field>
+        <Field label="Data Disk Name" required><input className="input" aria-label="Data Disk Name" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="games-d"/></Field>
         <Field label="Size" required hint="Thin provisioned; consumes only written space and cannot be shrunk.">
           <div className="row" style={{ gap: 8 }}>
             <input className="input mono" type="number" min="1" step="1" aria-label="Size" style={{ width: 120 }} value={form.size_gib ?? 100} onChange={e => setForm({ ...form, size_gib: e.target.value })}/>
