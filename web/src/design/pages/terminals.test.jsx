@@ -357,7 +357,7 @@ it('Clarifies that saving restore points retains Super Admin status', async () =
 it('Keeps client type constraints visible while help is collapsed', async () => {
   stubApi({});
   renderPage();
-  const row = (await screen.findByText('Art Room Client')).closest('tr');  // terminal-C：OfflineRegular Client
+  const row = (await screen.findByText('Art Room Client')).closest('tr');  // terminal-C: offline regular client
   await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
 
   expect(await screen.findByText(/Only one Super Admin can use a configuration at a time/)).toBeTruthy();
