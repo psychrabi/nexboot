@@ -80,7 +80,7 @@ function PageOverview() {
         <StatCard label="Online Clients" value={online} unit={`/ ${terminals.length}`} accent="emerald" sub={`${terminals.length} registered clients`}/>
         <StatCard label="Client Groups" value={groups.length} unit="groups" accent="cyan" sub={`Capacity ${capacity} clients`}/>
         <StatCard label="Storage Pools" value={poolCount} unit="pools" accent="violet" sub={`Used ${fmtCap(usedCap)} · Available ${fmtCap(totalCap - usedCap)}`}/>
-        <StatCard label="Images" value={images.length} unit="pools" accent="amber" sub={`${images.filter(i => i.OSType === "windows").length} Win · ${images.filter(i => i.OSType === "linux").length} Linux`}/>
+        <StatCard label="Images" value={images.length} unit="images" accent="amber" sub={`${images.filter(i => i.OSType === "windows").length} Win · ${images.filter(i => i.OSType === "linux").length} Linux`}/>
       </div>
 
       {!loading && terminals.length === 0 && (
