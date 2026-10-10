@@ -28,7 +28,7 @@ it('Displays failed task reasons without expansion', async () => {
       Error: 'D: is still being written; wait for writes to finish before publishing', CreatedAt: new Date().toISOString(), FinishedAt: new Date().toISOString() },
   ]);
   renderPage();
-  expect(await screen.findByText(/D: 正在写入/)).toBeTruthy();
+  expect(await screen.findByText(/D: is still being written/)).toBeTruthy();
 });
 
 // Task names should match UI actions, e.g. Shut Down and Save Restore Point, not an internal action.
