@@ -1,4 +1,4 @@
-// 操作日志由审计中间件自动记录，登录日志（含失败）由登录处理器记录。
+// Operation logs are recorded by audit middleware; login attempts are logged by the login handler.
 import React from 'react';
 import { Icons } from '../icons.jsx';
 import { Select, SearchBox, TableState, Pager } from '../primitives.jsx';
@@ -7,7 +7,7 @@ import { useResource, usePageState } from '../../lib/hooks.js';
 import { fmtDateTimeSec as fmtDateTime } from '../../lib/format.js';
 const { useState } = React;
 
-const MODULES = ["镜像", "终端", "分组", "存储", "用户", "服务器", "备份", "驱动", "适配", "日志", "系统"];
+const MODULES = [["镜像", "Images"], ["终端", "Clients"], ["分组", "Groups"], ["存储", "Storage"], ["用户", "Users"], ["服务器", "Servers"], ["备份", "Backups"], ["驱动", "Drivers"], ["适配", "Adaptation"], ["日志", "Logs"], ["系统", "System"]];
 const fmtCost = (ms) => {
   ms = Number(ms || 0);
   if (ms <= 0) return "—";
@@ -40,27 +40,27 @@ function PageLogs() {
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div className="tabs">
-        <div className={`tab ${isOp ? "active" : ""}`} onClick={() => switchTab("operation")}>操作日志</div>
-        <div className={`tab ${!isOp ? "active" : ""}`} onClick={() => switchTab("login")}>登录日志</div>
+        <div className={`tab ${isOp ? "active" : ""}`} onClick={() => switchTab("operation")}>Operation Logs</div>
+        <div className={`tab ${!isOp ? "active" : ""}`} onClick={() => switchTab("login")}>Login Logs</div>
         <div style={{ flex: 1 }}/>
       </div>
 
       <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <SearchBox value={q} onChange={setQ} onSubmit={apply} placeholder={isOp ? "用户 / 操作 / 详情" : "用户 / 消息"}/>
-        {isOp && <Select value={moduleF} onChange={v => { setModuleF(v); setPage(1); }} options={[{ value: "", label: "全部模块" }, ...MODULES.map(m => ({ value: m, label: m }))]} style={{ width: 130 }}/>}
-        <Select value={statusF} onChange={v => { setStatusF(v); setPage(1); }} options={[{ value: "", label: "全部状态" }, { value: "ok", label: "成功" }, { value: "err", label: "失败" }]} style={{ width: 110 }}/>
-        <button className="btn" onClick={() => apply()}><Icons.Search size={12}/> 查询</button>
+        <SearchBox value={q} onChange={setQ} onSubmit={apply} placeholder={isOp ? "User / Action / Details" : "User / Message"}/>
+        {isOp && <Select value={moduleF} onChange={v => { setModuleF(v); setPage(1); }} options={[{ value: "", label: "All Modules" }, ...MODULES.map(([value, label]) => ({ value, label }))]} style={{ width: 130 }}/>}
+        <Select value={statusF} onChange={v => { setStatusF(v); setPage(1); }} options={[{ value: "", label: "All Statuses" }, { value: "ok", label: "Success" }, { value: "err", label: "Failed" }]} style={{ width: 110 }}/>
+        <button className="btn" onClick={() => apply()}><Icons.Search size={12}/> Search</button>
         <div style={{ flex: 1 }}/>
-        <span className="meta">共 {total} 条</span>
+        <span className="meta">Total {total} entries</span>
         <button className="btn ghost icon" onClick={() => load()}><Icons.Refresh size={14}/></button>
       </div>
 
       <div className="card" style={{ padding: 0 }}>
         <table className="t">
           {isOp ? (
-            <thead><tr><th>时间</th><th>用户</th><th>模块</th><th>操作</th><th>详情</th><th>IP</th><th>耗时</th><th>状态</th></tr></thead>
+            <thead><tr><th>Time</th><th>User</th><th>Module</th><th>Action</th><th>Details</th><th>IP</th><th>Duration</th><th>Status</th></tr></thead>
           ) : (
-            <thead><tr><th>时间</th><th>用户</th><th>IP</th><th>客户端</th><th>结果</th><th>状态</th></tr></thead>
+            <thead><tr><th>Time</th><th>User</th><th>IP</th><th>Client</th><th>Result</th><th>Status</th></tr></thead>
           )}
           <tbody>
             {items.map(l => isOp ? (
@@ -72,7 +72,7 @@ function PageLogs() {
                 <td className="mono muted ellip" style={{ fontSize: 12, maxWidth: 280 }} title={l.Detail || ""}>{l.Detail || "—"}</td>
                 <td className="mono muted" style={{ fontSize: 12 }}>{l.IP || "—"}</td>
                 <td className="mono muted" style={{ fontSize: 12 }}>{fmtCost(l.CostMs)}</td>
-                <td>{l.Status === "ok" ? <span className="chip emerald">成功</span> : <span className="chip rose">失败{l.HTTPStatus ? ` · ${l.HTTPStatus}` : ""}</span>}</td>
+                <td>{l.Status === "ok" ? <span className="chip emerald">Success</span> : <span className="chip rose">Failed{l.HTTPStatus ? ` · ${l.HTTPStatus}` : ""}</span>}</td>
               </tr>
             ) : (
               <tr key={l.ID}>
@@ -81,10 +81,10 @@ function PageLogs() {
                 <td className="mono">{l.IP || "—"}</td>
                 <td className="muted ellip" style={{ fontSize: 12, maxWidth: 320 }} title={l.UserAgent || ""}>{l.UserAgent || "—"}</td>
                 <td>{l.Action || "—"}</td>
-                <td>{l.Status === "ok" ? <span className="chip emerald">成功</span> : <span className="chip rose">失败</span>}</td>
+                <td>{l.Status === "ok" ? <span className="chip emerald">Success</span> : <span className="chip rose">Failed</span>}</td>
               </tr>
             ))}
-            <TableState colSpan={isOp ? 8 : 6} loading={loading} error={error} empty={!items.length} hint="暂无日志"/>
+            <TableState colSpan={isOp ? 8 : 6} loading={loading} error={error} empty={!items.length} hint="No logs"/>
           </tbody>
         </table>
         <Pager {...pager(total)}/>

@@ -58,7 +58,7 @@ const renderPage = () => render(
 // 配置和还原点在镜像详情弹窗里，从卡片打开。
 async function openDetail(name = 'Win 11') {
   await userEvent.click(await screen.findByText(name));
-  return screen.findByText('配置概况');
+  return screen.findByText('Configuration Overview');
 }
 
 describe('镜像页', () => {
@@ -73,15 +73,15 @@ describe('镜像页', () => {
     renderPage();
     await openDetail();
 
-    await userEvent.click(screen.getByRole('button', { name: /导出镜像/ }));
-    expect(screen.getByText(/导出内容为镜像导入时的初始数据/)).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /下载到本地/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Export Image/ }));
+    expect(screen.getByText(/Exports the initially imported image/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Download Locally/ }));
     await waitFor(() => expect(exportImageTicket).toHaveBeenCalledWith('win11', false));
     expect(click).toHaveBeenCalled();
 
     // 盘对盘导出也在，两条并存
-    await userEvent.click(screen.getByRole('button', { name: /导出镜像/ }));
-    expect(screen.getByRole('button', { name: /导出到服务器目录/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Export Image/ }));
+    expect(screen.getByRole('button', { name: /Export to Server Directory/ })).toBeTruthy();
   });
 
   // 勾选压缩必须带进票据请求，否则文件名是 .zfs.gz、内容却是未压缩流。
@@ -92,17 +92,17 @@ describe('镜像页', () => {
     renderPage();
     await openDetail();
 
-    await userEvent.click(screen.getByRole('button', { name: /导出镜像/ }));
-    await userEvent.click(screen.getByLabelText('gzip 压缩'));
-    await userEvent.click(screen.getByRole('button', { name: /下载到本地/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Export Image/ }));
+    await userEvent.click(screen.getByLabelText('gzip Compression'));
+    await userEvent.click(screen.getByRole('button', { name: /Download Locally/ }));
     await waitFor(() => expect(exportImageTicket).toHaveBeenCalledWith('win11', true));
   });
 
   // 卡片同时显示逻辑大小和实占；实占未知时显示未知，不显示 0。
   it('镜像卡片同时给出逻辑大小和实际占用', async () => {
     renderPage();
-    expect(await screen.findByText('逻辑 32.0 GiB · 实占 8.5 GiB')).toBeTruthy();
-    expect(screen.getByText('逻辑 8.0 GiB · 实占 —')).toBeTruthy();
+    expect(await screen.findByText('Logical 32.0 GiB · Allocated 8.5 GiB')).toBeTruthy();
+    expect(screen.getByText('Logical 8.0 GiB · Allocated —')).toBeTruthy();
   });
 
   // 导入弹窗显示池剩余空间，选中的文件放不下时当场提示，不等上传或导入失败。
@@ -114,14 +114,14 @@ describe('镜像页', () => {
     });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
-    expect(dlg.textContent).toMatch(/存储池可用 20\.0 GiB/);
+    await userEvent.click(screen.getByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
+    expect(dlg.textContent).toMatch(/Available pool space: 20\.0 GiB/);
 
     const huge = new File(['x'], 'huge.raw');
     Object.defineProperty(huge, 'size', { value: 300 * 1024 ** 3 });
     await userEvent.upload(dlg.querySelector('input[type="file"]'), huge);
-    await waitFor(() => expect(dlg.textContent).toMatch(/放不下/));
+    await waitFor(() => expect(dlg.textContent).toMatch(/Insufficient pool space/));
     expect(beginUpload).not.toHaveBeenCalled();
   });
 
@@ -129,11 +129,11 @@ describe('镜像页', () => {
   it('镜像页按用途、系统筛选', async () => {
     renderPage();
     await screen.findByText('Games D');
-    await userEvent.selectOptions(screen.getByLabelText('按用途筛选'), 'data');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by Purpose'), 'data');
     await waitFor(() => expect(screen.queryByText('Win 11')).toBeNull());
     expect(screen.getByText('Games D')).toBeTruthy();
-    await userEvent.selectOptions(screen.getByLabelText('按用途筛选'), 'all');
-    await userEvent.selectOptions(screen.getByLabelText('按系统筛选'), 'linux');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by Purpose'), 'all');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by OS'), 'linux');
     await waitFor(() => expect(screen.queryByText('Win 11')).toBeNull());
     expect(screen.getByText('Ubuntu')).toBeTruthy();
   });
@@ -142,13 +142,13 @@ describe('镜像页', () => {
   it('详情弹窗概括配置，不在这里增删改', async () => {
     renderPage();
     await userEvent.click(await screen.findByText('Win 11'));
-    const dialog = (await screen.findByText('配置概况')).closest('.card');
+    const dialog = (await screen.findByText('Configuration Overview')).closest('.card');
     expect(await within(dialog).findByText('default')).toBeTruthy();
-    expect(within(dialog).getByText(/当前还原点 0/)).toBeTruthy();
-    expect(within(dialog).queryByRole('button', { name: /新建配置|派生|合并/ })).toBeNull();
-    await userEvent.click(within(dialog).getByRole('button', { name: '管理还原点 default' }));
-    expect((await screen.findByLabelText('按配置筛选')).value).toBe('win11_default');
-    expect(screen.getByLabelText('按镜像筛选').value).toBe('win11');
+    expect(within(dialog).getByText(/Current restore point 0/)).toBeTruthy();
+    expect(within(dialog).queryByRole('button', { name: /Create Configuration|Fork|Merge/ })).toBeNull();
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Manage Restore Points default' }));
+    expect((await screen.findByLabelText('Filter by Configuration')).value).toBe('win11_default');
+    expect(screen.getByLabelText('Filter by Image').value).toBe('win11');
   });
 
   // 页面可新建空数据盘：名称、大小、文件系统。
@@ -157,19 +157,19 @@ describe('镜像页', () => {
     stubApi({ createBlankImage });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /新建数据盘/ }));
-    await userEvent.type(await screen.findByLabelText('数据盘名称'), '游戏盘');
-    await userEvent.clear(screen.getByLabelText('大小'));
-    await userEvent.type(screen.getByLabelText('大小'), '200');
-    await userEvent.selectOptions(screen.getByLabelText('文件系统'), 'ntfs');
+    await userEvent.click(screen.getByRole('button', { name: /Create Data Disk/ }));
+    await userEvent.type(await screen.findByLabelText('Data Disk Name'), '游戏盘');
+    await userEvent.clear(screen.getByLabelText('Size'));
+    await userEvent.type(screen.getByLabelText('Size'), '200');
+    await userEvent.selectOptions(screen.getByLabelText('File System'), 'ntfs');
     // 卷标可选：留空则不提交（即用名称），填写则原样提交。
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(createBlankImage).toHaveBeenCalledWith({ name: '游戏盘', size_bytes: 200 * 1024 ** 3, filesystem: 'ntfs' }));
 
-    await userEvent.click(screen.getByRole('button', { name: /新建数据盘/ }));
-    await userEvent.type(await screen.findByLabelText('数据盘名称'), 'games');
-    await userEvent.type(screen.getByLabelText('卷标'), ' GAMES ');
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
+    await userEvent.click(screen.getByRole('button', { name: /Create Data Disk/ }));
+    await userEvent.type(await screen.findByLabelText('Data Disk Name'), 'games');
+    await userEvent.type(screen.getByLabelText('Volume Label'), ' GAMES ');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(createBlankImage).toHaveBeenLastCalledWith({ name: 'games', size_bytes: 100 * 1024 ** 3, filesystem: 'ntfs', label: 'GAMES' }));
   });
 
@@ -185,12 +185,12 @@ describe('镜像页', () => {
     });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(screen.getByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     await userEvent.upload(dlg.querySelector('input[type="file"]'), new File(['x'], 'd.vmdk'));
-    await waitFor(() => expect(dlg.textContent).toMatch(/上传完成/));
-    await userEvent.selectOptions(screen.getByLabelText('用途'), 'data');
-    await userEvent.click(screen.getByRole('button', { name: '导入' }));
+    await waitFor(() => expect(dlg.textContent).toMatch(/Upload finished/));
+    await userEvent.selectOptions(screen.getByLabelText('Purpose'), 'data');
+    await userEvent.click(screen.getByRole('button', { name: 'Import' }));
     await waitFor(() => expect(importImage).toHaveBeenCalledWith(expect.objectContaining({
       source_path: '/var/lib/ndiskless/imports/d.vmdk', purpose: 'data', delete_source_after: true,
     })));
@@ -215,8 +215,8 @@ describe('配置页', () => {
     const row = within(table).getAllByRole('row').find(r => r.textContent.includes('Win 11'));
     expect(within(row).getByText('Win 11')).toBeTruthy();
     expect(within(row).getByText('0')).toBeTruthy();
-    expect(within(row).getByText('非最新')).toBeTruthy();
-    await userEvent.click(within(row).getByRole('button', { name: /2 个/ }));
+    expect(within(row).getByText('Not Latest')).toBeTruthy();
+    await userEvent.click(within(row).getByRole('button', { name: /2 items/ }));
     expect(await screen.findByText('装完office')).toBeTruthy();
   });
 
@@ -228,10 +228,10 @@ describe('配置页', () => {
     await openTab('配置');
     const table = await screen.findByRole('table');
     await waitFor(() => expect(within(table).getAllByRole('row').some(r => r.textContent.includes('Ubuntu'))).toBe(true));
-    const buttons = within(table).getAllByRole('button', { name: /删除配置/ });
+    const buttons = within(table).getAllByRole('button', { name: /Delete Configuration/ });
     const ubuntu = buttons.find(b => b.closest('tr').textContent.includes('Ubuntu'));
     expect(ubuntu.disabled).toBe(true);
-    expect(ubuntu.title).toContain('删除镜像');
+    expect(ubuntu.title).toContain('Delete Image');
     for (const b of buttons.filter(b => b.closest('tr').textContent.includes('Win 11'))) expect(b.disabled).toBe(false);
   });
 
@@ -276,18 +276,18 @@ describe('配置页', () => {
     stubApi({ createConfigFromImage, forkConfig });
     renderPage();
     await openTab('配置');
-    await userEvent.click(await screen.findByRole('button', { name: '新建配置' }));
-    await userEvent.type(screen.getByLabelText('配置名称'), '办公版');
-    await userEvent.selectOptions(screen.getByLabelText('所属镜像'), 'win11');
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Configuration' }));
+    await userEvent.type(screen.getByLabelText('Configuration Name'), '办公版');
+    await userEvent.selectOptions(screen.getByLabelText('Image'), 'win11');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(createConfigFromImage).toHaveBeenCalledWith('win11', { name: '办公版' }));
 
-    await userEvent.click(await screen.findByRole('button', { name: '新建配置' }));
-    await userEvent.type(screen.getByLabelText('配置名称'), '游戏版');
-    await userEvent.selectOptions(screen.getByLabelText('所属镜像'), 'win11');
-    await userEvent.click(screen.getByLabelText('已有配置的某个还原点'));
-    await userEvent.selectOptions(await screen.findByLabelText('起点还原点'), 'win11_default_office');
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Configuration' }));
+    await userEvent.type(screen.getByLabelText('Configuration Name'), '游戏版');
+    await userEvent.selectOptions(screen.getByLabelText('Image'), 'win11');
+    await userEvent.click(screen.getByLabelText('Restore point from an existing configuration'));
+    await userEvent.selectOptions(await screen.findByLabelText('Source Restore Point'), 'win11_default_office');
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     await waitFor(() => expect(forkConfig).toHaveBeenCalledWith('win11_default', { name: '游戏版', reduction_id: 'win11_default_office' }));
   });
 });
@@ -301,12 +301,12 @@ describe('还原点页', () => {
     await openTab('还原点');
     const table = await screen.findByRole('table');
     await waitFor(() => expect(within(table).getByText('装完office')).toBeTruthy());
-    expect(within(table).getByRole('columnheader', { name: '镜像' })).toBeTruthy();
-    expect(within(table).getByRole('columnheader', { name: '配置' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: 'Image' })).toBeTruthy();
+    expect(within(table).getByRole('columnheader', { name: 'Configuration' })).toBeTruthy();
     const row = within(table).getByText('装完office').closest('tr');
     expect(within(row).getByText('Win 11')).toBeTruthy();
     expect(within(row).getByText('default')).toBeTruthy();
-    await userEvent.selectOptions(screen.getByLabelText('按镜像筛选'), 'ubuntu');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by Image'), 'ubuntu');
     await waitFor(() => expect(within(table).queryByText('装完office')).toBeNull());
   });
 
@@ -316,10 +316,10 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    expect(screen.queryByRole('button', { name: /新建还原点/ })).toBeNull();
-    await userEvent.click(screen.getByRole('button', { name: /^配置/ }));
-    await screen.findByRole('button', { name: /新建配置/ });
-    expect(screen.queryByRole('button', { name: /新建还原点/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /新建Restore Point/ })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: /^Configuration/ }));
+    await screen.findByRole('button', { name: /Create Configuration/ });
+    expect(screen.queryByRole('button', { name: /新建Restore Point/ })).toBeNull();
   });
 
   it('一键应用', async () => {
@@ -328,8 +328,8 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    expect(screen.getByText('应用中')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '应用 装完office' }));
+    expect(screen.getByText('Applied')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Apply 装完office' }));
     await waitFor(() => expect(applyReduction).toHaveBeenCalledWith('win11_default_office'));
   });
 
@@ -338,11 +338,11 @@ describe('还原点页', () => {
     stubApi({ saveReductionAsImage });
     renderPage();
     await openTab('还原点');
-    await userEvent.click(await screen.findByRole('button', { name: '另存为新镜像 装完office' }));
-    const name = await screen.findByLabelText('新镜像名称');
+    await userEvent.click(await screen.findByRole('button', { name: 'Save as New Image 装完office' }));
+    const name = await screen.findByLabelText('New Image Name');
     await userEvent.clear(name);
     await userEvent.type(name, '办公版');
-    await userEvent.click(screen.getByRole('button', { name: '另存' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save As' }));
     await waitFor(() => expect(saveReductionAsImage).toHaveBeenCalledWith('win11_default_office', { name: '办公版' }));
   });
 
@@ -353,10 +353,10 @@ describe('还原点页', () => {
     vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
     renderPage();
     await openTab('还原点');
-    await userEvent.click(await screen.findByRole('button', { name: '导出为镜像文件 装完office' }));
-    expect(await screen.findByText(/导出内容为该还原点的完整磁盘数据/)).toBeTruthy();
-    await userEvent.click(screen.getByLabelText('gzip 压缩'));
-    await userEvent.click(screen.getByRole('button', { name: /下载到本地/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Export as Image File 装完office' }));
+    expect(await screen.findByText(/Exports the complete disk data of this restore point/)).toBeTruthy();
+    await userEvent.click(screen.getByLabelText('gzip Compression'));
+    await userEvent.click(screen.getByRole('button', { name: /Download Locally/ }));
     await waitFor(() => expect(exportReductionTicket).toHaveBeenCalledWith('win11_default_office', true));
   });
 
@@ -365,16 +365,16 @@ describe('还原点页', () => {
     stubApi({ exportReduction });
     renderPage();
     await openTab('还原点');
-    await userEvent.click(await screen.findByRole('button', { name: '导出为镜像文件 装完office' }));
-    await userEvent.click(await screen.findByRole('button', { name: /导出到服务器目录/ }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Export as Image File 装完office' }));
+    await userEvent.click(await screen.findByRole('button', { name: /Export to Server Directory/ }));
     await waitFor(() => expect(exportReduction).toHaveBeenCalledWith('win11_default_office'));
-    expect(await screen.findByText(/目标文件：192\.168\.10\.3 上的/)).toBeTruthy();
+    expect(await screen.findByText(/destination: 192\.168\.10\.3 上的/)).toBeTruthy();
   });
 
   it('镜像详情不再放「分配到分组」：它只是跳到分组页，分组绑定在分组页里做', async () => {
     renderPage();
     await openDetail();
-    expect(screen.queryByRole('button', { name: '分配到分组' })).toBeNull();
+    expect(screen.queryByRole('button', { name: 'Assign to Group' })).toBeNull();
   });
 
   it('覆盖原镜像先说清后果再做', async () => {
@@ -382,11 +382,11 @@ describe('还原点页', () => {
     stubApi({ overwriteImage });
     renderPage();
     await openTab('还原点');
-    await userEvent.click(await screen.findByRole('button', { name: '更多操作 0' }));
-    await userEvent.click(await screen.findByRole('button', { name: '覆盖原镜像' }));
-    const dialog = (await screen.findByText(/替换镜像 Win 11 的原始内容/)).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: 'More Actions 0' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Overwrite Original Image' }));
+    const dialog = (await screen.findByText(/Replace the original contents of image Win 11/)).closest('.card');
     expect(dialog.textContent).toContain('装完office');
-    await userEvent.click(within(dialog).getByRole('button', { name: '覆盖' }));
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Overwrite' }));
     await waitFor(() => expect(overwriteImage).toHaveBeenCalledWith('win11_default_0'));
   });
 
@@ -400,11 +400,11 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    await userEvent.click(screen.getByLabelText('选择还原点 装完office'));
-    await userEvent.click(screen.getByLabelText('选择还原点 装完wps'));
-    await userEvent.click(screen.getByRole('button', { name: /删除所选/ }));
-    const dialog = (await screen.findByText(/删除 2 个还原点/)).closest('.card');
-    await userEvent.click(within(dialog).getByRole('button', { name: '删除' }));
+    await userEvent.click(screen.getByLabelText('Select restore point 装完office'));
+    await userEvent.click(screen.getByLabelText('Select restore point 装完wps'));
+    await userEvent.click(screen.getByRole('button', { name: /Delete Selected/ }));
+    const dialog = (await screen.findByText(/Delete 2 restore points/)).closest('.card');
+    await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(deleteReduction).toHaveBeenCalledTimes(2));
     expect(await screen.findByText(/work 依赖/)).toBeTruthy();
   });
@@ -414,14 +414,14 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    const box = screen.getByLabelText('选择还原点 0');
+    const box = screen.getByLabelText('Select restore point 0');
     expect(box.disabled).toBe(true);
-    await userEvent.click(screen.getByLabelText('选择本页全部还原点'));
-    expect(screen.getByRole('button', { name: /删除所选 \(1\)/ })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '更多操作 0' }));
-    const del = await screen.findByRole('button', { name: '删除' });
+    await userEvent.click(screen.getByLabelText('Select all restore points on this page'));
+    expect(screen.getByRole('button', { name: /Delete Selected \(1\)/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'More Actions 0' }));
+    const del = await screen.findByRole('button', { name: 'Delete' });
     expect(del.disabled).toBe(true);
-    expect(del.title).toContain('先应用');
+    expect(del.title).toContain('Apply another one');
   });
 
   it('勾选后把它应用了：它不再算在「删除所选」里', async () => {
@@ -434,12 +434,12 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    await userEvent.click(screen.getByLabelText('选择还原点 装完office'));
-    expect(screen.getByRole('button', { name: /删除所选 \(1\)/ })).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '应用 装完office' }));
-    await waitFor(() => expect(screen.getByLabelText('选择还原点 装完office').disabled).toBe(true));
-    expect(screen.getByLabelText('选择还原点 装完office').checked).toBe(false);
-    expect(screen.getByRole('button', { name: /删除所选/ }).disabled).toBe(true);
+    await userEvent.click(screen.getByLabelText('Select restore point 装完office'));
+    expect(screen.getByRole('button', { name: /Delete Selected \(1\)/ })).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Apply 装完office' }));
+    await waitFor(() => expect(screen.getByLabelText('Select restore point 装完office').disabled).toBe(true));
+    expect(screen.getByLabelText('Select restore point 装完office').checked).toBe(false);
+    expect(screen.getByRole('button', { name: /Delete Selected/ }).disabled).toBe(true);
   });
 
   it('应用过的勾选不会在它解锁后自己回来', async () => {
@@ -451,12 +451,12 @@ describe('还原点页', () => {
     renderPage();
     await openTab('还原点');
     await screen.findByText('装完office');
-    await userEvent.click(screen.getByLabelText('选择还原点 装完office'));
-    await userEvent.click(screen.getByRole('button', { name: '应用 装完office' }));
-    await waitFor(() => expect(screen.getByLabelText('选择还原点 装完office').disabled).toBe(true));
-    await userEvent.click(screen.getByRole('button', { name: '应用 0' }));
-    await waitFor(() => expect(screen.getByLabelText('选择还原点 装完office').disabled).toBe(false));
-    expect(screen.getByLabelText('选择还原点 装完office').checked).toBe(false);
+    await userEvent.click(screen.getByLabelText('Select restore point 装完office'));
+    await userEvent.click(screen.getByRole('button', { name: 'Apply 装完office' }));
+    await waitFor(() => expect(screen.getByLabelText('Select restore point 装完office').disabled).toBe(true));
+    await userEvent.click(screen.getByRole('button', { name: 'Apply 0' }));
+    await waitFor(() => expect(screen.getByLabelText('Select restore point 装完office').disabled).toBe(false));
+    expect(screen.getByLabelText('Select restore point 装完office').checked).toBe(false);
   });
 
   it('删除还原点前点名它的牵连', async () => {
@@ -464,10 +464,10 @@ describe('还原点页', () => {
     stubApi({ listGroups: async () => list(groups), deleteReduction: vi.fn(async () => ({})) });
     renderPage();
     await openTab('还原点');
-    await userEvent.click(await screen.findByRole('button', { name: '更多操作 装完office' }));
-    await userEvent.click(await screen.findByRole('button', { name: '删除' }));
-    const dialog = await screen.findByText(/还原点 装完office/);
-    expect(dialog.textContent).toContain('正被分组 教学一班');
+    await userEvent.click(await screen.findByRole('button', { name: 'More Actions 装完office' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Delete' }));
+    const dialog = await screen.findByText(/Restore Point 装完office/);
+    expect(dialog.textContent).toContain('Used by groups 教学一班');
   });
 });
 
@@ -483,9 +483,9 @@ describe('镜像卡片', () => {
       { ID: 's-new', Name: '新系统盘', OSType: 'linux', State: 'normal', Purpose: 'system', CreatedAt: at('20') },
     ]) });
     renderPage();
-    await screen.findByText('新系统盘');
+    await screen.findByText('新System Disk');
     const names = [...document.querySelectorAll('.card .ellip')].map(e => e.textContent).filter(n => n.endsWith('盘'));
-    expect(names).toEqual(['旧系统盘', '新系统盘', '旧数据盘', '新数据盘']);
+    expect(names).toEqual(['旧System Disk', '新System Disk', '旧Data Disk', '新Data Disk']);
   });
 
   it('数据盘用磁盘图标，系统盘按 Windows / Linux 用各自的图标', async () => {
@@ -493,9 +493,9 @@ describe('镜像卡片', () => {
     renderPage();
     await screen.findByText('Games D');
     const icon = (name) => within(screen.getByText(name).closest('.card')).getByRole('img');
-    expect(icon('Games D').getAttribute('aria-label')).toBe('数据盘镜像');
-    expect(icon('Win 11').getAttribute('aria-label')).toBe('Windows 系统盘镜像');
-    expect(icon('Ubuntu').getAttribute('aria-label')).toBe('Linux 系统盘镜像');
+    expect(icon('Games D').getAttribute('aria-label')).toBe('Data Disk Image');
+    expect(icon('Win 11').getAttribute('aria-label')).toBe('Windows System Disk Image');
+    expect(icon('Ubuntu').getAttribute('aria-label')).toBe('Linux System Disk Image');
     const shapes = new Set(['Games D', 'Win 11', 'Ubuntu'].map(n => icon(n).innerHTML));
     expect(shapes.size).toBe(3);
   });
@@ -514,8 +514,8 @@ describe('从本机上传镜像', () => {
       },
     });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     // 切到「从本机上传」
     const picker = dlg.querySelector('input[type="file"]');
     expect(picker).toBeTruthy();
@@ -545,8 +545,8 @@ describe('从本机上传镜像', () => {
       },
     });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     await userEvent.upload(dlg.querySelector('input[type="file"]'),
       new File(['0123456789ab'], 'win11.zfs'));
     await waitFor(() => expect(offsets.length).toBeGreaterThanOrEqual(2), { timeout: 5000 });
@@ -558,11 +558,11 @@ describe('从本机上传镜像', () => {
   it('两条导入路径并存，默认是从本机上传', async () => {
     stubApi();
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     expect(dlg.querySelector('input[type="file"]')).toBeTruthy();
-    expect(within(dlg).queryByRole('button', { name: /服务器上的文件/ })).toBeNull();
-    expect(dlg.textContent).not.toMatch(/扫描目录|手动输入/);
+    expect(within(dlg).queryByRole('button', { name: /Server File/ })).toBeNull();
+    expect(dlg.textContent).not.toMatch(/Scan Directory|Manual Input/);
   });
 
   // 上传的源文件导完要删，留着白占池空间。
@@ -576,12 +576,12 @@ describe('从本机上传镜像', () => {
       }),
     });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     await userEvent.upload(dlg.querySelector('input[type="file"]'),
       new File(['abc'], 'win11.zfs'));
-    await waitFor(() => expect(dlg.textContent).toMatch(/上传完成/));
-    await userEvent.click(within(dlg).getByRole('button', { name: /^导入$/ }));
+    await waitFor(() => expect(dlg.textContent).toMatch(/Upload finished/));
+    await userEvent.click(within(dlg).getByRole('button', { name: /^Import$/ }));
     await waitFor(() => expect(importImage).toHaveBeenCalled());
     expect(importImage.mock.calls[0][0].delete_source_after).toBe(true);
   });
@@ -600,19 +600,19 @@ describe('从本机上传镜像', () => {
     });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(screen.getByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
 
     // 一个文件都没选：不该能点
-    expect(screen.getByRole('button', { name: /^导入$/ }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: /^Import$/ }).disabled).toBe(true);
 
     await userEvent.upload(dlg.querySelector('input[type="file"]'), new File(['xy'], 'd.zfs.gz'));
     // 传输中：按钮说明自己在等什么，而不是沉默地灰着
-    await waitFor(() => expect(screen.getByRole('button', { name: /上传中/ }).disabled).toBe(true));
+    await waitFor(() => expect(screen.getByRole('button', { name: /Uploading/ }).disabled).toBe(true));
 
     release();
-    await waitFor(() => expect(dlg.textContent).toMatch(/上传完成/));
-    await waitFor(() => expect(screen.getByRole('button', { name: /^导入$/ }).disabled).toBe(false));
+    await waitFor(() => expect(dlg.textContent).toMatch(/Upload finished/));
+    await waitFor(() => expect(screen.getByRole('button', { name: /^Import$/ }).disabled).toBe(false));
   });
 
   it('上传提示讲结果，不讲此刻哪台是主机', async () => {
@@ -623,11 +623,11 @@ describe('从本机上传镜像', () => {
       ]),
     });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
-    const hint = within(dlg).getByText(/断点续传/);
-    expect(hint.textContent).toMatch(/同步到集群所有节点/);
-    expect(hint.textContent).not.toMatch(/主机|192\.168/);
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
+    const hint = within(dlg).getByText(/resumable/);
+    expect(hint.textContent).toMatch(/synchronized to all cluster nodes/);
+    expect(hint.textContent).not.toMatch(/Active node|192\.168/);
   });
 });
 
@@ -645,17 +645,17 @@ describe('服务器目录进出', () => {
     stubApi({ importImage, listImportSources: async () => SOURCES });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(screen.getByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
 
     await userEvent.type(within(dlg).getByPlaceholderText('Win11-Pro-2026Q1'), 'from-server');
-    await userEvent.click(within(dlg).getByRole('button', { name: /服务器目录/ }));
+    await userEvent.click(within(dlg).getByRole('button', { name: /Server Directory/ }));
     // 目录连同它属于哪台机器一起说出来
     expect(await within(dlg).findByText(/192\.168\.10\.3/)).toBeTruthy();
     expect(within(dlg).getByText(/\/var\/lib\/ndiskless\/imports/)).toBeTruthy();
 
     await userEvent.click(await within(dlg).findByText('win11.zfs'));
-    await userEvent.click(screen.getByRole('button', { name: '导入' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Import' }));
     await waitFor(() => expect(importImage).toHaveBeenCalledWith(expect.objectContaining({
       source_path: '/var/lib/ndiskless/imports/win11.zfs',
     })));
@@ -668,10 +668,10 @@ describe('服务器目录进出', () => {
     stubApi({ exportImage, listImportSources: async () => SOURCES });
     renderPage();
     await openDetail();
-    await userEvent.click(screen.getByRole('button', { name: /导出镜像/ }));
-    await userEvent.click(screen.getByRole('button', { name: /导出到服务器目录/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Export Image/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Export to Server Directory/ }));
     await waitFor(() => expect(exportImage).toHaveBeenCalledWith('win11'));
-    expect(await screen.findByText(/导出任务已提交，目标文件：192\.168\.10\.3 上的 \/var\/lib\/ndiskless\/imports\/Win 11\.zfs/)).toBeTruthy();
+    expect(await screen.findByText(/导出任务已提交，destination: 192\.168\.10\.3 上的 \/var\/lib\/ndiskless\/imports\/Win 11\.zfs/)).toBeTruthy();
   });
 });
 
@@ -691,8 +691,8 @@ describe('重新选文件要能接着传', () => {
     stubApi({ beginUpload, uploadChunk });
     renderPage();
     await screen.findByText('Win 11');
-    await userEvent.click(screen.getByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(screen.getByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
 
     const file = new File(['0123456789'], 'win11.zfs.gz');
     Object.defineProperty(file, 'lastModified', { value: 1724400000000 });
@@ -720,17 +720,17 @@ describe('深链打开镜像详情', () => {
   it('深链打开的详情点 × 能关掉，按 ESC 也能关掉', async () => {
     stubApi();
     render(<StoreProvider><ConfirmProvider><DeepLink/><PageImages/></ConfirmProvider></StoreProvider>);
-    const title = await screen.findByText('配置概况');
+    const title = await screen.findByText('Configuration Overview');
     const dlg = title.closest('.card');
     await userEvent.click(within(dlg.querySelector('.card-h')).getByRole('button'));
-    await waitFor(() => expect(screen.queryByText('配置概况')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Configuration Overview')).toBeNull());
     // 关掉后再等几轮渲染，不能被深链重新弹出来
     await new Promise(r => setTimeout(r, 50));
-    expect(screen.queryByText('配置概况')).toBeNull();
+    expect(screen.queryByText('Configuration Overview')).toBeNull();
 
     await openDetail();
     await userEvent.keyboard('{Escape}');
-    await waitFor(() => expect(screen.queryByText('配置概况')).toBeNull());
+    await waitFor(() => expect(screen.queryByText('Configuration Overview')).toBeNull());
   });
 });
 
@@ -740,8 +740,8 @@ describe('放弃上传', () => {
 
   const startUpload = async () => {
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /导入镜像/ }));
-    const dlg = (await screen.findByText('镜像名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Import Image/ }));
+    const dlg = (await screen.findByText('Image Name')).closest('.card');
     await userEvent.upload(dlg.querySelector('input[type="file"]'), new File(['x'.repeat(1000)], 'win11.zfs'));
     return dlg;
   };
@@ -759,7 +759,7 @@ describe('放弃上传', () => {
     stubApi({ uploadChunk: slowChunk(calls), abortUpload });
     await startUpload();
     await waitFor(() => expect(calls.length).toBeGreaterThan(2));
-    await userEvent.click(screen.getByRole('button', { name: '放弃' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
     await settle();
     const n = calls.length;
     await settle();
@@ -772,7 +772,7 @@ describe('放弃上传', () => {
     stubApi({ uploadChunk: slowChunk(calls) });
     const dlg = await startUpload();
     await waitFor(() => expect(calls.length).toBeGreaterThan(2));
-    await userEvent.click(within(dlg).getByRole('button', { name: '取消' }));
+    await userEvent.click(within(dlg).getByRole('button', { name: 'Cancel' }));
     await settle();
     const n = calls.length;
     await settle();
@@ -789,11 +789,11 @@ describe('放弃上传', () => {
     });
     await startUpload();
     await waitFor(() => expect(inflight.length).toBe(1));
-    await userEvent.click(screen.getByRole('button', { name: '放弃' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Discard' }));
     expect(inflight[0].signal && inflight[0].signal.aborted).toBe(true);
     inflight[0].reject(new Error('network'));
     await settle();
     expect(inflight.length).toBe(1);
-    expect(screen.queryByText(/上传会话已失效|network/)).toBeNull();
+    expect(screen.queryByText(/Upload session expired|network/)).toBeNull();
   });
 });

@@ -1,12 +1,12 @@
 name: CI
 
-# 质量门：任何一步失败就整体失败。
+# CI verification gates: fail the workflow when any check fails.
 #
-# 跑的是 Makefile 里的 verify / verify-web，和本地提交前该跑的完全同一条链——
-# 两边同一个入口，才不会出现「本地过了、CI 挂了」或者反过来。
+# Run the same Makefile verify and verify-web targets required before local commits.
+# Keeping one verification entrypoint prevents local/CI discrepancies.
 #
-# 这里**不跑 e2e**：那些矩阵要真实的 ZFS 池、LIO、keepalived 和多台机器，
-# 不是 CI runner 能提供的。跑法见 tools/e2e/README.md，结果人工归档。
+# End-to-end tests are excluded: they require real ZFS pools, LIO, keepalived, and multiple hosts,
+# which hosted CI cannot provide. See tools/e2e/README.md; archive results manually.
 
 on:
   push:
@@ -29,9 +29,9 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - name: gofmt / vet / test / 静态构建
+      - name: gofmt / vet / test / Static build
         run: make verify
-      - name: 覆盖率（只报数，不设闸）
+      - name: Coverage (report only; no threshold)
         run: |
           go test ./... -coverprofile=coverage.out >/dev/null 2>&1 || true
           go tool cover -func=coverage.out | tail -1
@@ -53,26 +53,26 @@ jobs:
       - name: vitest / vite build
         run: make verify-web
 
-  # 交付物是静态二进制（内嵌前端）和装它的 .deb（README 快速开始用的就是 apt install .deb）。
-  # 标签指向的那个提交就是可回滚的基线。
+  # Release artifacts are a static binary with embedded frontend and an installable .deb as described in the README.
+  # The tagged commit is the release rollback baseline.
   release:
     if: startsWith(github.ref, 'refs/tags/v')
     needs: [backend, frontend]
     runs-on: ubuntu-latest
-    # 创建 Release、上传附件要写权限；仓库默认给的令牌常是只读，不声明会 403。
+    # Release creation and artifact uploads require write access; the default token may be read-only.
     permissions:
       contents: write
     steps:
       - uses: actions/checkout@v4
         with:
-          # 版本号来自 git describe，浅克隆看不全 tag 历史——描述出来的
-          # 版本会退化成裸哈希，发布件上的版本号就和 tag 对不上了。
+          # Versioning uses git describe. A shallow checkout lacks tag history and can produce
+          # a raw commit hash that does not match the release tag.
           fetch-depth: 0
       - uses: actions/setup-node@v4
         with: { node-version: '22.22.2', cache: npm, cache-dependency-path: web/package-lock.json }
       - uses: actions/setup-go@v5
         with: { go-version-file: go.mod, cache: true }
-      # deb 依赖 build-static，一条命令出两样；dpkg-deb 在 ubuntu runner 上自带。
+      # make deb includes build-static; dpkg-deb is provided on the Ubuntu runner.
       - run: make deb
       - uses: softprops/action-gh-release@v2
         with:

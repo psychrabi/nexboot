@@ -1,11 +1,11 @@
-// 公共基础组件，只放至少两处真实调用的组件。
+// Shared primitives, each used by at least two components.
 import React from 'react';
 import { createPortal } from 'react-dom';
 import { Icons } from './icons.jsx';
 import { PAGE_SIZES } from '../lib/hooks.js';
 
-// 表单项：标签在上，可选必填标记和辅助文字。`hint` 总是显示；`help` 收在小 ? 按钮后，
-// 放操作者只需看一次的说明。`helpInline` 把说明放在控件旁边，`helpAfterLabel` 紧跟在标签后。
+// Form fields place labels above inputs and optionally show required markers and hints. Help is hidden behind a ? button
+// for information needed only occasionally. helpInline positions it by the control; helpAfterLabel follows the label.
 function Field({ label, required, hint, help, helpInline, helpAfterLabel, children }) {
   const [showHelp, setShowHelp] = React.useState(false);
   const helpText = help && showHelp ? <div className="hint" style={{ margin: 0 }}>{help}</div> : null;
@@ -14,7 +14,7 @@ function Field({ label, required, hint, help, helpInline, helpAfterLabel, childr
       <div style={{ fontSize: 12, color: "var(--fg-mute)", marginBottom: 6, fontWeight: 500 }}>
         {label} {required && <span style={{ color: "var(--rose)" }}>*</span>}
         {help && (
-          <button type="button" className="field-help" aria-label={`${label}说明`} aria-expanded={showHelp}
+          <button type="button" className="field-help" aria-label={`Help for ${label}`} aria-expanded={showHelp}
             onClick={() => setShowHelp(v => !v)}>?</button>
         )}
         {helpAfterLabel && help && showHelp && <span className="hint" style={{ marginLeft: 8, fontWeight: 400 }}>{help}</span>}
@@ -36,8 +36,8 @@ function Select({ value, onChange, options, ...rest }) {
   );
 }
 
-// 表格除「有数据」外三种状态共用的空行；否则筛选为空时只剩表头，看起来像页面坏了。
-function TableState({ colSpan, loading, error, empty, hint = "暂无数据" }) {
+// Shared table placeholder row for loading, error, or empty results; otherwise an empty filter looks broken.
+function TableState({ colSpan, loading, error, empty, hint = "No data" }) {
   if (!loading && !error && !empty) return null;
   return (
     <tr>
@@ -45,13 +45,13 @@ function TableState({ colSpan, loading, error, empty, hint = "暂无数据" }) {
         textAlign: "center", padding: "32px 14px", fontSize: 13,
         color: error ? "var(--rose)" : "var(--fg-faint)",
       }}>
-        {loading ? "加载中…" : error ? `加载失败：${error}` : hint}
+        {loading ? "Loading…" : error ? `Load failed: ${error}` : hint}
       </td>
     </tr>
   );
 }
 
-// 带前置图标的搜索框。`onSubmit` 接回车，供查询后端而非就地过滤的页面使用。
+// Search input with leading icon and Enter submission for backend-filtered lists.
 function SearchBox({ value, onChange, placeholder, onSubmit, width = 240 }) {
   return (
     <div className="search-box" style={{ width }}>
@@ -63,23 +63,23 @@ function SearchBox({ value, onChange, placeholder, onSubmit, width = 240 }) {
   );
 }
 
-// 列表分页：总数、每页条数、翻页。总数不超过最小一页时整条不显示，调用方可无条件放置。
+// Pagination with totals and page sizes; hide entirely if everything fits on the smallest page.
 function Pager({ page, size, total, onPage, onSize, sizes = PAGE_SIZES }) {
   if (total <= sizes[0]) return null;
   const pages = Math.max(1, Math.ceil(total / size));
   return (
     <div className="pager">
-      <span className="meta" style={{ marginRight: "auto" }}>共 {total} 条</span>
-      <Select aria-label="每页条数" value={String(size)} onChange={v => onSize(Number(v))}
-        options={sizes.map(n => ({ value: String(n), label: `${n} 条/页` }))} style={{ width: 96 }}/>
-      <button className="btn" disabled={page <= 1} onClick={() => onPage(page - 1)}>上一页</button>
+      <span className="meta" style={{ marginRight: "auto" }}>Total {total} entries</span>
+      <Select aria-label="Rows per page" value={String(size)} onChange={v => onSize(Number(v))}
+        options={sizes.map(n => ({ value: String(n), label: `${n} per page` }))} style={{ width: 96 }}/>
+      <button className="btn" disabled={page <= 1} onClick={() => onPage(page - 1)}>Previous</button>
       <span className="mono" style={{ fontSize: 13, color: "var(--fg-mute)" }}>{page} / {pages}</span>
-      <button className="btn" disabled={page >= pages} onClick={() => onPage(page + 1)}>下一页</button>
+      <button className="btn" disabled={page >= pages} onClick={() => onPage(page + 1)}>Next</button>
     </div>
   );
 }
 
-// 分段筛选，计数放在分段内，控件与计数合为一体。选项：[{ id, label, n?, color? }]。
+// Segmented filters can include counts in each segment; options are [{ id, label, n?, color? }].
 function SegFilter({ value, onChange, options }) {
   return (
     <div className="seg">
@@ -93,7 +93,7 @@ function SegFilter({ value, onChange, options }) {
   );
 }
 
-// 统计卡片。`pct` 加用量条，`sub` 加等宽说明。
+// Statistics card: pct adds a usage bar; sub adds supporting metadata.
 function StatCard({ label, value, unit, sub, accent = "cyan", pct }) {
   return (
     <div className="card stat-card">
@@ -109,8 +109,8 @@ function StatCard({ label, value, unit, sub, accent = "cyan", pct }) {
   );
 }
 
-// 开关做成一个控件，而不是文字在「✓ 已启用」和「否」之间切换的按钮，那样读起来像操作而非当前状态。
-function Toggle({ checked, onChange, onLabel = "已启用", offLabel = "已禁用" }) {
+// Render toggles as controls instead of buttons that alternate text; labels should communicate state, not action.
+function Toggle({ checked, onChange, onLabel = "Enabled", offLabel = "Disabled" }) {
   return (
     <div className="seg" style={{ width: "fit-content" }}>
       <button type="button" className={!checked ? "on" : ""} onClick={() => onChange(false)}>{offLabel}</button>
@@ -119,16 +119,16 @@ function Toggle({ checked, onChange, onLabel = "已启用", offLabel = "已禁�
   );
 }
 
-// Tip：点击展开的说明。悬停没有可点的样子，原生 title 又要等一两秒才出现；
-// 收起走一层透明背板，与通知中心同样做法，点页面任意处即收起。
-function Tip({ text, label = "说明" }) {
-  const [box, setBox] = React.useState(null); // 展开时的视口坐标
+// Tip displays contextual help on click; native title hover is too slow and not visibly interactive.
+// Dismiss via a transparent backdrop, like notifications; clicking elsewhere closes it.
+function Tip({ text, label = "Help" }) {
+  const [box, setBox] = React.useState(null); // Viewport coordinates while expanded
   React.useEffect(() => {
     if (!box) return undefined;
     const close = () => setBox(null);
     const onKey = (e) => { if (e.key === "Escape") close(); };
     window.addEventListener("keydown", onKey);
-    window.addEventListener("scroll", close, true); // fixed 弹层滚动时会偏离按钮
+    window.addEventListener("scroll", close, true); // Fixed overlays can lose alignment when scrolling
     return () => {
       window.removeEventListener("keydown", onKey);
       window.removeEventListener("scroll", close, true);
@@ -137,7 +137,7 @@ function Tip({ text, label = "说明" }) {
   const toggle = (e) => {
     e.stopPropagation();
     if (box) { setBox(null); return; }
-    // 挂在 body 上按视口坐标放，表格的滚动框裁不到它；窄屏收窄，左右各留 16px。
+    // Portal to body using viewport coordinates, avoiding table clipping; reserve 16px on narrow screens.
     const r = e.currentTarget.getBoundingClientRect();
     const vw = document.documentElement.clientWidth || window.innerWidth;
     const width = Math.min(320, vw - 32);

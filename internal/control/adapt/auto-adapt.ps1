@@ -1,13 +1,13 @@
 <#
-  ndiskless 启动驱动安装脚本。由服务端离线注入为「本地 GPO 机器启动脚本」，
-  超管机开机时以 SYSTEM 自动运行一次：
-    1) 解压 C:\ndadapt\bundle.zip 到 C:\ndadapt\drivers；
-    2) PnPUtil 预装全部 INF；
-    3) 网卡驱动服务 + iSCSI 栈(msiscsi/iScsiPrt) 注册 boot-start(Start=0)，
-       写 HWID→服务 到 CriticalDeviceDatabase(CDDB)，解决换网卡 0x7B；
-    4) 写安装状态 C:\ndadapt\done.txt + adapt.log（供排查），自删 GPO 注册。
-  装完**不自动关机**：交给用户在客机内确认驱动装上后自己关机，再到管理台
-  「停机存还原点」把改动固化成新还原点。
+  ndiskless startup driver installation script, injected offline by the server as a local machine GPO startup script.
+  Runs once as SYSTEM when the Super Admin client boots:
+    1) Extract C:\ndadapt\bundle.zip to C:\ndadapt\drivers.
+    2) Preinstall all INF packages using PnPUtil.
+    3) Register NIC driver services and the iSCSI stack (msiscsi/iScsiPrt) for boot-start (Start=0),
+       and write hardware-ID-to-service mappings into CriticalDeviceDatabase (CDDB) to avoid 0x7B when switching NICs.
+    4) Write installation status to C:\ndadapt\done.txt and adapt.log, then unregister its own GPO startup entry.
+  **Do not shut down automatically.** The operator verifies driver installation inside Windows, shuts down the client,
+  and uses Shut Down and Save Restore Point in the console to commit changes.
 #>
 $ErrorActionPreference = 'Continue'
 $work = 'C:\ndadapt'
@@ -19,7 +19,7 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 Log ("start " + (Get-Date -Format o) + " as " + (whoami))
 
 try {
-  # 1) 解压驱动集
+  # 1) Extract driver bundle
   $drivers = Join-Path $work 'drivers'
   Remove-Item -Recurse -Force $drivers -ErrorAction SilentlyContinue
   New-Item -ItemType Directory -Force -Path $drivers | Out-Null
@@ -30,19 +30,19 @@ try {
   $infs = Get-ChildItem -Path $drivers -Recurse -Filter *.inf -ErrorAction SilentlyContinue
   Log ("inf count = " + $infs.Count)
 
-  # 2) PnPUtil 逐个预装（BundleArchive 是每包一子目录，逐 inf 安装最稳）
+  # 2) Preinstall each INF with PnPUtil (BundleArchive contains one directory per package).
   foreach ($inf in $infs) {
     & pnputil.exe /add-driver $inf.FullName /install 2>&1 | Out-File (Join-Path $work 'pnputil.log') -Append -Encoding utf8
     if ($LASTEXITCODE -ne 0 -and $LASTEXITCODE -ne 259) { $exit = 1; Log "pnputil $($inf.Name) returned $LASTEXITCODE" }
   }
 
-  # 3) iSCSI 栈 boot-start
+  # 3) Set iSCSI stack services to boot-start
   foreach ($svc in @('msiscsi', 'iScsiPrt')) {
     $key = "HKLM:\SYSTEM\CurrentControlSet\Services\$svc"
     if (Test-Path $key) { Set-ItemProperty -Path $key -Name Start -Value 0 -Type DWord }
     elseif ($svc -eq 'msiscsi') { $exit = 2; Log "msiscsi service missing" }
   }
-  # 网卡驱动服务 boot-start + CDDB
+  # NIC service boot-start and CDDB registration
   foreach ($inf in $infs) {
     $svcNames = Select-String -Path $inf.FullName -Pattern 'AddService\s*=\s*([^,\s]+)' -AllMatches |
       ForEach-Object { $_.Matches } | ForEach-Object { $_.Groups[1].Value } | Sort-Object -Unique
@@ -68,11 +68,11 @@ try {
   $exit = 3; Log ("exception: " + $_.Exception.Message)
 }
 
-# 4) 安装状态（供用户/管理台排查，非自动判定信号）
+# 4) Installation diagnostics (not an automatic success signal).
 "OK=$($exit -eq 0) EXIT=$exit AT=$(Get-Date -Format o)" | Out-File $done -Encoding utf8
 
-# 5) 摘掉自己的启动脚本注册：只装一次，否则会随「存还原点」固化进镜像，以后每次开机都重跑。
-#    只删 ndadapt.cmd 这一项，镜像自带的组策略和 ndmount 原样保留；改完递增 gpt.ini 版本让 gpsvc 重新处理。
+# 5) Remove only our own startup script registration so it runs once, not on every subsequent boot after committing a restore point.
+#    Preserve existing image GPO entries and ndmount; delete ndadapt.cmd only, then increment gpt.ini version for gpsvc.
 function Remove-AdaptRegistration([string]$gp) {
   $ini = Join-Path $gp 'Machine\Scripts\scripts.ini'
   if (Test-Path $ini) {
@@ -96,7 +96,7 @@ function Remove-AdaptRegistration([string]$gp) {
         $item.($Matches[2]) = $Matches[3]
         continue
       }
-      if ($inStartup -and $line.Trim() -eq '') { continue } # 段内空行会把条目挤到它后面
+      if ($inStartup -and $line.Trim() -eq '') { continue } # Blank lines inside the section would shift entries down.
       $out.Add($line)
     }
     if ($inStartup) { Add-StartupItems $out $items }
@@ -112,7 +112,7 @@ function Remove-AdaptRegistration([string]$gp) {
   }
 }
 
-# Add-StartupItems 写回 [Startup] 段里除 ndadapt.cmd 外的条目，序号从 0 重排。
+# Rewrite [Startup] entries excluding ndadapt.cmd, renumbering sequentially from zero.
 function Add-StartupItems($out, $items) {
   $k = 0
   foreach ($it in ($items | Sort-Object N)) {
@@ -126,7 +126,7 @@ $gp = 'C:\Windows\System32\GroupPolicy'
 try {
   Remove-AdaptRegistration $gp
 } catch {
-  # 合并失败时退回旧做法：宁可丢掉镜像自带策略，也不能让适配脚本每次开机都重跑。
+  # If merging fails, use the legacy fallback: preventing repeated adaptation is more important than preserving existing image startup policy.
   Log "remove adapt registration failed, falling back: $_"
   $startup = Join-Path $gp 'Machine\Scripts\Startup'
   if (Test-Path (Join-Path $startup 'ndmount.cmd')) {
@@ -138,5 +138,5 @@ try {
   }
 }
 
-# 不自动关机：驱动已安装，留给用户在客机内确认后自己关机、再「停机存还原点」。
+# Do not shut down automatically; operators verify installed drivers, shut down, and save a restore point.
 Log "install done exit=$exit; drivers installed, awaiting user shutdown + save reduction"

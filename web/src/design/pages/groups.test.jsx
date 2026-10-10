@@ -56,12 +56,12 @@ describe('分组页', () => {
 
   it('新建分组时三级联动都有值，而不是「无可用配置」', async () => {
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
 
     // 下拉显示的镜像必须就是表单里的值，否则下一级查不到配置。
     await waitFor(() => expect(api.listConfigs).toHaveBeenCalledWith('isharedisk'));
 
-    expect(screen.queryByText('无可用配置')).toBeNull();
+    expect(screen.queryByText('No configurations available')).toBeNull();
     expect(await screen.findByText('default')).toBeTruthy();
   });
 
@@ -69,13 +69,13 @@ describe('分组页', () => {
     const createGroup = vi.fn(async () => ({ ID: 'g-1' }));
     stubApi({ createGroup });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
     await waitFor(() => expect(api.listConfigs).toHaveBeenCalled());
 
     // 名称框没有 placeholder，Field 把标签渲染成兄弟 div，只能经共同父节点找输入框。
-    const nameField = screen.getByText(/分组名称/).parentElement.querySelector('input');
+    const nameField = screen.getByText(/Group Name/).parentElement.querySelector('input');
     await userEvent.type(nameField, '教学一班');
-    await userEvent.click(screen.getByRole('button', { name: '保存' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
 
     await waitFor(() => expect(createGroup).toHaveBeenCalled(), { timeout: 3000 });
     const body = createGroup.mock.calls[0][0];
@@ -92,34 +92,34 @@ describe('分组页', () => {
     ]) });
     renderPage();
     await screen.findByText('教学一班');
-    await userEvent.click(screen.getByRole('button', { name: /新建分组/ }));
-    const sys = await screen.findByLabelText('系统镜像');
+    await userEvent.click(screen.getByRole('button', { name: /New Group/ }));
+    const sys = await screen.findByLabelText('System Image');
     const sysOptions = [...sys.querySelectorAll('option')].map(o => o.value);
     expect(sysOptions).toContain('isharedisk');
     expect(sysOptions).not.toContain('games');
 
-    await userEvent.click(screen.getByRole('button', { name: /添加数据盘/ }));
-    const data = await screen.findByLabelText('新数据盘 1 的镜像');
+    await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+    const data = await screen.findByLabelText('New Data Disk 1 Image');
     const dataOptions = [...data.querySelectorAll('option')].map(o => o.value);
-    expect(dataOptions).toEqual(['games']); // 只有 Windows 数据盘
+    expect(dataOptions).toEqual(['games']); // 只有 Windows Data Disks
   });
 
   // 还没导入镜像时表单要明说无可绑定，不能看起来像可以提交。
   it('真的没有镜像时才显示「无可用镜像」', async () => {
     stubApi({ listImages: async () => list([]), listConfigs: async () => list([]), listReductions: async () => list([]) });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-    expect(await screen.findByText('无可用镜像')).toBeTruthy();
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    expect(await screen.findByText('No images available')).toBeTruthy();
   });
 
   // 表单默认值取自服务器网段，不能是代码里写死的地址。
   it('新建分组的网络默认值来自服务器客户机网卡', async () => {
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-    expect((await screen.findByLabelText('起始 IP')).value).toBe('192.168.50.10');
-    expect(screen.getByLabelText('子网掩码').value).toBe('255.255.255.0');
-    expect(screen.getByLabelText('网关').value).toBe('');
-    expect(await screen.findByText(/同网段/)).toBeTruthy();
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    expect((await screen.findByLabelText('Starting IP')).value).toBe('192.168.50.10');
+    expect(screen.getByLabelText('Subnet Mask').value).toBe('255.255.255.0');
+    expect(screen.getByLabelText('Gateway').value).toBe('');
+    expect(await screen.findByText(/Same Subnet/)).toBeTruthy();
   });
 
   // 区间不在客户机网段内时：状态行点名网卡、保存置灰，一键填入可用区间。
@@ -128,18 +128,18 @@ describe('分组页', () => {
     const createGroup = vi.fn(async () => ({ ID: 'g-1' }));
     stubApi({ getNetwork, createGroup });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-    const start = await screen.findByLabelText('起始 IP');
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    const start = await screen.findByLabelText('Starting IP');
     await userEvent.clear(start);
     await userEvent.type(start, '192.168.10.50');
-    const status = await screen.findByText(/不在服务器的客户机网段/);
+    const status = await screen.findByText(/Outside the server client subnet/);
     expect(status.parentElement.textContent).toContain('ndbr0');
-    expect(screen.getByRole('button', { name: '保存' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(true);
 
-    await userEvent.click(screen.getByRole('button', { name: /填入 192\.168\.50\.10/ }));
-    await waitFor(() => expect(screen.getByLabelText('起始 IP').value).toBe('192.168.50.10'));
-    expect(await screen.findByText(/同网段/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '保存' }).disabled).toBe(false);
+    await userEvent.click(screen.getByRole('button', { name: /Use 192\.168\.50\.10/ }));
+    await waitFor(() => expect(screen.getByLabelText('Starting IP').value).toBe('192.168.50.10'));
+    expect(await screen.findByText(/Same Subnet/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(false);
   });
 
   // 允许跨网段时同样的区间算中继分组：网关栏标明是中继地址，并可探测。
@@ -147,17 +147,17 @@ describe('分组页', () => {
     const probeNetwork = vi.fn(async () => ({ ip: '192.168.10.1', reachable: true, rtt_ms: 0.4 }));
     stubApi({ getNetwork: async () => ({ ...NETWORK, allow_cross_subnet: true }), probeNetwork });
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-    const start = await screen.findByLabelText('起始 IP');
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    const start = await screen.findByLabelText('Starting IP');
     await userEvent.clear(start);
     await userEvent.type(start, '192.168.10.50');
-    expect(await screen.findByText(/跨网段 · DHCP 中继/)).toBeTruthy();
-    const gw = screen.getByLabelText('网关（中继地址）');
+    expect(await screen.findByText(/Cross-subnet · DHCP Relay/)).toBeTruthy();
+    const gw = screen.getByLabelText('Gateway (Relay Address)');
     await userEvent.type(gw, '192.168.10.1');
-    await userEvent.click(screen.getByRole('button', { name: '检测' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Test' }));
     await waitFor(() => expect(probeNetwork).toHaveBeenCalledWith('192.168.10.1'));
-    expect(await screen.findByText(/通/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '保存' }).disabled).toBe(false);
+    expect(await screen.findByText(/Reachable/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(false);
   });
 
   // 已落在错误网段的分组要标出来并提供迁移，预览每台机器的新地址。
@@ -171,11 +171,11 @@ describe('分组页', () => {
       previewGroupNetwork, updateGroup,
     });
     renderPage();
-    expect(await screen.findByText('不通')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /改到服务器网段/ }));
+    expect(await screen.findByText('Blocked')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Move to Server Subnet/ }));
     await waitFor(() => expect(previewGroupNetwork).toHaveBeenCalledWith('g-1', expect.objectContaining({ start_ip: '192.168.50.50', client_max: 30 })));
     expect(await screen.findByText('192.168.50.50')).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '确认修改' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Change' }));
     await waitFor(() => expect(updateGroup).toHaveBeenCalledWith('g-1', expect.objectContaining({ start_ip: '192.168.50.50', gateway: '', system_image_id: 'isharedisk' })));
   });
 
@@ -190,14 +190,14 @@ describe('分组页', () => {
     });
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole('button', { name: '新建分组' }));
-    const picker = await screen.findByLabelText('存储节点');
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    const picker = await screen.findByLabelText('Storage Node');
     // 默认自动均衡，运维不必先规划分组
     expect(picker.value).toBe('');
-    expect(Array.from(picker.options).some(o => /自动均衡/.test(o.text))).toBe(true);
+    expect(Array.from(picker.options).some(o => /Automatic balancing/.test(o.text))).toBe(true);
     await user.selectOptions(picker, 'node-b');
-    await user.type(screen.getByLabelText('分组名称'), '放置组');
-    await user.click(screen.getByRole('button', { name: '保存' }));
+    await user.type(screen.getByLabelText('Group Name'), '放置组');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(sent).not.toBeNull());
     expect(sent.storage_server_id).toBe('node-b');
   });
@@ -205,17 +205,17 @@ describe('分组页', () => {
   it('单节点时不出现「存储节点」选择', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole('button', { name: '新建分组' }));
-    await screen.findByLabelText('分组名称');
-    expect(screen.queryByLabelText('存储节点')).toBeNull();
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    await screen.findByLabelText('Group Name');
+    expect(screen.queryByLabelText('Storage Node')).toBeNull();
   });
 
   // 新建分组预填两个公共 DNS（可改），否则客户机有网关却解析不了域名。
   it('新建分组预填两个 DNS，主备顺序按国内网络排', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole('button', { name: '新建分组' }));
-    await screen.findByLabelText('分组名称');
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    await screen.findByLabelText('Group Name');
 
     const dns1 = screen.getByLabelText('DNS1');
     const dns2 = screen.getByLabelText('DNS2');
@@ -241,20 +241,20 @@ describe('分组页', () => {
     });
     renderPage();
     await user.click((await screen.findByText('教学一班')).closest('tr'));
-    await user.click(await screen.findByRole('button', { name: /改网段|编辑/ }));
-    await screen.findByLabelText('分组名称');
-    const start = screen.getByLabelText('起始 IP');
+    await user.click(await screen.findByRole('button', { name: /改网段|Edit/ }));
+    await screen.findByLabelText('Group Name');
+    const start = screen.getByLabelText('Starting IP');
     await user.clear(start);
     await user.type(start, '192.168.50.150');
-    await user.click(screen.getByRole('button', { name: '保存' }));
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
     const dlg = await screen.findByText(/台终端的地址跟着换/);
     const card = dlg.closest('.card');
     // 在线那台要看得出来
     const row = Array.from(card.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('AABBCCDDEE01'));
-    expect(within(row).getByText(/运行中|在线/)).toBeTruthy();
+    expect(within(row).getByText(/Running|Online/)).toBeTruthy();
     // 后果要如实写，不能只说「下次开机生效」
-    expect(card.textContent).toMatch(/续租|断线|掉线/);
+    expect(card.textContent).toMatch(/lease renewal|disconnect|disconnect/);
   });
 
   // 数据盘在新建 / 编辑弹窗里一起设置，不用建完分组再单独配一遍。
@@ -268,12 +268,12 @@ describe('分组页', () => {
       const createGroupDisk = vi.fn(async () => ({}));
       stubApi({ createGroup, createGroupDisk, listConfigs: configsOf });
       renderPage();
-      await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-      await userEvent.type(await screen.findByLabelText('分组名称'), '电竞区');
-      await userEvent.click(screen.getByRole('button', { name: /添加数据盘/ }));
-      expect(screen.getByLabelText('新数据盘 1 的挂载目标').value).toBe('D:');
-      await waitFor(() => expect(screen.getByLabelText('新数据盘 1 的配置').value).toBe('games_default'));
-      await userEvent.click(screen.getByRole('button', { name: '保存' }));
+      await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+      await userEvent.type(await screen.findByLabelText('Group Name'), '电竞区');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      expect(screen.getByLabelText('New Data Disk 1 Mount Target').value).toBe('D:');
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(createGroupDisk).toHaveBeenCalledWith('g-new', { mount_target: 'D:', image_id: 'games', config_id: 'games_default' }));
       expect(createGroup).toHaveBeenCalledTimes(1);
     });
@@ -290,15 +290,15 @@ describe('分组页', () => {
       await screen.findByText('教学一班');
       // 卡片直接显示数据盘，不再要单独的「数据盘」按钮。
       await waitFor(() => expect(screen.getByText('D:')).toBeTruthy());
-      expect(screen.queryByRole('button', { name: /^数据盘$/ })).toBeNull();
+      expect(screen.queryByRole('button', { name: /^Data Disks$/ })).toBeNull();
 
-      await userEvent.click(screen.getByRole('button', { name: /编辑/ }));
-      await screen.findByLabelText('分组名称');
-      await userEvent.click(screen.getByRole('button', { name: /添加数据盘/ }));
-      expect(screen.getByLabelText('新数据盘 1 的挂载目标').value).toBe('E:');
-      await userEvent.click(screen.getByRole('button', { name: '移除数据盘 D:' }));
-      await waitFor(() => expect(screen.getByLabelText('新数据盘 1 的配置').value).toBe('games_default'));
-      await userEvent.click(screen.getByRole('button', { name: '保存' }));
+      await userEvent.click(screen.getByRole('button', { name: /Edit/ }));
+      await screen.findByLabelText('Group Name');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      expect(screen.getByLabelText('New Data Disk 1 Mount Target').value).toBe('E:');
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Data Disk D:' }));
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(createGroupDisk).toHaveBeenCalledWith('g-1', { mount_target: 'E:', image_id: 'games', config_id: 'games_default' }));
       expect(updateGroup).toHaveBeenCalled();
       expect(deleteGroupDisk).toHaveBeenCalledWith('gd-1');
@@ -312,12 +312,12 @@ describe('分组页', () => {
       renderPage();
       await screen.findByText('教学一班');
       await waitFor(() => expect(screen.getByText('D:')).toBeTruthy());
-      expect(screen.queryByText('子网掩码')).toBeNull();
-      await userEvent.click(screen.getByRole('button', { name: /编辑/ }));
-      await screen.findByLabelText('分组名称');
-      expect(screen.queryByText(/随系统盘一起挂载的附加盘/)).toBeNull();
-      await userEvent.click(screen.getByRole('button', { name: '数据盘说明' }));
-      expect(screen.getByText(/随系统盘一起挂载的附加盘/)).toBeTruthy();
+      expect(screen.queryByText('Subnet Mask')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: /Edit/ }));
+      await screen.findByLabelText('Group Name');
+      expect(screen.queryByText(/Additional disks mounted alongside the system disk/)).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: 'Data Disk Help' }));
+      expect(screen.getByText(/Additional disks mounted alongside the system disk/)).toBeTruthy();
     });
 
     // 右上角三个数各带标签：在线 / 已分配 / 容量；按钮不再带数字，免得和它们混淆。
@@ -332,11 +332,11 @@ describe('分组页', () => {
       renderPage();
       const card = (await screen.findByText('教学一班')).closest('.card');
       const stat = (label) => within(card).getByText(label).parentElement.textContent;
-      await waitFor(() => expect(stat('在线')).toBe('1在线'));
-      expect(stat('已分配')).toBe('2已分配');
-      expect(stat('容量')).toBe('2容量');
-      expect(within(card).getByText('容量').parentElement.getAttribute('title')).toMatch(/已满/);
-      expect(within(card).getByRole('button', { name: /查看终端/ })).toBeTruthy();
+      await waitFor(() => expect(stat('Online')).toBe('1Online'));
+      expect(stat('Assigned')).toBe('2Assigned');
+      expect(stat('Capacity')).toBe('2Capacity');
+      expect(within(card).getByText('Capacity').parentElement.getAttribute('title')).toMatch(/full/);
+      expect(within(card).getByRole('button', { name: /View Clients/ })).toBeTruthy();
     });
 
     it('分组建好了但数据盘没加上：弹窗转为编辑，再保存只补加数据盘，不重复建分组', async () => {
@@ -346,16 +346,16 @@ describe('分组页', () => {
       const createGroupDisk = vi.fn(async () => { if (fail) throw new Error('挂载目标重复'); return {}; });
       stubApi({ createGroup, updateGroup, createGroupDisk, listConfigs: configsOf });
       renderPage();
-      await userEvent.click(await screen.findByRole('button', { name: /新建分组/ }));
-      await userEvent.type(await screen.findByLabelText('分组名称'), '电竞区');
-      await userEvent.click(screen.getByRole('button', { name: /添加数据盘/ }));
-      await waitFor(() => expect(screen.getByLabelText('新数据盘 1 的配置').value).toBe('games_default'));
-      await userEvent.click(screen.getByRole('button', { name: '保存' }));
-      expect(await screen.findByText(/分组已创建，数据盘 D: 未添加/)).toBeTruthy();
-      expect(screen.getByText('编辑分组')).toBeTruthy();
+      await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+      await userEvent.type(await screen.findByLabelText('Group Name'), '电竞区');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      expect(await screen.findByText(/Group created; data disk D: could not be added/)).toBeTruthy();
+      expect(screen.getByText('Edit Group')).toBeTruthy();
 
       fail = false;
-      await userEvent.click(screen.getByRole('button', { name: '保存' }));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(createGroupDisk).toHaveBeenCalledTimes(2));
       expect(createGroup).toHaveBeenCalledTimes(1);
       expect(updateGroup).toHaveBeenCalled();

@@ -1,4 +1,4 @@
-// 存储池管理页。后端不提供的指标（吞吐、L2ARC 命中率等）直接不显示，不编造。
+// Storage Pool Management. Do not invent unsupported metrics such as throughput or L2ARC hit rate.
 import React from 'react';
 import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
@@ -9,105 +9,105 @@ import { useResource, useMutation } from '../../lib/hooks.js';
 import { fmtCap } from '../../lib/format.js';
 const { useState, useEffect } = React;
 
-const ROLE_LABEL = { data: "存储盘", read_cache: "读缓存", write_cache: "写缓存", special: "元数据盘", spare: "热备盘" };
-// ZFS 后台正在对池做的操作。
-const OP_LABEL = { resilver: "重建中", remove: "迁移中" };
+const ROLE_LABEL = { data: "Storage Disks", read_cache: "Read Cache", write_cache: "Write Cache", special: "Metadata Disks", spare: "Hot Spares" };
+// Ongoing ZFS pool operations.
+const OP_LABEL = { resilver: "Resilvering", remove: "Migrating" };
 
-// 池的用途：数据池存放全部镜像、配置和客户机克隆；备份池是本地备份的目标；
-// 两者都不是的池等待在备份设置里指定。
+// Data pools contain images, configurations and client clones; backup pools store local backups.
+// Other pools have not yet been assigned a purpose.
 const POOL_ROLE = {
-  data: { cls: "cyan", text: "数据池", hint: "镜像、配置和客户机克隆都存放在这个池" },
-  backup: { cls: "violet", text: "备份池", hint: "本地备份的目标池（在备份设置中选择）" },
+  data: { cls: "cyan", text: "Data Pool", hint: "This pool stores images, configurations and client clones" },
+  backup: { cls: "violet", text: "Backup Pool", hint: "Target pool for local backups (configure in Backup Settings)" },
 };
 const roleRank = (p) => (p.Role === "data" ? 0 : p.Role === "backup" ? 1 : 2);
 
-// 布局建池后无法更改（除非重建），所以每个选项在选之前就说明代价。
+// Layout cannot be changed without recreating the pool, so explain tradeoffs before selection.
 const LAYOUTS = {
-  mirror: { label: "镜像（RAID1）", desc: "每 2（或 3）块盘互为完整副本，再在组间条带。读性能与条带相当、写减半；每组可坏 1 块。推荐用于数据池。" },
-  stripe: { label: "条带", desc: "容量最大、读写最快，但没有冗余：任一块盘损坏，池里全部数据丢失。只适合测试环境。" },
-  raidz1: { label: "raidz1", desc: "一块校验盘，可坏 1 块。随机 IO 只有一块盘的水平，不能移盘；重建慢。" },
-  raidz2: { label: "raidz2", desc: "两块校验盘，可坏 2 块。容量优先、随机 IO 弱、不能移盘，适合备份池。" },
-  raidz3: { label: "raidz3", desc: "三块校验盘，可坏 3 块。同 raidz2，冗余更高、容量更少。" },
+  mirror: { label: "Mirror (RAID1)", desc: "Each two (or three) disks hold a complete copy; mirror groups are striped. Reads scale with groups; writes replicate. Each pair tolerates one disk failure. Recommended for data pools." },
+  stripe: { label: "Stripe", desc: "Highest capacity and throughput, but no redundancy: one failed disk loses the entire pool. Use only for testing." },
+  raidz1: { label: "raidz1", desc: "Single parity, tolerating one disk failure. Random I/O is limited, disk removal unsupported, rebuilds are slow." },
+  raidz2: { label: "raidz2", desc: "Double parity tolerates two failures. Capacity-oriented, weak random I/O, no disk removal; suitable for backup pools." },
+  raidz3: { label: "raidz3", desc: "Triple parity tolerates three failures, with more redundancy and less capacity than raidz2." },
 };
 const LAYOUT_ORDER = ["mirror", "stripe", "raidz1", "raidz2", "raidz3"];
 const RAIDZ_PARITY = { raidz1: 1, raidz2: 2, raidz3: 3 };
 
-// 提交前按 zpool 的命名规则检查：字母开头，之后只能是字母、数字、_ - . :；
-// 不能是 vdev 关键字（如 mirrors 会被 ZFS 以 name is reserved 拒绝），也不能是 c<数字> 形式的设备名。
+// Validate zpool names: begin with a letter, followed by letters, digits, underscores, hyphens, dots or colons.
+// Reject reserved vdev keywords and names starting with c followed by a digit.
 function poolNameProblem(name) {
-  if (!/^[A-Za-z]/.test(name)) return "池名要以字母开头，例如 tank、data-pool";
-  if (!/^[A-Za-z0-9_.:-]+$/.test(name)) return "池名只能包含字母、数字和 _ - . :";
+  if (!/^[A-Za-z]/.test(name)) return "Pool name must start with a letter, e.g. tank or data-pool";
+  if (!/^[A-Za-z0-9_.:-]+$/.test(name)) return "Pool name may contain only letters, digits and _ - . :";
   const lower = name.toLowerCase();
-  if (/^(mirror|raidz|draid|spare)/.test(lower) || lower === "log") return `${name} 是 ZFS 保留名（mirror / raidz / draid / spare 开头及 log 都不能作池名），请换一个`;
-  if (/^c[0-9]/.test(lower)) return `${name} 不能作池名：ZFS 不允许 c 加数字开头的名字`;
+  if (/^(mirror|raidz|draid|spare)/.test(lower) || lower === "log") return `${name} is a reserved ZFS name (mirror / raidz / draid / spare prefixes and log are forbidden). Choose another.`;
+  if (/^c[0-9]/.test(lower)) return `${name} is invalid: ZFS forbids a name beginning with c followed by a digit`;
   return "";
 }
 
-// layoutLabel 给出表格和详情里的布局说法：「镜像（RAID1）×3」「raidz2」「条带」。读到池后组数取自池本身。
-// 本产品的「镜像」指系统镜像，磁盘镜像都带上 RAID1，免得混淆。
+// layoutLabel describes RAID1 mirror groups, raidz levels and stripes from the actual pool layout.
+// Say RAID1 for disk mirrors to distinguish them from system images.
 function layoutLabel(pool) {
   const layout = pool.Layout || "stripe";
   if (layout === "mirror") {
     const groups = (pool.Groups || []).filter(g => g.Role === "data" && g.Kind === "mirror").length;
-    return groups ? `镜像（RAID1）×${groups}` : `镜像（RAID1）${pool.GroupWidth || 2} 路`;
+    return groups ? `Mirror (RAID1)×${groups}` : `Mirror (RAID1) · ${pool.GroupWidth || 2}-way`;
   }
   return (LAYOUTS[layout] || {}).label || layout;
 }
 
-// poolPlan 按后端的规则校验所选磁盘与布局，写明还差几块，并预估容量
-//（镜像：按选择顺序每组最小盘之和；raidz：数据盘数 × 最小盘 × 0.9，扣除填充与预留）。
-// 只是预估，建成后以池上报的 used + available 为准。
+// poolPlan validates disk selection according to backend layout rules and estimates capacity.
+// Mirrors use each group's smallest member; raidz uses data count × minimum member × 0.9.
+// Estimates only; actual capacity comes from used + available reported by the pool.
 function poolPlan(layout, width, disks) {
   const n = disks.length;
   if (!n) return { ok: false, message: "" };
   const sizes = disks.map(d => Number(d.Size || 0));
   const min = (arr) => arr.reduce((m, v) => (m == null || v < m ? v : m), null) || 0;
   if (layout === "stripe") {
-    return { ok: true, message: `条带 ${n} 块 ≈ ${fmtCap(sizes.reduce((a, b) => a + b, 0))} 可用 · 无冗余` };
+    return { ok: true, message: `Stripe ${n} disks ≈ ${fmtCap(sizes.reduce((a, b) => a + b, 0))} available · no redundancy` };
   }
   if (layout === "mirror") {
     if (n < width || n % width !== 0) {
-      return { ok: false, message: `镜像池按 ${width} 块一组，请再选 ${width - (n % width)} 块（已选 ${n} 块）` };
+      return { ok: false, message: `Mirrored pool requires ${width} disks per group. Select ${width - (n % width)} more (selected ${n} disks)` };
     }
     let total = 0;
     for (let i = 0; i < n; i += width) total += min(sizes.slice(i, i + width));
-    return { ok: true, message: `镜像 ${n / width} 组 ≈ ${fmtCap(total)} 可用 · 每组可坏 ${width - 1} 块` };
+    return { ok: true, message: `Mirror ${n / width} groups ≈ ${fmtCap(total)} available · tolerates ${width - 1} disk failures per group` };
   }
   const parity = RAIDZ_PARITY[layout] || 0;
   const need = parity + 2;
-  if (n < need) return { ok: false, message: `${layout} 至少 ${need} 块盘，请再选 ${need - n} 块（已选 ${n} 块）` };
-  return { ok: true, message: `${layout} ≈ ${fmtCap((n - parity) * min(sizes) * 0.9)} 可用 · 可坏 ${parity} 块` };
+  if (n < need) return { ok: false, message: `${layout} requires at least ${need} disks. Select ${need - n} more (selected ${n} disks)` };
+  return { ok: true, message: `${layout} ≈ ${fmtCap((n - parity) * min(sizes) * 0.9)} available · tolerates ${parity} disks` };
 }
 
 function healthMeta(h) {
   const up = String(h || "").toUpperCase();
-  if (up === "ONLINE") return { cls: "emerald", dot: "live", text: "在线" };
-  if (up === "DEGRADED") return { cls: "amber", dot: "warn", text: "降级" };
-  if (up === "AVAIL") return { cls: "emerald", dot: "live", text: "待命" }; // 热备盘，待命
-  if (up === "INUSE") return { cls: "amber", dot: "warn", text: "顶替中" }; // 热备盘，正在顶替故障盘
-  if (up === "" || up === "PENDING") return { cls: "", dot: "cyan", text: "处理中" };
-  if (up === "MISSING") return { cls: "rose", dot: "err", text: "未找到", title: "本机上已找不到该池" };
-  // 其余都是故障；ZFS 原词留在悬停里，便于搜索。
-  if (up === "FAULTED") return { cls: "rose", dot: "err", text: "故障", title: h };
-  if (up === "OFFLINE") return { cls: "rose", dot: "err", text: "已离线", title: h };
-  if (up === "UNAVAIL") return { cls: "rose", dot: "err", text: "不可用", title: h };
-  if (up === "REMOVED") return { cls: "rose", dot: "err", text: "已拔出", title: h };
-  if (up === "SUSPENDED") return { cls: "rose", dot: "err", text: "已暂停", title: h };
+  if (up === "ONLINE") return { cls: "emerald", dot: "live", text: "Online" };
+  if (up === "DEGRADED") return { cls: "amber", dot: "warn", text: "Degraded" };
+  if (up === "AVAIL") return { cls: "emerald", dot: "live", text: "Available Spare" }; // Hot spare available
+  if (up === "INUSE") return { cls: "amber", dot: "warn", text: "Replacing" }; // Hot spare replacing failed disk
+  if (up === "" || up === "PENDING") return { cls: "", dot: "cyan", text: "Processing" };
+  if (up === "MISSING") return { cls: "rose", dot: "err", text: "Missing", title: "Pool missing on this node" };
+  // Other ZFS states indicate failures; retain raw statuses in hover text for diagnostics.
+  if (up === "FAULTED") return { cls: "rose", dot: "err", text: "Faulted", title: h };
+  if (up === "OFFLINE") return { cls: "rose", dot: "err", text: "Offline", title: h };
+  if (up === "UNAVAIL") return { cls: "rose", dot: "err", text: "Unavailable", title: h };
+  if (up === "REMOVED") return { cls: "rose", dot: "err", text: "Removed", title: h };
+  if (up === "SUSPENDED") return { cls: "rose", dot: "err", text: "Suspended", title: h };
   return { cls: "rose", dot: "err", text: h };
 }
 
-// 节点回答「没有这个池」：只剩这条记录。
+// A node may report a missing pool even though its database record remains.
 const isMissing = (p) => String(p?.Health || "").toUpperCase() === "MISSING";
 
-// 按角色取池的磁盘，优先用带状态的 DiskItems，没有状态时退回扁平路径数组。
+// Prefer status-bearing DiskItems when listing pool disks; fall back to path arrays.
 function disksByRole(pool, role, fallbackKey) {
   const items = (pool.DiskItems || []).filter(d => d.Role === role);
   if (items.length) return items;
   return (pool[fallbackKey] || []).map(path => ({ Path: path, Role: role, Status: "" }));
 }
 
-// 池的写操作必须在盘所在的节点上执行；本机的池仍走本地调用，别的节点的池按名字路由过去。
-// 返回的对象与 api 同形，调用点不用改写法。
+// Dispatch pool writes to the node holding the disks; use local calls for local pools.
+// Keep returned API shape identical so callers need no changes.
 function poolWriter(node) {
   if (!node) return api;
   const at = (suffix) => (id, body) => api.clusterPoolAction(node, id, suffix, body);
@@ -139,7 +139,7 @@ function PageStorage() {
   const [modal, setModal] = useState(null);
   const [form, setForm] = useState({ name: "", disks: [], layout: "mirror", group_width: 2 });
 
-  // 各请求独立结算：磁盘探测失败（如 lsblk 不可用）不能让池列表变空，反之亦然。
+  // Settle discovery independently so lsblk failure does not clear the pool list.
   const { data, loading, error, reload: load } = useResource(async () => {
     const [pr, dr, nr, cr] = await Promise.allSettled([
       api.listPools(), api.listDisks(), api.listClusterNodes(), api.listClusterPools(),
@@ -157,17 +157,17 @@ function PageStorage() {
   const nodes = (data && data.nodes) || [];
   const cluster = (data && data.cluster) || null;
   const clustered = nodes.length > 1;
-  // 池记录会复制，本地列表包含各节点的池，但只有本机的有容量数字；
-  // 其余节点的容量和健康只能取自按节点汇总的结果。
+  // Replicated pool records include other nodes, but only local pools have capacity numbers.
+  // Obtain remote capacity and health from per-node cluster status.
   const nodeOf = (id) => nodes.find(n => n.id === id) || null;
   const selfNodeID = ((cluster && cluster.nodes) || []).find(n => n.is_self)?.node_id || "";
   const nodeLabel = (id) => (nodeOf(id)?.ip) || id || "—";
   const pools = clustered && cluster
     ? (cluster.nodes || []).flatMap(n => (n.pools || []).map(p => ({ ...p, ServerID: p.ServerID || n.node_id, __node: n })))
     : localPools;
-  // 没有应答的节点要单独点出，不能直接略去：少一行读起来像「那台没有存储」。
+  // List unreachable nodes rather than implying they have no storage.
   const unreachableNodes = clustered && cluster ? (cluster.nodes || []).filter(n => !n.reachable) : [];
-  // 本机的池返回 null，走本地调用。
+  // A null node means local pool calls.
   const remoteNodeOf = (p) => (clustered && p && p.__node && !p.__node.is_self ? p.__node.node_id : null);
   const { busy, run } = useMutation(store.toast);
 
@@ -180,13 +180,13 @@ function PageStorage() {
     if (filterHealth === "online") return up === "ONLINE";
     if (filterHealth === "abnormal") return up !== "ONLINE" && up !== "PENDING" && up !== "";
     return true;
-  }).sort((a, b) => roleRank(a) - roleRank(b)); // 数据池在前；同类保持接口给的节点顺序
+  }).sort((a, b) => roleRank(a) - roleRank(b)); // Data pools first; retain node order within a role
 
   const totalCap = clustered && cluster ? Number(cluster.total_capacity || 0) : pools.reduce((s, p) => s + Number(p.Capacity || 0), 0);
   const totalUsed = clustered && cluster ? Number(cluster.total_used || 0) : pools.reduce((s, p) => s + Number(p.Used || 0), 0);
   const onlineN = pools.filter(p => String(p.Health).toUpperCase() === "ONLINE").length;
-  // 每台最多两个池（数据 + 备份）。只有所有已列出节点都满了才锁按钮；
-  // 部分节点满的情况交给后端拒绝。
+  // Maximum two pools per node (data and backup); disable Create only if all listed nodes are full.
+  // Backend rejects invalid selection of a full node.
   const poolsByServer = pools.reduce((m, p) => { const k = p.ServerID || ""; m[k] = (m[k] || 0) + 1; return m; }, {});
   const atPoolLimit = pools.length > 0 && Object.values(poolsByServer).every(n => n >= 2);
   const present = pools.filter(p => !isMissing(p));
@@ -197,7 +197,7 @@ function PageStorage() {
 
   const openCreate = () => { setForm({ name: "", disks: [], layout: "mirror", group_width: 2, node: "", role: "" }); setModal("create"); };
 
-  // 每台一个数据池、一个备份池：按所选节点已有的，算出还能建哪种
+  // Each node can have one data and one backup pool; calculate available roles.
   const createNodeID = form.node || selfNodeID;
   const nodePools = clustered ? pools.filter(p => (p.ServerID || "") === createNodeID) : pools;
   const hasData = nodePools.find(p => p.Role === "data");
@@ -208,10 +208,10 @@ function PageStorage() {
   ].filter(Boolean);
   const createRole = roleChoices.length === 1 ? roleChoices[0].value
     : roleChoices.some(o => o.value === form.role) ? form.role : "";
-  const roleHint = hasData && hasBackup ? `这台已有数据池 ${hasData.Name} 和备份池 ${hasBackup.Name}，不能再创建`
-    : hasData ? `这台已有数据池 ${hasData.Name}，只能建备份池`
-    : hasBackup ? `这台已有备份池 ${hasBackup.Name}，只能建数据池`
-    : "数据池存放镜像、配置和客户机克隆；备份池是本地备份的目标";
+  const roleHint = hasData && hasBackup ? `This node already has data pool ${hasData.Name} and backup pool ${hasBackup.Name}; cannot create another`
+    : hasData ? `This node already has data pool ${hasData.Name}; only a backup pool can be created`
+    : hasBackup ? `This node already has backup pool ${hasBackup.Name}; only a data pool can be created`
+    : "Data pools store images, configurations and client clones; backup pools are local backup targets";
 
   const pickedDisks = form.disks.map(path => disks.find(d => d.Path === path) || { Path: path, Size: 0 });
   const groupWidth = form.layout === "mirror" ? (form.group_width || 2) : 1;
@@ -219,57 +219,57 @@ function PageStorage() {
 
   const doCreate = async () => {
     const name = form.name.trim();
-    if (!createRole) { store.toast("请选择存储池类型", "err"); return; }
-    if (!name) { store.toast("请输入池名称", "err"); return; }
-    if (/\s/.test(name)) { store.toast("池名不能包含空格", "err"); return; }
+    if (!createRole) { store.toast("Select a pool type", "err"); return; }
+    if (!name) { store.toast("Enter pool name", "err"); return; }
+    if (/\s/.test(name)) { store.toast("Pool name cannot contain spaces", "err"); return; }
     const nameProblem = poolNameProblem(name);
     if (nameProblem) { store.toast(nameProblem, "err"); return; }
-    if (!form.disks.length) { store.toast("请至少选择一块磁盘", "err"); return; }
+    if (!form.disks.length) { store.toast("Select at least one disk", "err"); return; }
     if (!plan.ok) { store.toast(plan.message, "err"); return; }
     const body = { name, disks: form.disks, layout: form.layout, group_width: groupWidth, role: createRole };
     const target = clustered && form.node && form.node !== selfNodeID ? form.node : "";
-    // 最后确认一次：条带没有冗余；建在别的机器上不容易察觉。
+    // Confirm again for nonredundant stripes or remote node creation.
     const stripe = form.layout === "stripe";
     if (stripe || target) {
-      const where = target ? `将在 ${nodeLabel(target)} 上创建存储池 ${name}，使用磁盘：${form.disks.join("、")}。` : "";
-      const risk = stripe ? `条带布局无冗余：任一磁盘故障，${name} 中的全部镜像、配置、还原点及客户机克隆将丢失且无法恢复。确认以条带布局创建？` : "";
+      const where = target ? `Create pool on ${nodeLabel(target)} with name ${name}; disks: ${form.disks.join(", ")}.` : "";
+      const risk = stripe ? `Stripe has no redundancy. Failure of any disk loses all data in ${name} (images, configurations, restore points and client clones). Create anyway?` : "";
       const sure = await conf.ask({
-        title: stripe ? "条带布局没有冗余" : "在其他服务器上创建",
+        title: stripe ? "Stripe Has No Redundancy" : "Create on Another Server",
         message: [where, risk].filter(Boolean).join("\n"),
-        danger: stripe, confirmText: stripe ? "仍要创建" : "创建",
+        danger: stripe, confirmText: stripe ? "Create Anyway" : "Create",
       });
       if (!sure) return;
     }
     const ok = await run(
       () => (target ? api.clusterCreatePool(target, body) : api.createPool(body)),
-      (target ? `存储池 ${name} 已提交到 ${nodeLabel(target)} 执行，结果见任务列表` : `存储池 ${name} 创建任务已提交（后台执行）`)
-        + (createRole === "data" ? "；建成后将自动重启服务以启用该数据池" : ""),
-      { reload: load, errMsg: "创建失败" });
+      (target ? `Storage Pool ${name} submitted on ${nodeLabel(target)}; see Task Center for results` : `Storage Pool ${name} creation task submitted (background)`)
+        + (createRole === "data" ? "; services restart automatically after creating the data pool" : ""),
+      { reload: load, errMsg: "Creation failed" });
     if (ok) setModal(null);
   };
 
   const doDestroy = async (pool) => {
     const node = remoteNodeOf(pool);
     const where = node ? nodeLabel(node) : "";
-    // 集群里池名不唯一（几台都叫 tank），确认时输入的是目标节点地址而不是池名。
+    // Pool names can repeat across nodes. Confirm a remote operation using the node address.
     const ok = isMissing(pool) ? await conf.ask({
-      title: "删除存储池记录",
-      message: `${where || "本机"}上已找不到 ${pool.Name}，将删除这条记录，不会改动任何磁盘。删除后可在该服务器上重新创建同名的池。`,
-      confirmText: "删除",
+      title: "Delete Pool Record",
+      message: `${where || "Local node"} no longer has pool ${pool.Name}; delete its record only. No disks are modified. You may recreate a pool with that name afterward.`,
+      confirmText: "Delete",
     }) : await conf.ask({
-      title: "销毁存储池",
+      title: "Destroy Storage Pool",
       message: node
-        ? `销毁 ${where} 上的 ${pool.Name}，将删除该池及其全部数据（镜像、配置、还原点、客户机克隆），且无法恢复。\n这台不是你正在使用的服务器，请核对地址后再继续。`
-        : `销毁 ${pool.Name} 将删除该池及其全部数据（镜像、配置、还原点、客户机克隆），且无法恢复。`,
-      danger: true, confirmText: "销毁", typeToConfirm: node ? where : pool.Name,
+        ? `Destroy pool ${pool.Name} on ${where}, deleting all images, configurations, restore points and client clones. This cannot be undone. Verify the remote node address.`
+        : `Destroy ${pool.Name} deletes all its images, configurations, restore points and client clones permanently.`,
+      danger: true, confirmText: "Destroy", typeToConfirm: node ? where : pool.Name,
     });
     if (!ok) return;
-    if (await run(() => poolWriter(node).deletePool(pool.ID), `存储池 ${pool.Name} 销毁任务已提交`, { reload: load, errMsg: "销毁失败" })) {
+    if (await run(() => poolWriter(node).deletePool(pool.ID), `Storage Pool ${pool.Name} destruction task submitted`, { reload: load, errMsg: "Destroy failed" })) {
       setSelectedId(null);
     }
   };
 
-  // 建池要列目标节点自己的盘：本机的 /dev/sdb 在那台上可能是系统盘、不存在或已属于别的池。
+  // Show disks on the selected target node; /dev/sdb may refer to a different disk there.
   const createNode = (form && form.node) || "";
   const { data: nodeDiskData, loading: nodeDisksLoading } = useResource(
     async () => (clustered && createNode ? api.listClusterDisks(createNode) : null),
@@ -278,10 +278,10 @@ function PageStorage() {
   const createDisks = clustered && createNode
     ? ((nodeDiskData && nodeDiskData.items) || [])
     : disks;
-  // 读不到的节点的池容量无从得知，总量不完整；这条注解跟在总量数字后面，不单开横幅。
+  // Annotate totals when unreachable nodes have unknown capacity.
   const missing = unreachableNodes.length;
-  const partial = missing ? ` · 不含读不到的 ${missing} 台` : "";
-  // 别的节点的池，加盘、换盘、加缓存都发往那台，选盘也要列那台自己的盘。
+  const partial = missing ? ` · Excludes ${missing} nodes` : "";
+  // Send remote add/replace/cache operations to that node using its own disk inventory.
   const detailNode = remoteNodeOf(selected);
   const { data: detailDiskData, reload: reloadDetailDisks } = useResource(
     async () => (detailNode ? api.listClusterDisks(detailNode) : null),
@@ -294,48 +294,48 @@ function PageStorage() {
 
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-      {/* 汇总统计，全部由池数据算出 */}
+      {/* Derive summary metrics from actual pool data. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
-        <StatCard label="存储池" value={pools.length} unit="个" accent="cyan"
+        <StatCard label="Storage Pool" value={pools.length} unit=" pools" accent="cyan"
           sub={clustered
-            ? `${onlineN} 在线 · ${nodes.length} 台服务器${missing ? ` · ${missing} 台读不到` : ""}`
-            : `${onlineN} 在线`}/>
-        <StatCard label="总容量" value={fmtCap(totalCap).split(" ")[0]} unit={fmtCap(totalCap).split(" ")[1] || ""} accent="violet"
-          sub={`${dataDiskN} 块存储盘${partial}`}/>
-        <StatCard label="已使用" value={fmtCap(totalUsed).split(" ")[0]} unit={fmtCap(totalUsed).split(" ")[1] || ""} accent="amber"
-          sub={`可用 ${fmtCap(totalCap - totalUsed)} · ${usePct}% 使用率${partial}`} pct={usePct}/>
-        <StatCard label="缓存盘" value={rcN + wcN} unit="块" accent="emerald" sub={`读 ${rcN} · 写 ${wcN}`}/>
+            ? `${onlineN} online · ${nodes.length} servers${missing ? ` · ${missing} unreachable` : ""}`
+            : `${onlineN} online`}/>
+        <StatCard label="Total Capacity" value={fmtCap(totalCap).split(" ")[0]} unit={fmtCap(totalCap).split(" ")[1] || ""} accent="violet"
+          sub={`${dataDiskN} storage disks${partial}`}/>
+        <StatCard label="Used" value={fmtCap(totalUsed).split(" ")[0]} unit={fmtCap(totalUsed).split(" ")[1] || ""} accent="amber"
+          sub={`Available ${fmtCap(totalCap - totalUsed)} · ${usePct}% Utilization${partial}`} pct={usePct}/>
+        <StatCard label="Cache Disks" value={rcN + wcN} unit="disks" accent="emerald" sub={`Read ${rcN} · Write ${wcN}`}/>
       </div>
 
-      {/* 筛选栏 */}
+      {/* Filter controls */}
       <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 12 }}>
-        <span className="lbl">状态</span>
-        <Select value={filterHealth} onChange={setFilterHealth} aria-label="按状态筛选" options={[
-          { value: "all", label: "全部" },
-          { value: "online", label: "在线" },
-          { value: "abnormal", label: "异常" },
+        <span className="lbl">Status</span>
+        <Select value={filterHealth} onChange={setFilterHealth} aria-label="Filter by Status" options={[
+          { value: "all", label: "All" },
+          { value: "online", label: "Online" },
+          { value: "abnormal", label: "Abnormal" },
         ]} style={{ width: 120 }}/>
-        <span className="lbl">类型</span>
-        <Select value={filterRole} onChange={setFilterRole} aria-label="按类型筛选" options={[
-          { value: "all", label: "全部" },
-          { value: "data", label: "数据池" },
-          { value: "backup", label: "备份池" },
+        <span className="lbl">Type</span>
+        <Select value={filterRole} onChange={setFilterRole} aria-label="Filter by Type" options={[
+          { value: "all", label: "All" },
+          { value: "data", label: "Data Pool" },
+          { value: "backup", label: "Backup Pool" },
         ]} style={{ width: 120 }}/>
         <div style={{ flex: 1 }}/>
-        <button className="btn ghost icon" onClick={() => load()} title="立即刷新" aria-label="立即刷新"><Icons.Refresh size={13}/></button>
-        {atPoolLimit && <span className="hint">每个节点最多两个存储池（数据池 + 备份池）；扩容请给数据池加盘</span>}
+        <button className="btn ghost icon" onClick={() => load()} title="Refresh now" aria-label="Refresh now"><Icons.Refresh size={13}/></button>
+        {atPoolLimit && <span className="hint">At most two pools per node (data + backup). Add disks to expand capacity.</span>}
         <button className="btn primary" onClick={openCreate} disabled={atPoolLimit}
-          title={atPoolLimit ? "每个节点最多两个存储池（一个数据池、一个备份池）" : undefined}>
-          <Icons.Plus size={12}/> 创建存储池
+          title={atPoolLimit ? "At most two pools per node (one data and one backup)" : undefined}>
+          <Icons.Plus size={12}/> Create Storage Pool
         </button>
       </div>
 
-      {/* 池列表 */}
+      {/* Pool list */}
       <div className="card" style={{ padding: 0 }}>
         <table className="t">
           <thead><tr>
-            <th>池名</th><th>服务器</th><th>布局</th><th>容量</th><th>存储盘</th>
-            <th>读 / 写缓存</th><th>状态</th><th className="t-actions"></th>
+            <th>Pool Name</th><th>Server</th><th>Layout</th><th>Capacity</th><th>Storage Disks</th>
+            <th>Read / Write Cache</th><th>Status</th><th className="t-actions"></th>
           </tr></thead>
           <tbody>
             {filtered.map((p) => {
@@ -348,17 +348,17 @@ function PageStorage() {
                     const role = POOL_ROLE[p.Role];
                     return role
                       ? <span className={`chip ${role.cls}`} title={role.hint}>{role.text}</span>
-                      : <span className="chip" title="尚未指定用途；可在备份设置中选作备份池">未指定</span>;
+                      : <span className="chip" title="Unassigned purpose; choose it for backups under Backup Settings">Unassigned</span>;
                   })()}</div></td>
-                  {/* 节点 ID 是 machine-id 的哈希，运维认不出；显示 IP。 */}
+                  {/* Display node IP, not hashed machine ID. */}
                   <td className="muted mono">{clustered ? nodeLabel(p.ServerID) : (p.ServerID || "—")}</td>
                   <td><span className={`chip ${(p.Layout || "stripe") === "stripe" ? "" : "cyan"}`}>{layoutLabel(p)}</span></td>
                   <td style={{ minWidth: 250 }}>
-                    {isMissing(p) ? <span className="muted">本机上已找不到该池</span> : <div className="row" style={{ gap: 8 }}>
-                      {/* 限制最大宽度：自动表格布局会把窄列让出的空间都给这一列，不限宽时条会拉到约 450px。 */}
+                    {isMissing(p) ? <span className="muted">Pool missing on this node</span> : <div className="row" style={{ gap: 8 }}>
+                      {/* Constrain this column's width so the usage bar does not grow excessively. */}
                       <div className={`bar ${pct > 85 ? "rose" : pct > 70 ? "amber" : ""}`} style={{ flex: 1, minWidth: 60, maxWidth: 180 }}><span style={{ width: `${pct}%` }}/></div>
-                      {/* 按内容定宽且不换行，条占剩余空间。可用量单独写出：ZFS 按它判定 `out of space`。 */}
-                      <span className="mono" style={{ fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>已用 {fmtCap(used)} · 可用 {fmtCap(cap - used)}</span>
+                      {/* Keep capacity text unwrapped; show available space separately because ZFS uses it for out-of-space decisions. */}
+                      <span className="mono" style={{ fontSize: 12, whiteSpace: "nowrap", flexShrink: 0 }}>Used {fmtCap(used)} · Available {fmtCap(cap - used)}</span>
                     </div>}
                   </td>
                   <td className="mono">{isMissing(p) ? "—" : (p.Disks || []).length}</td>
@@ -369,11 +369,11 @@ function PageStorage() {
                     <span className={`chip ${hm.cls}`}>{hm.dot && <span className={`dot ${hm.dot}`}/>}{hm.text}</span>
                     {p.Operation && <span className="mono meta" style={{ marginLeft: 6 }}>{OP_LABEL[p.Operation] || p.Operation} {p.Progress}</span>}
                   </td>
-                  <td className="t-actions"><div><button className="btn ghost icon" title="查看池详情" aria-label={`查看 ${p.Name} 详情`}><Icons.Chevron size={12}/></button></div></td>
+                  <td className="t-actions"><div><button className="btn ghost icon" title="View Pool Details" aria-label={`View details for ${p.Name}`}><Icons.Chevron size={12}/></button></div></td>
                 </tr>
               );
             })}
-            <TableState colSpan={8} loading={loading} error={error} empty={!filtered.length} hint={pools.length ? "没有匹配的存储池" : "暂无存储池 · 点右上角创建"}/>
+            <TableState colSpan={8} loading={loading} error={error} empty={!filtered.length} hint={pools.length ? "No matching storage pools" : "No pools. Select Create Storage Pool."}/>
           </tbody>
         </table>
       </div>
@@ -382,43 +382,43 @@ function PageStorage() {
         onDestroy={() => doDestroy(selected)} remoteNode={detailNode} remoteLabel={nodeLabel(detailNode)}
         serverLabel={clustered ? nodeLabel(selected.ServerID) : (selected.ServerID || "—")}/>}
 
-      <Modal open={modal === "create"} onClose={() => !busy && setModal(null)} title="创建存储池" size="md"
-        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>取消</button>
-          <button className="btn primary" disabled={busy || !createRole || (form.disks.length > 0 && !plan.ok)} onClick={doCreate}>{busy ? "创建中…" : "创建"}</button></>}>
+      <Modal open={modal === "create"} onClose={() => !busy && setModal(null)} title="Create Storage Pool" size="md"
+        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button>
+          <button className="btn primary" disabled={busy || !createRole || (form.disks.length > 0 && !plan.ok)} onClick={doCreate}>{busy ? "Creating…" : "Create"}</button></>}>
         {clustered && (
-          <Field label="建在哪台" required hint="池建在哪台服务器上，就用那台自己的盘；选错机器，选出来的盘不是你以为的那块">
-            <Select value={form.node || selfNodeID} aria-label="建在哪台"
+          <Field label="Target Server" required hint="Select the node that owns the disks. Disk names refer to physical devices on that specific server.">
+            <Select value={form.node || selfNodeID} aria-label="Target Server"
               onChange={v => setForm({ ...form, node: v, disks: [] })}
               options={nodes.map(n => ({
                 value: n.id,
-                label: `${n.ip}${n.ha_state === "active" ? "（主机）" : ""}${n.online ? "" : " · 离线"}`,
+                label: `${n.ip}${n.ha_state === "active" ? " (active)" : ""}${n.online ? "" : " · offline"}`,
               }))} style={{ width: "100%" }}/>
           </Field>
         )}
-        <Field label="存储池类型" required hint={roleHint}>
-          <Select value={createRole} aria-label="存储池类型" disabled={!roleChoices.length}
+        <Field label="Pool Type" required hint={roleHint}>
+          <Select value={createRole} aria-label="Pool Type" disabled={!roleChoices.length}
             onChange={v => setForm({ ...form, role: v })}
-            options={!roleChoices.length ? [{ value: "", label: "不能再创建" }]
-              : roleChoices.length > 1 ? [{ value: "", label: "请选择" }, ...roleChoices] : roleChoices}/>
+            options={!roleChoices.length ? [{ value: "", label: "Cannot create more pools" }]
+              : roleChoices.length > 1 ? [{ value: "", label: "Select…" }, ...roleChoices] : roleChoices}/>
         </Field>
-        <Field label="池名称" required hint="ZFS 池名，字母/数字/下划线，不含空格">
+        <Field label="Pool Name" required hint="ZFS pool name; letters, digits and underscores, no spaces.">
           <input className="input mono" style={{ width: "100%" }} value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="tank2"/>
         </Field>
-        <Field label="布局" required hint={LAYOUTS[form.layout].desc}>
+        <Field label="Layout" required hint={LAYOUTS[form.layout].desc}>
           <div className="row" style={{ gap: 10, flexWrap: "wrap" }}>
             <SegFilter value={form.layout} onChange={v => setForm({ ...form, layout: v })}
               options={LAYOUT_ORDER.map(id => ({ id, label: LAYOUTS[id].label }))}/>
             {form.layout === "mirror" && (
               <div className="row" style={{ gap: 6 }}>
-                <span className="lbl">每组</span>
+                <span className="lbl">Per Group</span>
                 <Select value={String(form.group_width || 2)} onChange={v => setForm({ ...form, group_width: Number(v) })}
-                  options={[{ value: "2", label: "2 路" }, { value: "3", label: "3 路" }]} style={{ width: 80 }}/>
+                  options={[{ value: "2", label: "2-way" }, { value: "3", label: "3-way" }]} style={{ width: 80 }}/>
               </div>
             )}
           </div>
         </Field>
-        <Field label={`选择磁盘 · 已选 ${form.disks.length}`} required
-          hint={plan.message ? <span className={plan.ok ? "mono" : ""} style={{ color: plan.ok ? "var(--fg-mute)" : "var(--amber)" }}>{plan.message}</span> : "镜像按选择顺序两两成组；raidz 全部盘为一组"}>
+        <Field label={`Select disks · Selected ${form.disks.length}`} required
+          hint={plan.message ? <span className={plan.ok ? "mono" : ""} style={{ color: plan.ok ? "var(--fg-mute)" : "var(--amber)" }}>{plan.message}</span> : "Mirrors pair disks in selection order; raidz uses all selected disks as one group."}>
           <DiskPicker disks={createDisks} selected={form.disks} onToggle={(path, on) => {
             const set = new Set(form.disks);
             on ? set.add(path) : set.delete(path);
@@ -426,7 +426,7 @@ function PageStorage() {
           }}/>
         </Field>
         <div style={{ background: "var(--amber-soft)", border: "1px solid oklch(0.55 0.10 80 / 0.3)", borderRadius: 6, padding: "10px 12px", fontSize: 12, color: "var(--amber)", display: "flex", alignItems: "center", gap: 8 }}>
-          <Icons.Shield size={14} style={{ flexShrink: 0 }}/> 选中的磁盘将被 ZFS 接管并格式化，原有数据将丢失
+          <Icons.Shield size={14} style={{ flexShrink: 0 }}/> Selected disks will be formatted by ZFS and all existing data erased.
         </div>
       </Modal>
       {conf.node}
@@ -434,10 +434,10 @@ function PageStorage() {
   );
 }
 
-// DiskPicker 列出物理磁盘，已占用的禁选。
+// DiskPicker lists physical disks and disables in-use devices.
 function DiskPicker({ disks, selected, onToggle }) {
   if (!disks.length) {
-    return <div style={{ background: "var(--bg-0)", border: "1px solid var(--line)", borderRadius: 6, padding: 14, fontSize: 12, color: "var(--fg-faint)", textAlign: "center" }}>未探测到可用磁盘</div>;
+    return <div style={{ background: "var(--bg-0)", border: "1px solid var(--line)", borderRadius: 6, padding: 14, fontSize: 12, color: "var(--fg-faint)", textAlign: "center" }}>No available disks detected</div>;
   }
   return (
     <div style={{ background: "var(--bg-0)", borderRadius: 6, border: "1px solid var(--line)", padding: 10, display: "flex", flexDirection: "column", gap: 6, maxHeight: 220, overflowY: "auto" }}>
@@ -451,7 +451,7 @@ function DiskPicker({ disks, selected, onToggle }) {
             {d.Type && <span className="chip">{d.Type}</span>}
             <span className="mono muted meta">{fmtCap(d.Size)}</span>
             {d.Model && <span className="muted meta ellip" style={{ maxWidth: 140 }}>{d.Model}</span>}
-            <span style={{ marginLeft: "auto", fontSize: 12, color: disabled ? "var(--amber)" : "var(--emerald)" }}>{disabled ? `占用${d.UsedBy ? " · " + d.UsedBy : ""}` : "可用"}</span>
+            <span style={{ marginLeft: "auto", fontSize: 12, color: disabled ? "var(--amber)" : "var(--emerald)" }}>{disabled ? `In Use${d.UsedBy ? " · " + d.UsedBy : ""}` : "Available"}</span>
           </label>
         );
       })}
@@ -459,16 +459,16 @@ function DiskPicker({ disks, selected, onToggle }) {
   );
 }
 
-// DiskPickModal 为加盘、加缓存挑空闲盘。validate(picked) 返回 { ok, message }，
-// 所选不符合池布局时（镜像须整组、raidz 须整组、镜像附加须恰好一块）禁用确认按钮。
+// DiskPickModal selects free disks; validate(picked) returns {ok, message}.
+// Disable confirmation for invalid layout groups or a mirror attachment with anything but one disk.
 function DiskPickModal({ open, title, freeDisks, busy, onClose, onConfirm, validate, hint }) {
   const [picked, setPicked] = useState([]);
   useEffect(() => { if (open) setPicked([]); }, [open]);
   const check = picked.length && validate ? validate(picked) : { ok: picked.length > 0, message: "" };
   return (
     <Modal open={open} onClose={() => !busy && onClose()} title={title} size="md"
-      footer={<><button className="btn" disabled={busy} onClick={onClose}>取消</button>
-        <button className="btn primary" disabled={busy || !picked.length || !check.ok} onClick={() => onConfirm(picked)}>{busy ? "提交中…" : "确认"}</button></>}>
+      footer={<><button className="btn" disabled={busy} onClick={onClose}>Cancel</button>
+        <button className="btn primary" disabled={busy || !picked.length || !check.ok} onClick={() => onConfirm(picked)}>{busy ? "Submitting…" : "Confirm"}</button></>}>
       {hint && <div className="hint" style={{ marginBottom: 8 }}>{hint}</div>}
       <DiskPicker disks={freeDisks} selected={picked} onToggle={(path, on) => {
         setPicked(prev => on ? [...new Set([...prev, path])] : prev.filter(p => p !== path));
@@ -478,14 +478,14 @@ function DiskPickModal({ open, title, freeDisks, busy, onClose, onConfirm, valid
   );
 }
 
-// 详情用居中弹窗，与产品里其它详情视图一致。
+// Show details in a centered dialog.
 function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode = null, remoteLabel = "", serverLabel = "" }) {
-  // 这一屏的写操作都发往池所在的节点。
+  // Dispatch all mutations from this view to the pool's node.
   const api = poolWriter(remoteNode);
   const store = useStore();
   const conf = useConfirm();
   const [picker, setPicker] = useState(null); // "data" | "read" | "write" | "special" | "spare" | { attach: "/dev/sdX" } | { replace: "/dev/sdX" } | { expand: "raidz2-0" }
-  const [upgrade, setUpgrade] = useState(null); // 升级 RAID1 向导打开期间为 { [dataDiskPath]: freeDiskPath }
+  const [upgrade, setUpgrade] = useState(null); // Mapping of data disks to free disks during RAID1 upgrade
   const { busy, run: runMut } = useMutation(store.toast);
   const run = (fn, okMsg) => runMut(fn, okMsg, { reload: onChanged });
 
@@ -496,7 +496,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   const dataDisks = disksByRole(pool, "data", "Disks");
   const readCache = disksByRole(pool, "read_cache", "ReadCacheDisks");
   const writeCache = disksByRole(pool, "write_cache", "WriteCacheDisks");
-  // vdev 树取自池本身。有数据组时按组渲染；条带的「组」就是单盘，保持扁平。
+  // Render vdev groups from actual pool layout. A stripe member is a single-disk group.
   const groups = pool.Groups || [];
   const dataGroups = groups.filter(g => g.Role === "data");
   const specialGroups = groups.filter(g => g.Role === "special");
@@ -505,181 +505,181 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   const layout = pool.Layout || "stripe";
   const width = pool.GroupWidth || 1;
   const parity = RAIDZ_PARITY[layout] || 0;
-  // 按后端的规则校验「加数据盘」在当前布局下是否成立。
+  // Validate new data disks using backend layout rules.
   const validateExpand = (picked) => {
     const n = picked.length;
     if (layout === "mirror") {
-      if (n < width || n % width !== 0) return { ok: false, message: `镜像池按 ${width} 块一组加盘，请再选 ${width - (n % width)} 块（已选 ${n} 块）` };
-      return { ok: true, message: `将新增 ${n / width} 组镜像` };
+      if (n < width || n % width !== 0) return { ok: false, message: `Add full mirror groups of ${width} disks. Select ${width - (n % width)} more (selected ${n}).` };
+      return { ok: true, message: `Add ${n / width} mirror groups` };
     }
     if (parity) {
-      if (n !== width) return { ok: false, message: n < width ? `${layout} 池按整组加盘，每组 ${width} 块，请再选 ${width - n} 块（已选 ${n} 块）` : `${layout} 池按整组加盘，每组 ${width} 块，请去掉 ${n - width} 块` };
-      return { ok: true, message: `将新增 1 组 ${layout}` };
+      if (n !== width) return { ok: false, message: n < width ? `${layout} requires full groups of ${width} disks. Select ${width - n} more (selected ${n}).` : `${layout} requires groups of ${width} disks. Remove ${n - width} disks.` };
+      return { ok: true, message: `Add one ${layout} group` };
     }
-    return { ok: true, message: `将新增 ${n} 块条带成员，无冗余` };
+    return { ok: true, message: `Add ${n} stripe members with no redundancy` };
   };
   const validateAttach = (picked) => picked.length === 1
-    ? { ok: true, message: `${picked[0]} 将与 ${picker?.attach} 组成 RAID1，后台复制已用块，池不停机` }
-    : { ok: false, message: "一次只能给一块盘加一块 RAID1 盘" };
+    ? { ok: true, message: `${picked[0]} will pair with ${picker?.attach} to form RAID1, copying used blocks online` }
+    : { ok: false, message: "Attach only one disk to a single RAID1 member at a time" };
   const validateReplace = (picked) => picked.length === 1
-    ? { ok: true, message: `${picked[0]} 将顶替 ${picker?.replace}，后台重建数据，池不停机` }
-    : { ok: false, message: "换盘一次只能选一块新盘" };
+    ? { ok: true, message: `${picked[0]} will replace ${picker?.replace}; data resilvers online` }
+    : { ok: false, message: "Select exactly one replacement disk" };
   const attaching = picker && typeof picker === "object" && picker.attach;
   const replacing = picker && typeof picker === "object" && picker.replace;
   const expanding = picker && typeof picker === "object" && picker.expand;
   const validateSpecial = (picked) => picked.length === 2 || picked.length === 3
-    ? { ok: true, message: `将新增一组 ${picked.length} 路镜像的元数据盘，元数据与小块随后迁移过去` }
-    : { ok: false, message: `元数据盘必须镜像，请选 2 或 3 块（已选 ${picked.length} 块）：它丢了整个池就丢` };
+    ? { ok: true, message: `Add one group of ${picked.length}-way mirrored metadata disks and migrate metadata/small blocks` }
+    : { ok: false, message: `Metadata disks must be mirrored. Select 2 or 3 disks (selected ${picked.length}); losing them could destroy the pool.` };
   const validateRaidzExpand = (picked) => picked.length === 1
-    ? { ok: true, message: `${picked[0]} 将加入 ${picker?.expand}，全组数据重排，机械盘可能要数小时到数十小时，期间池可用` }
-    : { ok: false, message: "raidz 扩容一次只能加一块盘" };
+    ? { ok: true, message: `${picked[0]} will join ${picker?.expand}; raidz rebalance can take hours or days on HDDs while online` }
+    : { ok: false, message: "raidz expansion supports one new disk at a time" };
 
   const addFor = async (paths) => {
     const kind = picker;
     setPicker(null);
-    if (attaching) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.attach }), `给 ${kind.attach} 加 RAID1 盘任务已提交`);
-    else if (expanding) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.expand }), `给 ${kind.expand} 扩容任务已提交`);
-    else if (replacing) await run(() => api.replacePoolDisk(pool.ID, { old_disk: kind.replace, new_disk: paths[0] }), `用 ${paths[0]} 换掉 ${kind.replace} 的任务已提交`);
-    else if (kind === "special") await run(() => api.addSpecial(pool.ID, { disks: paths }), "添加元数据盘任务已提交");
-    else if (kind === "spare") await run(() => api.addSpare(pool.ID, { disks: paths }), "添加热备盘任务已提交");
-    else if (kind === "data") await run(() => api.addPoolDisk(pool.ID, { disks: paths }), "添加存储盘任务已提交");
-    else if (kind === "read") await run(() => api.addReadCache(pool.ID, { disks: paths }), "添加读缓存任务已提交");
-    else if (kind === "write") await run(() => api.addWriteCache(pool.ID, { disks: paths }), "添加写缓存任务已提交");
+    if (attaching) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.attach }), `RAID1 attachment task submitted for ${kind.attach}`);
+    else if (expanding) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.expand }), `Expansion task submitted for ${kind.expand}`);
+    else if (replacing) await run(() => api.replacePoolDisk(pool.ID, { old_disk: kind.replace, new_disk: paths[0] }), `Disk replacement submitted: ${kind.replace} → ${paths[0]}`);
+    else if (kind === "special") await run(() => api.addSpecial(pool.ID, { disks: paths }), "Metadata disk addition submitted");
+    else if (kind === "spare") await run(() => api.addSpare(pool.ID, { disks: paths }), "Hot spare addition submitted");
+    else if (kind === "data") await run(() => api.addPoolDisk(pool.ID, { disks: paths }), "Storage disk addition submitted");
+    else if (kind === "read") await run(() => api.addReadCache(pool.ID, { disks: paths }), "Read cache addition submitted");
+    else if (kind === "write") await run(() => api.addWriteCache(pool.ID, { disks: paths }), "Write cache addition submitted");
   };
 
-  // 移除方式取决于池的结构：镜像成员是 detach（组变窄，不复制数据）；
-  // 条带成员或整组是 remove，先把数据迁走。
+  // Mirror members use detach without data migration;
+  // stripe members and full groups use remove after data migration.
   const removeDataDisk = async (path) => {
     const group = dataGroups.find(g => g.Kind === "mirror" && (g.Disks || []).some(d => d.Path === path));
     if (group) {
       const left = (group.Disks || []).length - 1;
       const ok = await conf.ask({
-        title: "摘除 RAID1 盘",
-        message: `摘除 ${path}？${group.Name} 将只剩 ${left} 路${left === 1 ? "，暂无冗余" : ""}。摘除是即时的，不复制数据。`,
-        danger: true, confirmText: "摘除",
+        title: "Detach RAID1 Disk",
+        message: `Detach ${path}? ${group.Name} will have only ${left}-way${left === 1 ? " with no redundancy" : ""}. Detach is immediate, without copying data.`,
+        danger: true, confirmText: "Detach",
       });
-      if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "摘除 RAID1 盘任务已提交");
+      if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "RAID1 detach task submitted");
       return;
     }
-    const ok = await conf.ask({ title: "移除磁盘", message: `从 ${pool.Name} 移除 ${path}？数据将重建到剩余磁盘。`, danger: true });
-    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "移除磁盘任务已提交");
+    const ok = await conf.ask({ title: "Remove Disk", message: `Remove ${path} from ${pool.Name}? Data will be migrated to surviving disks.`, danger: true });
+    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "Disk removal task submitted");
   };
-  // 每块数据盘都配好空闲盘才能开始：只镜像一半的池，风险上仍等同条带。
+  // Require a free disk for every data member before RAID1 upgrade; partial mirroring remains vulnerable.
   const upgradePairs = dataDisks.map(d => ({ target: d.Path, disk: (upgrade || {})[d.Path] || "" }));
   const upgradePlan = (() => {
     if (!upgrade) return { ok: false, message: "" };
     const missing = upgradePairs.filter(p => !p.disk).length;
-    if (freeDisks.length < dataDisks.length) return { ok: false, message: `空闲盘不够：需要 ${dataDisks.length} 块，只有 ${freeDisks.length} 块` };
-    if (missing) return { ok: false, message: `还有 ${missing} 块存储盘没有选 RAID1 盘` };
-    return { ok: true, message: `将建 ${upgradePairs.length} 组 RAID1，完成后布局变为镜像（RAID1）` };
+    if (freeDisks.length < dataDisks.length) return { ok: false, message: `Not enough free disks: need ${dataDisks.length} disks; only ${freeDisks.length} disks` };
+    if (missing) return { ok: false, message: `Still ${missing} data disks have no RAID1 partner` };
+    return { ok: true, message: `Create ${upgradePairs.length} RAID1 groups; pool becomes mirrored on completion` };
   })();
   const doUpgrade = async () => {
     if (!upgradePlan.ok) return;
-    const ok = await run(() => api.mirrorUpgradePool(pool.ID, { pairs: upgradePairs }), `升级为 RAID1 任务已提交（${upgradePairs.length} 对）`);
+    const ok = await run(() => api.mirrorUpgradePool(pool.ID, { pairs: upgradePairs }), `RAID1 upgrade submitted (${upgradePairs.length} pairs)`);
     if (ok) setUpgrade(null);
   };
   const removeSpecialGroup = async (group) => {
     const ok = await conf.ask({
-      title: "移除元数据盘",
-      message: `移除元数据盘组 ${group.Name}（${(group.Disks || []).map(d => d.Path).join("、")}）？元数据将迁回存储盘，迁移期间池可用。`,
-      danger: true, confirmText: "移除",
+      title: "Remove Metadata Disks",
+      message: `Remove metadata group ${group.Name} (${(group.Disks || []).map(d => d.Path).join(", ")})? Metadata will migrate back to data disks while online.`,
+      danger: true, confirmText: "Remove",
     });
-    if (ok) await run(() => api.removeSpecial(pool.ID, { disk: group.Name }), `移除 ${group.Name} 任务已提交`);
+    if (ok) await run(() => api.removeSpecial(pool.ID, { disk: group.Name }), `Remove ${group.Name} task submitted`);
   };
   const removeSpareDisk = async (path) => {
-    const ok = await conf.ask({ title: "移除热备盘", message: `把 ${path} 从 ${pool.Name} 的热备盘里移除？坏盘将不再自动顶替。`, danger: true, confirmText: "移除" });
-    if (ok) await run(() => api.removeSpare(pool.ID, { disk: path }), "移除热备盘任务已提交");
+    const ok = await conf.ask({ title: "Remove Hot Spare", message: `Remove ${path} from ${pool.Name}'s hot-spare list? Failed disks will no longer be replaced automatically.`, danger: true, confirmText: "Remove" });
+    if (ok) await run(() => api.removeSpare(pool.ID, { disk: path }), "Remove Hot Sparetask submitted");
   };
   const removeGroup = async (group) => {
     const ok = await conf.ask({
-      title: "移除整组",
-      message: `移除整组 ${group.Name}（${(group.Disks || []).map(d => d.Path).join("、")}）？其数据将迁移到其他组，迁移期间池可用。`,
-      danger: true, confirmText: "移除整组",
+      title: "Remove Group",
+      message: `Remove vdev group ${group.Name} (${(group.Disks || []).map(d => d.Path).join(", ")})? Data will migrate to other groups while online.`,
+      danger: true, confirmText: "Remove Group",
     });
-    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: group.Name }), `移除 ${group.Name} 任务已提交`);
+    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: group.Name }), `Remove ${group.Name} task submitted`);
   };
-  const removeReadCache = async (path) => run(() => api.removeReadCache(pool.ID, { disk: path }), "已移除读缓存");
-  const removeWriteCache = async (path) => run(() => api.removeWriteCache(pool.ID, { disk: path }), "已移除写缓存");
-  const flushWrite = async () => run(() => api.flushWriteCache(pool.ID), "写缓存刷新任务已提交");
+  const removeReadCache = async (path) => run(() => api.removeReadCache(pool.ID, { disk: path }), "Read cache removed");
+  const removeWriteCache = async (path) => run(() => api.removeWriteCache(pool.ID, { disk: path }), "Write cache removed");
+  const flushWrite = async () => run(() => api.flushWriteCache(pool.ID), "Write-cache flush task submitted");
 
   return (
     <Modal open onClose={onClose} size="xl"
       title={<span className="row" style={{ gap: 8 }}>
         <Icons.Database size={15} style={{ color: "var(--cyan)" }}/>
-        存储池详情 · <span className="mono">{pool.Name}</span>
+        Storage Pool Details · <span className="mono">{pool.Name}</span>
       </span>}
-      /* 底部只放操作按钮、靠右，与客户机和镜像详情一致；关闭用标题栏的 ×。 */
-      footer={<button className="btn danger" disabled={busy} onClick={onDestroy}><Icons.Trash size={12}/> {missing ? "删除记录" : "销毁存储池"}</button>}>
+      /* Right-align footer action buttons; close through the title bar, as on other detail dialogs. */
+      footer={<button className="btn danger" disabled={busy} onClick={onDestroy}><Icons.Trash size={12}/> {missing ? "Delete Record" : "Destroy Storage Pool"}</button>}>
         <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <KVGrid items={[
-            ["池名", pool.Name, true],
-            ["服务器", serverLabel || pool.ServerID || "—", true],
-            ["布局", layoutLabel(pool), false],
-            // 正在进行的重建或迁移跟在状态后面显示；没有就不占一格。
-            ["状态", <span className="row" style={{ gap: 6 }}><span className={`chip ${hm.cls}`}>{hm.dot && <span className={`dot ${hm.dot}`}/>}{hm.text}</span>{pool.Operation && <span className="mono meta">{OP_LABEL[pool.Operation] || pool.Operation} {pool.Progress}</span>}</span>, false],
+            ["Pool Name", pool.Name, true],
+            ["Server", serverLabel || pool.ServerID || "—", true],
+            ["Layout", layoutLabel(pool), false],
+            // Show rebuild or migration progress inline with pool status when available.
+            ["Status", <span className="row" style={{ gap: 6 }}><span className={`chip ${hm.cls}`}>{hm.dot && <span className={`dot ${hm.dot}`}/>}{hm.text}</span>{pool.Operation && <span className="mono meta">{OP_LABEL[pool.Operation] || pool.Operation} {pool.Progress}</span>}</span>, false],
           ]}/>
 
           {missing ? <div className="hint">
-            本机上已找不到该池，这里只剩它的记录{(pool.Disks || []).length ? `（原成员 ${pool.Disks.join("、")}）` : ""}。删除这条记录不会改动任何磁盘，删除后可在该服务器上重新创建同名的池。
+            Pool no longer exists on this node; only its record remains{(pool.Disks || []).length ? ` (former members: ${pool.Disks.join(", ")})` : ""}.Deleting the record changes no disks. You may recreate a pool with the same name.
           </div> : <>
-          <Section title="容量">
+          <Section title="Capacity">
             <div className="row" style={{ gap: 12, marginBottom: 8 }}>
               <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>{fmtCap(used)}</span>
-              <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 13 }}>/ 共 {fmtCap(cap)} · 可用 {fmtCap(cap - used)} · 已使用 {usePct}%</span>
+              <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 13 }}>/ Total {fmtCap(cap)} · Available {fmtCap(cap - used)} · Used {usePct}%</span>
             </div>
             <div className={`bar ${usePct > 85 ? "rose" : usePct > 70 ? "amber" : ""}`}><span style={{ width: `${usePct}%` }}/></div>
           </Section>
 
-          <DiskSection title="成员磁盘" disks={dataDisks} groups={dataGroups} busy={busy}
+          <DiskSection title="Member Disks" disks={dataDisks} groups={dataGroups} busy={busy}
             onAdd={() => setPicker("data")} onRemove={removeDataDisk}
             removable={!parity && dataDisks.length > 1}
             note={parity
-              ? "raidz 不能移盘（含 raidz 的池也不能做设备移除）；坏盘请用「换盘」" + (pool.RaidzExpandable ? "。本机支持 raidz 单盘扩容" : pool.RaidzExpandNote ? "。" + pool.RaidzExpandNote : "")
+              ? "raidz devices cannot be removed. Use Replace Disk for a failed drive." + (pool.RaidzExpandable ? " This node supports single-disk raidz expansion" : pool.RaidzExpandNote ? "." + pool.RaidzExpandNote : "")
               : null}
-            extraAction={layout === "stripe" && dataDisks.length > 1 // 单盘时和这块盘的「加 RAID1 盘」是同一件事
-              ? <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={() => setUpgrade({})}><Icons.Shield size={11}/> 升级为 RAID1</button>
+            extraAction={layout === "stripe" && dataDisks.length > 1 // Equivalent to attaching RAID1 to a single-disk pool
+              ? <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={() => setUpgrade({})}><Icons.Shield size={11}/> Upgrade to RAID1</button>
               : null}
             groupAction={parity
               ? (pool.RaidzExpandable ? (g) => (
-                <button className="btn ghost icon" disabled={busy} onClick={() => setPicker({ expand: g.Name })} title="扩一块盘" aria-label={`给 ${g.Name} 扩一块盘`}><Icons.Plus size={12}/></button>
+                <button className="btn ghost icon" disabled={busy} onClick={() => setPicker({ expand: g.Name })} title="Expand by One Disk" aria-label={`Expand ${g.Name} by one disk`}><Icons.Plus size={12}/></button>
               ) : null)
               : dataGroups.filter(g => g.Kind === "mirror").length > 1 ? (g) => (
-                <button className="btn ghost icon danger" disabled={busy} onClick={() => removeGroup(g)} title="移除整组" aria-label={`移除整组 ${g.Name}`}><Icons.Trash size={12}/></button>
+                <button className="btn ghost icon danger" disabled={busy} onClick={() => removeGroup(g)} title="Remove Group" aria-label={`Remove vdev group ${g.Name}`}><Icons.Trash size={12}/></button>
               ) : null}
             rowAction={(d) => (<>
-              {/* 条带成员可变镜像、镜像可加一路；raidz 没有可附加的对象。换盘适用于所有布局。
-                  按钮带文字，只有图标时运维找不到「换盘」。 */}
-              {!parity && <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ attach: d.Path })} title="给这块盘配一块盘组成 RAID1" aria-label={`给 ${d.Path} 加 RAID1 盘`}><Icons.Plus size={11}/> 加 RAID1 盘</button>}
-              <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ replace: d.Path })} title="用一块空闲盘顶替这块盘" aria-label={`换掉 ${d.Path}`}><Icons.Refresh size={11}/> 换盘</button>
+              {/* Stripe members may become mirrors and mirrors can gain a member; raidz cannot attach directly. Replace applies to any layout.
+                  Use labeled buttons instead of icon-only actions for Replace Disk. */}
+              {!parity && <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ attach: d.Path })} title="Attach a free disk to form RAID1" aria-label={`Attach RAID1 disk to ${d.Path}`}><Icons.Plus size={11}/> Attach RAID1 Disk</button>}
+              <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ replace: d.Path })} title="Replace this disk with a free disk" aria-label={`Replace ${d.Path}`}><Icons.Refresh size={11}/> Replace Disk</button>
             </>)}/>
 
-          <DiskSection title="元数据盘 special" groups={specialGroups} disks={[]} busy={busy}
+          <DiskSection title="Metadata Disks special" groups={specialGroups} disks={[]} busy={busy}
             onAdd={() => setPicker("special")}
-            groupAction={(g) => <button className="btn ghost icon danger" disabled={busy} onClick={() => removeSpecialGroup(g)} title="移除元数据盘组" aria-label={`移除元数据盘组 ${g.Name}`}><Icons.Trash size={12}/></button>}
-            note="把元数据和小块放到 SSD/NVMe 上，机械盘数据池受益最大；必须镜像，丢了整个池就丢"/>
-          <DiskSection title="热备盘" disks={spareDisks} busy={busy}
-            onAdd={() => setPicker("spare")} onRemove={removeSpareDisk} removable removeLabel="移除热备盘"
-            note="坏盘时自动顶替（autoreplace 已随添加开启）"/>
+            groupAction={(g) => <button className="btn ghost icon danger" disabled={busy} onClick={() => removeSpecialGroup(g)} title="Remove Metadata Disk Group" aria-label={`Remove metadata group ${g.Name}`}><Icons.Trash size={12}/></button>}
+            note="Store metadata and small blocks on mirrored SSD/NVMe. HDD pools benefit most. Losing an unmirrored metadata device loses the pool."/>
+          <DiskSection title="Hot Spares" disks={spareDisks} busy={busy}
+            onAdd={() => setPicker("spare")} onRemove={removeSpareDisk} removable removeLabel="Remove Hot Spare"
+            note="Automatically replaces failed disks (autoreplace enabled upon addition)."/>
 
-          <DiskSection title="读缓存 L2ARC" disks={readCache} busy={busy}
+          <DiskSection title="Read Cache L2ARC" disks={readCache} busy={busy}
             onAdd={() => setPicker("read")} onRemove={removeReadCache} removable
-            note="内存装不下热点数据时再加（机械盘池 + 内存偏小的机器）；全 SSD 池不需要。坏了不影响数据"/>
+            note="Add L2ARC if hot data exceeds RAM, mainly on HDD pools with low memory; it is unnecessary on all-SSD pools and failures do not lose data."/>
 
-          <DiskSection title="写缓存 ZIL" disks={writeCache} busy={busy}
+          <DiskSection title="Write Cache ZIL" disks={writeCache} busy={busy}
             onAdd={() => setPicker("write")} onRemove={removeWriteCache} removable
-            note="只加速同步写，无盘客户机的日常写入用不上，一般不需要；确需时用带断电保护的企业级 SSD 并镜像"
-            extraAction={writeCache.length ? <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={flushWrite}><Icons.Refresh size={11}/> 刷新写缓存</button> : null}/>
+            note="Accelerates synchronous writes only. Usually unnecessary for client writes; if needed, mirror enterprise SSDs with power-loss protection."
+            extraAction={writeCache.length ? <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={flushWrite}><Icons.Refresh size={11}/> Flush Write Cache</button> : null}/>
           </>}
         </div>
 
-        {/* 条带升级为 RAID1：每块数据盘配一块空闲盘，一个任务完成。在线进行，ZFS 只在后台复制已用块。 */}
-        <Modal open={!!upgrade} onClose={() => !busy && setUpgrade(null)} title={`升级为 RAID1 · ${pool.Name}`} size="md"
-          footer={<><button className="btn" disabled={busy} onClick={() => setUpgrade(null)}>取消</button>
-            <button className="btn primary" disabled={busy || !upgradePlan.ok} onClick={doUpgrade}>{busy ? "提交中…" : "开始升级"}</button></>}>
-          <div className="hint" style={{ marginBottom: 10 }}>为每块存储盘选一块不小于它的空闲盘，两两组成 RAID1。升级在线进行，池不停机；每对完成后该盘即有冗余。</div>
+        {/* Upgrade stripes to RAID1 by pairing each data disk with a free disk. Runs online, copying used blocks in the background. */}
+        <Modal open={!!upgrade} onClose={() => !busy && setUpgrade(null)} title={`Upgrade to RAID1 · ${pool.Name}`} size="md"
+          footer={<><button className="btn" disabled={busy} onClick={() => setUpgrade(null)}>Cancel</button>
+            <button className="btn primary" disabled={busy || !upgradePlan.ok} onClick={doUpgrade}>{busy ? "Submitting…" : "Start Upgrade"}</button></>}>
+          <div className="hint" style={{ marginBottom: 10 }}>Pair each data disk with an equally large or larger free disk to create RAID1 mirrors. Upgrade runs online; redundancy applies as each pair completes.</div>
           <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 6, overflow: "hidden" }}>
             <table className="t" style={{ margin: 0 }}>
-              <thead><tr><th>存储盘</th><th>RAID1 盘</th></tr></thead>
+              <thead><tr><th>Storage Disks</th><th>RAID1 Disk</th></tr></thead>
               <tbody>
                 {dataDisks.map(d => {
                   const takenElsewhere = Object.entries(upgrade || {}).filter(([k]) => k !== d.Path).map(([, v]) => v);
@@ -689,8 +689,8 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
                       <td className="mono" style={{ fontWeight: 600 }}>{d.Path}</td>
                       <td>
                         <Select value={(upgrade || {})[d.Path] || ""} onChange={v => setUpgrade(prev => ({ ...(prev || {}), [d.Path]: v }))}
-                          aria-label={`${d.Path} 的 RAID1 盘`}
-                          options={[{ value: "", label: "选择空闲盘…" }, ...options]}/>
+                          aria-label={`RAID1 partner for ${d.Path}`}
+                          options={[{ value: "", label: "Select Free Disk…" }, ...options]}/>
                       </td>
                     </tr>
                   );
@@ -702,8 +702,8 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
         </Modal>
 
         <DiskPickModal open={!!picker} busy={busy} freeDisks={freeDisks}
-          title={attaching ? `给 ${picker.attach} 加 RAID1 盘` : expanding ? `给 ${picker.expand} 扩一块盘` : replacing ? `换掉 ${picker.replace}` : picker === "data" ? "添加存储盘" : picker === "special" ? "添加元数据盘" : picker === "spare" ? "添加热备盘" : picker === "read" ? "添加读缓存盘" : "添加写缓存盘"}
-          hint={picker === "data" ? (layout === "mirror" ? `镜像池按 ${width} 块一组加盘` : parity ? `${layout} 池按整组加盘，每组 ${width} 块` : null) : replacing ? "选一块不小于原盘的空闲盘顶替它" : picker === "special" ? "选 2 或 3 块 SSD/NVMe，将组成一组镜像" : null}
+          title={attaching ? `Attach RAID1 Disk to ${picker.attach}` : expanding ? `Expand ${picker.expand} by one disk` : replacing ? `Replace ${picker.replace}` : picker === "data" ? "Add Storage Disk" : picker === "special" ? "Add Metadata Disk" : picker === "spare" ? "Add Hot Spare" : picker === "read" ? "Add Read Cache Disk" : "Add Write Cache Disk"}
+          hint={picker === "data" ? (layout === "mirror" ? `Mirrored pool requires full groups of ${width} disks` : parity ? `${layout} requires complete groups of ${width} disks` : null) : replacing ? "Select a free disk at least as large as the original." : picker === "special" ? "Select 2 or 3 SSD/NVMe drives to form a mirror." : null}
           validate={attaching ? validateAttach : expanding ? validateRaidzExpand : replacing ? validateReplace : picker === "data" ? validateExpand : picker === "special" ? validateSpecial : null}
           onClose={() => setPicker(null)} onConfirm={addFor}/>
         {conf.node}
@@ -711,10 +711,10 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   );
 }
 
-// DiskSection 是池成员的一个分区。传入 groups（该角色的 vdev 树）时，镜像或 raidz 组
-// 有一行组标题，降级的组和掉线的成员放在一起看；单盘组（条带）保持扁平。
-// readOnly 分区没有加减操作。
-function DiskSection({ title, disks, groups, onAdd, onRemove, removable, busy, extraAction, readOnly, rowAction, groupAction, note, removeLabel = "移除" }) {
+// DiskSection renders member devices; grouped vdev trees show mirror/raidz headers
+// to associate degraded groups with failed members. Keep single-disk stripes flat.
+// readOnly sections do not offer add/remove actions.
+function DiskSection({ title, disks, groups, onAdd, onRemove, removable, busy, extraAction, readOnly, rowAction, groupAction, note, removeLabel = "Remove" }) {
   const grouped = (groups || []).some(g => g.Kind !== "disk");
   const rows = grouped
     ? groups.flatMap(g => g.Kind === "disk"
@@ -738,19 +738,19 @@ function DiskSection({ title, disks, groups, onAdd, onRemove, removable, busy, e
   return (
     <Section title={title} actions={readOnly ? null : <div className="row" style={{ gap: 6 }}>
       {extraAction}
-      <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={onAdd}><Icons.Plus size={11}/> 添加</button>
+      <button className="btn" disabled={busy} style={{ padding: "3px 10px" }} onClick={onAdd}><Icons.Plus size={11}/> Add</button>
     </div>}>
       <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 6, overflow: "hidden" }}>
         {rows.length ? (
           <table className="t" style={{ margin: 0 }}>
-            <thead><tr><th>设备</th><th>角色</th><th>状态</th><th className="t-actions"></th></tr></thead>
+            <thead><tr><th>Device</th><th>Role</th><th>Status</th><th className="t-actions"></th></tr></thead>
             <tbody>
               {rows.map(r => {
                 if (r.type === "disk") return memberRow(r.d, r.inGroup);
                 const gm = healthMeta(r.g.Status);
                 return (
                   <tr key={r.g.Name} style={{ background: "var(--bg-1)" }}>
-                    <td className="mono" style={{ fontWeight: 600 }}><span>{r.g.Name}</span> <span className="muted meta">· {LAYOUTS[r.g.Kind]?.label || r.g.Kind} · {(r.g.Disks || []).length} 块</span></td>
+                    <td className="mono" style={{ fontWeight: 600 }}><span>{r.g.Name}</span> <span className="muted meta">· {LAYOUTS[r.g.Kind]?.label || r.g.Kind} · {(r.g.Disks || []).length} disks</span></td>
                     <td className="muted meta">{ROLE_LABEL[r.g.Role] || r.g.Role}</td>
                     <td>{r.g.Status ? <span className={`chip ${gm.cls}`}>{gm.text}</span> : <span className="muted meta">—</span>}</td>
                     <td className="t-actions"><div>{groupAction && !readOnly && groupAction(r.g)}</div></td>
@@ -760,7 +760,7 @@ function DiskSection({ title, disks, groups, onAdd, onRemove, removable, busy, e
             </tbody>
           </table>
         ) : (
-          <div className="hint" style={{ padding: 12, textAlign: "center" }}>无</div>
+          <div className="hint" style={{ padding: 12, textAlign: "center" }}>None</div>
         )}
       </div>
       {note && <div className="hint" style={{ marginTop: 6 }}>{note}</div>}

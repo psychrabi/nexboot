@@ -107,15 +107,15 @@ describe('存储页的集群口径', () => {
     });
     renderPage();
     // 两个受影响的数字各自带上注解，且说清有几台没算进去
-    const capCard = (await screen.findByText('总容量')).closest('.stat-card');
-    expect(capCard.textContent).toMatch(/不含.*1 台/);
-    const usedCard = (await screen.findByText('已使用')).closest('.stat-card');
-    expect(usedCard.textContent).toMatch(/不含.*1 台/);
+    const capCard = (await screen.findByText('Total Capacity')).closest('.stat-card');
+    expect(capCard.textContent).toMatch(/Excludes.*1  nodes/);
+    const usedCard = (await screen.findByText('Used')).closest('.stat-card');
+    expect(usedCard.textContent).toMatch(/Excludes.*1  nodes/);
     // 节点那张卡说清有几台读不到
-    const poolCard = (await screen.findByText('存储池')).closest('.stat-card');
-    expect(poolCard.textContent).toMatch(/1 台读不到/);
+    const poolCard = (await screen.findByText('Storage Pool')).closest('.stat-card');
+    expect(poolCard.textContent).toMatch(/1  unreachable nodes/);
     // 不再为此单开一块横幅
-    expect(screen.queryByText(/上面的总容量与使用率/)).toBeNull();
+    expect(screen.queryByText(/上面的Total Capacity与使用率/)).toBeNull();
   });
 
   // 在别的节点建池要列那台自己的空闲盘：同名设备在那台上可能是系统盘或不存在。
@@ -125,9 +125,9 @@ describe('存储页的集群口径', () => {
       node === 'n2' ? [{ Path: '/dev/sdx', Name: 'sdx', Size: 900e9, InUse: false }] : DISKS) });
     vi.spyOn(api, 'clusterCreatePool').mockImplementation(create);
     renderPage();
-    await userEvent.click(await screen.findByRole('button', { name: /创建存储池|新建存储池/ }));
-    const dlg = (await screen.findByText('池名称')).closest('.card');
-    const nodeSel = within(dlg).getByLabelText(/建在哪台/);
+    await userEvent.click(await screen.findByRole('button', { name: /Create Storage Pool|Create Storage Pool/ }));
+    const dlg = (await screen.findByText('Pool Name')).closest('.card');
+    const nodeSel = within(dlg).getByLabelText(/Target Server/);
     await userEvent.selectOptions(nodeSel, 'n2');
     await waitFor(() => expect(within(dlg).getByText('/dev/sdx')).toBeTruthy());
     expect(within(dlg).queryByText('/dev/sdc')).toBeNull();
@@ -142,8 +142,8 @@ describe('存储页的集群口径', () => {
     listClusterDisks: async () => list([{ Path: '/dev/sdx', Name: 'sdx', Size: 900e9, InUse: false }]),
   });
   const openCreateDialog = async () => {
-    await userEvent.click(await screen.findByRole('button', { name: /创建存储池/ }));
-    return (await screen.findByText('池名称')).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Create Storage Pool/ }));
+    return (await screen.findByText('Pool Name')).closest('.card');
   };
   const optionsOf = (sel) => [...sel.querySelectorAll('option')].map(o => o.textContent);
 
@@ -153,16 +153,16 @@ describe('存储页的集群口径', () => {
     vi.spyOn(api, 'createPool').mockImplementation(create);
     renderPage();
     const dlg = await openCreateDialog();
-    const typeSel = within(dlg).getByLabelText('存储池类型');
-    expect(optionsOf(typeSel)).toEqual(['备份池']);
-    expect(within(dlg).getByText(/这台已有数据池 tank，只能建备份池/)).toBeTruthy();
+    const typeSel = within(dlg).getByLabelText('Pool Type');
+    expect(optionsOf(typeSel)).toEqual(['Backup Pool']);
+    expect(within(dlg).getByText(/This node already hasData Pool tank，only a backup pool can be created/)).toBeTruthy();
     await userEvent.type(within(dlg).getByPlaceholderText('tank2'), 'bak');
-    await userEvent.click(within(dlg).getByRole('button', { name: /^条带/ }));
+    await userEvent.click(within(dlg).getByRole('button', { name: /^Stripe/ }));
     await userEvent.click(await within(dlg).findByText('/dev/sdc'));
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
-    await userEvent.click(await screen.findByRole('button', { name: '仍要创建' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Anyway' }));
     await waitFor(() => expect(create).toHaveBeenCalledWith(expect.objectContaining({ name: 'bak', role: 'backup' })));
-    expect(screen.queryByText(/自动重启服务/)).toBeNull();
+    expect(screen.queryByText(/services restart automatically/)).toBeNull();
   });
 
   // 建在别处且是条带：两件事一次说完，只确认一次。
@@ -172,28 +172,28 @@ describe('存储页的集群口径', () => {
     vi.spyOn(api, 'clusterCreatePool').mockImplementation(create);
     renderPage();
     const dlg = await openCreateDialog();
-    await userEvent.selectOptions(within(dlg).getByLabelText(/建在哪台/), 'n2');
-    await userEvent.selectOptions(within(dlg).getByLabelText('存储池类型'), 'data');
+    await userEvent.selectOptions(within(dlg).getByLabelText(/Target Server/), 'n2');
+    await userEvent.selectOptions(within(dlg).getByLabelText('Pool Type'), 'data');
     await userEvent.type(within(dlg).getByPlaceholderText('tank2'), 'data');
-    await userEvent.click(within(dlg).getByRole('button', { name: /^条带/ }));
+    await userEvent.click(within(dlg).getByRole('button', { name: /^Stripe/ }));
     await userEvent.click(await within(dlg).findByText('/dev/sdx'));
-    await userEvent.click(screen.getByRole('button', { name: '创建' }));
-    const msg = await screen.findByText(/确认以条带布局创建/);
-    expect(msg.textContent).toBe('将在 192.168.10.4 上创建存储池 data，使用磁盘：/dev/sdx。\n'
+    await userEvent.click(screen.getByRole('button', { name: 'Create' }));
+    const msg = await screen.findByText(/Confirm以Stripe布局Create/);
+    expect(msg.textContent).toBe('将在 192.168.10.4 上Create Storage Pool data，使用Disk：/dev/sdx。\n'
       + '条带布局无冗余：任一磁盘故障，data 中的全部镜像、配置、还原点及客户机克隆将丢失且无法恢复。确认以条带布局创建？');
-    await userEvent.click(screen.getByRole('button', { name: '仍要创建' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Create Anyway' }));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
-    expect(screen.queryByText(/在其他服务器上创建/)).toBeNull();
+    expect(screen.queryByText(/Create on Another Server/)).toBeNull();
   });
 
   it('两种都没有的节点任选一种，必须选', async () => {
     withPeerPools([]);
     renderPage();
     const dlg = await openCreateDialog();
-    await userEvent.selectOptions(within(dlg).getByLabelText(/建在哪台/), 'n2');
-    const typeSel = within(dlg).getByLabelText('存储池类型');
-    expect(optionsOf(typeSel)).toEqual(['请选择', '数据池', '备份池']);
-    const submit = screen.getByRole('button', { name: '创建' });
+    await userEvent.selectOptions(within(dlg).getByLabelText(/Target Server/), 'n2');
+    const typeSel = within(dlg).getByLabelText('Pool Type');
+    expect(optionsOf(typeSel)).toEqual(['Select…', 'Data Pool', 'Backup Pool']);
+    const submit = screen.getByRole('button', { name: 'Create' });
     expect(submit.disabled).toBe(true);
     await userEvent.selectOptions(typeSel, 'data');
     expect(submit.disabled).toBe(false);
@@ -206,10 +206,10 @@ describe('存储页的集群口径', () => {
     ]);
     renderPage();
     const dlg = await openCreateDialog();
-    await userEvent.selectOptions(within(dlg).getByLabelText(/建在哪台/), 'n2');
-    expect(within(dlg).getByLabelText('存储池类型').disabled).toBe(true);
-    expect(within(dlg).getByText(/这台已有数据池 tank 和备份池 bak/)).toBeTruthy();
-    expect(screen.getByRole('button', { name: '创建' }).disabled).toBe(true);
+    await userEvent.selectOptions(within(dlg).getByLabelText(/Target Server/), 'n2');
+    expect(within(dlg).getByLabelText('Pool Type').disabled).toBe(true);
+    expect(within(dlg).getByText(/This node already hasData Pool tank 和Backup Pool bak/)).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Create' }).disabled).toBe(true);
   });
 
   // 节点 ID 是 machine-id 的哈希，详情里也写 IP。
@@ -218,7 +218,7 @@ describe('存储页的集群口径', () => {
     renderPage();
     const rows = await screen.findAllByText('tank');
     await userEvent.click(rows[rows.length - 1]);
-    const dlg = (await screen.findByText(/存储池详情/)).closest('.card');
+    const dlg = (await screen.findByText(/Storage Pool Details/)).closest('.card');
     expect(within(dlg).getByText('192.168.10.4')).toBeTruthy();
     expect(within(dlg).queryByText('n2')).toBeNull();
   });
@@ -236,13 +236,13 @@ describe('存储页的集群口径', () => {
       return r;
     });
     await userEvent.click(peerRow);
-    await userEvent.click(await screen.findByRole('button', { name: /销毁存储池/ }));
-    const dialog = (await screen.findByText(/将删除该池及其全部数据/)).closest('.card');
+    await userEvent.click(await screen.findByRole('button', { name: /Destroy Storage Pool/ }));
+    const dialog = (await screen.findByText(/deletes all its images, configurations, restore points and client clones permanently/)).closest('.card');
     // 强确认输入目标节点而不是池名：几台的池都叫 tank。
     expect(dialog.textContent).toContain('192.168.10.4');
     const input = dialog.querySelector('input');
     await userEvent.type(input, '192.168.10.4');
-    await userEvent.click(within(dialog).getByRole('button', { name: /销毁|确认/ }));
+    await userEvent.click(within(dialog).getByRole('button', { name: /Destroy|Confirm/ }));
     await waitFor(() => expect(destroy).toHaveBeenCalledWith('n2', 'pool-peer'));
   });
 });
@@ -260,9 +260,9 @@ describe('存储页', () => {
     ]) });
     renderPage();
     const table = await screen.findByRole('table');
-    expect(await within(table).findByText('数据池')).toBeTruthy();
-    expect(within(table).getByText('备份池')).toBeTruthy();
-    expect(within(table).getByText('未指定')).toBeTruthy();
+    expect(await within(table).findByText('Data Pool')).toBeTruthy();
+    expect(within(table).getByText('Backup Pool')).toBeTruthy();
+    expect(within(table).getByText('Unassigned')).toBeTruthy();
   });
 
   it('数据池排在备份池前面，同类保持原来的节点顺序', async () => {
@@ -285,7 +285,7 @@ describe('存储页', () => {
     ]) });
     renderPage();
     await screen.findByText('tank3');
-    await userEvent.selectOptions(screen.getByLabelText('按类型筛选'), 'backup');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by Type'), 'backup');
     await waitFor(() => expect(screen.queryByText('tank3')).toBeNull());
     expect(screen.getByText('backup3')).toBeTruthy();
   });
@@ -294,9 +294,9 @@ describe('存储页', () => {
   it('已有两个池时创建入口禁用并说明原因', async () => {
     renderPage();
     await screen.findByText('tank');
-    const create = screen.getByRole('button', { name: /创建存储池/ });
+    const create = screen.getByRole('button', { name: /Create Storage Pool/ });
     expect(create.disabled).toBe(true);
-    expect(screen.getByText(/每个节点最多两个存储池/)).toBeTruthy();
+    expect(screen.getByText(/At most two pools per node/)).toBeTruthy();
   });
 
   it('列出存储池', async () => {
@@ -308,8 +308,8 @@ describe('存储页', () => {
   // 可用量单独写出：ZFS 按它判定 `out of space`。
   it('容量列写明已用和可用', async () => {
     renderPage();
-    expect(await screen.findByText('已用 186.3 GiB · 可用 279.4 GiB')).toBeTruthy();
-    expect(screen.getByText('已用 9.3 GiB · 可用 83.8 GiB')).toBeTruthy();
+    expect(await screen.findByText('Used 186.3 GiB · Available 279.4 GiB')).toBeTruthy();
+    expect(screen.getByText('Used 9.3 GiB · Available 83.8 GiB')).toBeTruthy();
   });
 
   // 磁盘探测走 lsblk、可能单独失败，失败只影响空闲盘列表，不能让池列表消失。
@@ -322,14 +322,14 @@ describe('存储页', () => {
   it('存储池接口失败要报错', async () => {
     stubApi({ listPools: async () => { throw new Error('后端不可用'); } });
     renderPage();
-    expect(await screen.findByText(/后端不可用|加载失败/)).toBeTruthy();
+    expect(await screen.findByText(/后端不Available|Load failed/)).toBeTruthy();
   });
 
   it('按健康状态过滤', async () => {
     renderPage();
     await screen.findByText('tank');
     // 过滤器是 <select>，不是一排按钮。
-    await userEvent.selectOptions(screen.getByLabelText('按状态筛选'), 'abnormal');
+    await userEvent.selectOptions(screen.getByLabelText('Filter by Status'), 'abnormal');
     await waitFor(() => expect(screen.queryByText('tank')).toBeNull());
     expect(screen.getByText('cold')).toBeTruthy();
   });
@@ -341,11 +341,11 @@ describe('存储页', () => {
     renderPage();
     await userEvent.click(await screen.findByText('tank'));
 
-    await userEvent.click(await screen.findByRole('button', { name: /销毁/ }));
-    const dialog = await screen.findByText(/无法恢复/);
-    expect(dialog.textContent).toContain('镜像、配置、还原点、客户机克隆');
+    await userEvent.click(await screen.findByRole('button', { name: /Destroy/ }));
+    const dialog = await screen.findByText(/cannot be undone/);
+    expect(dialog.textContent).toContain('Mirror、配置、还原点、客户机克隆');
 
-    const confirm = screen.getByRole('button', { name: '销毁' });
+    const confirm = screen.getByRole('button', { name: 'Destroy' });
     expect(confirm.disabled).toBe(true);
     expect(deletePool).not.toHaveBeenCalled();
 
@@ -363,10 +363,10 @@ describe('存储页', () => {
     renderPage();
     await screen.findByText('data1');
     const row = screen.getByText('data1').closest('tr');
-    expect(within(row).getByText('本机上已找不到该池')).toBeTruthy();
-    expect(within(row).getByText('未找到')).toBeTruthy();
-    expect(within(row).queryByText(/已用/)).toBeNull();
-    expect(screen.getByText(/^1 块存储盘/)).toBeTruthy();
+    expect(within(row).getByText('Pool missing on this node')).toBeTruthy();
+    expect(within(row).getByText('Missing')).toBeTruthy();
+    expect(within(row).queryByText(/Used/)).toBeNull();
+    expect(screen.getByText(/^1  storage disks/)).toBeTruthy();
   });
 
   // 池已不存在，只删记录；照抄池名是为了防毁数据，这里没有数据，所以不要求。
@@ -375,9 +375,9 @@ describe('存储页', () => {
     stubApi({ listPools: async () => list([POOLS[0], GONE]), deletePool });
     renderPage();
     await userEvent.click(await screen.findByText('data1'));
-    expect(await screen.findByText(/删除这条记录不会改动任何磁盘/)).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: /删除记录/ }));
-    const confirm = await screen.findByRole('button', { name: '删除' });
+    expect(await screen.findByText(/Deleting the record changes no disks/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Delete Record/ }));
+    const confirm = await screen.findByRole('button', { name: 'Delete' });
     expect(confirm.disabled).toBe(false);
     await userEvent.click(confirm);
     await waitFor(() => expect(deletePool).toHaveBeenCalledWith('pool-data1'));
@@ -389,9 +389,9 @@ describe('存储页', () => {
     stubApi({ createPool, listPools: async () => list([POOLS[0]]) });
     renderPage();
     await screen.findByText('tank');
-    await userEvent.click(screen.getByRole('button', { name: /创建存储池/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Create Storage Pool/ }));
 
-    const submit = await screen.findByRole('button', { name: '创建' });
+    const submit = await screen.findByRole('button', { name: 'Create' });
     const nameBox = screen.getByPlaceholderText('tank2');
 
     // 每道护栏都在其它条件已满足时单独验证，否则拦下的可能是后面的护栏。
@@ -403,7 +403,7 @@ describe('存储页', () => {
     await userEvent.click(screen.getByText(/sdc/));
     await userEvent.clear(nameBox);
     await userEvent.click(submit);
-    expect(createPool).not.toHaveBeenCalled(); // 池名为空
+    expect(createPool).not.toHaveBeenCalled(); // Pool Name为空
 
     await userEvent.type(nameBox, 'my pool');
     await userEvent.click(submit);
@@ -413,7 +413,7 @@ describe('存储页', () => {
     await userEvent.clear(nameBox);
     await userEvent.type(nameBox, 'tank2');
     // 一块盘只能建条带；条带无冗余，建之前要说明。
-    await userEvent.click(screen.getByRole('button', { name: /^条带/ }));
+    await userEvent.click(screen.getByRole('button', { name: /^Stripe/ }));
 
     // mirrors 是 zpool 保留字（name is reserved），提前提示。
     await userEvent.clear(nameBox);
@@ -425,11 +425,11 @@ describe('存储页', () => {
     await userEvent.type(nameBox, 'tank2');
 
     await userEvent.click(submit);
-    expect(createPool).not.toHaveBeenCalled(); // 等待确认
-    await userEvent.click(await screen.findByRole('button', { name: '仍要创建' }));
+    expect(createPool).not.toHaveBeenCalled(); // 等待Confirm
+    await userEvent.click(await screen.findByRole('button', { name: 'Create Anyway' }));
     await waitFor(() => expect(createPool).toHaveBeenCalledWith({ name: 'tank2', disks: ['/dev/sdc'], layout: 'stripe', group_width: 1, role: 'data' }));
     // 建数据池会让服务重启一次，要提前说明，免得被当成故障。
-    expect(await screen.findByText(/建成后将自动重启服务以启用该数据池/)).toBeTruthy();
+    expect(await screen.findByText(/建成后将services restart automatically以启用该Data Pool/)).toBeTruthy();
   });
 
   // 布局建后不可改，选盘时就按布局校验盘数、写明还差几块并预估容量。
@@ -438,31 +438,31 @@ describe('存储页', () => {
     stubApi({ createPool, listPools: async () => list([POOLS[0]]) });
     renderPage();
     await screen.findByText('tank');
-    await userEvent.click(screen.getByRole('button', { name: /创建存储池/ }));
-    const submit = await screen.findByRole('button', { name: '创建' });
+    await userEvent.click(screen.getByRole('button', { name: /Create Storage Pool/ }));
+    const submit = await screen.findByRole('button', { name: 'Create' });
     await userEvent.type(screen.getByPlaceholderText('tank2'), 'tank2');
 
     // 默认镜像；三块盘凑不成整组。
     await userEvent.click(screen.getByText(/sdc/));
     await userEvent.click(screen.getByText(/sdg/));
     await userEvent.click(screen.getByText(/sdh/));
-    expect(await screen.findByText(/镜像池按 2 块一组，请再选 1 块/)).toBeTruthy();
+    expect(await screen.findByText(/Mirror池按 2  disks一组，请再选 1  disks/)).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
     // 第四块凑成两组，按选择顺序配对：min(500,500) + min(500,400) = 900e9 = 838.2 GiB。
     await userEvent.click(screen.getByText(/sdi/));
-    expect(await screen.findByText(/镜像 2 组 ≈ 838\.2 GiB 可用 · 每组可坏 1 块/)).toBeTruthy();
+    expect(await screen.findByText(/Mirror 2 组 ≈ 838\.2 GiB Available · 每组可坏 1  disks/)).toBeTruthy();
     expect(submit.disabled).toBe(false);
 
     // 四块盘 raidz2：(4−2) × 400e9 × 0.9 = 720e9 = 670.6 GiB。
     await userEvent.click(screen.getByRole('button', { name: /^raidz2/ }));
-    expect(await screen.findByText(/raidz2 ≈ 670\.6 GiB 可用 · 可坏 2 块/)).toBeTruthy();
+    expect(await screen.findByText(/raidz2 ≈ 670\.6 GiB Available · 可坏 2  disks/)).toBeTruthy();
     // 去掉一块：三块不够 raidz2。
     await userEvent.click(screen.getByText(/sdi/));
-    expect(await screen.findByText(/raidz2 至少 4 块盘，请再选 1 块/)).toBeTruthy();
+    expect(await screen.findByText(/raidz2 至少 4  disks盘，请再选 1  disks/)).toBeTruthy();
     expect(submit.disabled).toBe(true);
 
-    await userEvent.click(screen.getByRole('button', { name: /^镜像/ }));
+    await userEvent.click(screen.getByRole('button', { name: /^Mirror/ }));
     await userEvent.click(screen.getByText(/sdi/));
     await userEvent.click(submit);
     await waitFor(() => expect(createPool).toHaveBeenCalledWith({ name: 'tank2', disks: ['/dev/sdc', '/dev/sdg', '/dev/sdh', '/dev/sdi'], layout: 'mirror', group_width: 2, role: 'data' }));
@@ -477,11 +477,11 @@ describe('存储页', () => {
     await screen.findByText('mirror-0');
 
     // 扩容：分区的「添加」打开选盘框，一块盘不成组。
-    const addButtons = screen.getAllByRole('button', { name: /添加/ });
+    const addButtons = screen.getAllByRole('button', { name: /Add/ });
     await userEvent.click(addButtons[0]);
-    const confirm = await screen.findByRole('button', { name: '确认' });
+    const confirm = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdc/));
-    expect(await screen.findByText(/镜像池按 2 块一组加盘，请再选 1 块/)).toBeTruthy();
+    expect(await screen.findByText(/Mirror池按 2  disks一组加盘，请再选 1  disks/)).toBeTruthy();
     expect(confirm.disabled).toBe(true);
     await userEvent.click(screen.getByText(/sdg/));
     expect(await screen.findByText(/将新增 1 组/)).toBeTruthy();
@@ -490,7 +490,7 @@ describe('存储页', () => {
 
     // 附加：成员行自己的操作给这块盘加镜像。
     await userEvent.click(screen.getByRole('button', { name: '给 /dev/sdb 加 RAID1 盘' }));
-    const confirm2 = await screen.findByRole('button', { name: '确认' });
+    const confirm2 = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdh/));
     await userEvent.click(confirm2);
     await waitFor(() => expect(addPoolDisk).toHaveBeenCalledWith('pool-cold', { disks: ['/dev/sdh'], mode: 'attach', target: '/dev/sdb' }));
@@ -504,10 +504,10 @@ describe('存储页', () => {
     await screen.findByText('raidz2-0');
     expect(screen.queryByRole('button', { name: /加 RAID1 盘/ })).toBeNull();
 
-    await userEvent.click(screen.getAllByRole('button', { name: /添加/ })[0]);
-    const confirm = await screen.findByRole('button', { name: '确认' });
+    await userEvent.click(screen.getAllByRole('button', { name: /Add/ })[0]);
+    const confirm = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdc/));
-    expect(await screen.findByText(/raidz2 池按整组加盘，每组 4 块，请再选 3 块/)).toBeTruthy();
+    expect(await screen.findByText(/raidz2 池按整组加盘，每组 4  disks，请再选 3  disks/)).toBeTruthy();
     expect(confirm.disabled).toBe(true);
   });
 
@@ -522,7 +522,7 @@ describe('存储页', () => {
     expect(screen.getByText(/raidz 不能移盘/)).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: '换掉 /dev/sdj' }));
-    const confirm = await screen.findByRole('button', { name: '确认' });
+    const confirm = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdc/));
     await userEvent.click(confirm);
     await waitFor(() => expect(replacePoolDisk).toHaveBeenCalledWith('pool-backup', { old_disk: '/dev/sdj', new_disk: '/dev/sdc' }));
@@ -554,7 +554,7 @@ describe('存储页', () => {
     stubApi({ mirrorUpgradePool, listPools: async () => list([{ ...POOLS[0], Disks: ['sda', 'sdb'] }]) });
     renderPage();
     await userEvent.click(await screen.findByText('tank'));
-    await userEvent.click(await screen.findByRole('button', { name: /升级为 RAID1/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Upgrade to RAID1/ }));
 
     const start = await screen.findByRole('button', { name: '开始升级' });
     expect(start.disabled).toBe(true); // 尚未配对
@@ -572,7 +572,7 @@ describe('存储页', () => {
     renderPage();
     await userEvent.click(await screen.findByText('tank'));
     expect(await screen.findByRole('button', { name: '给 sda 加 RAID1 盘' })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /升级为 RAID1/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Upgrade to RAID1/ })).toBeNull();
   });
 
   // special vdev 存元数据，只能镜像添加；热备盘按单盘增删。
@@ -585,18 +585,18 @@ describe('存储页', () => {
     await userEvent.click(await screen.findByText('cold'));
     await screen.findByText('mirror-0');
 
-    const addButtons = screen.getAllByRole('button', { name: /添加/ });
-    await userEvent.click(addButtons[1]); // 元数据盘
-    const confirm = await screen.findByRole('button', { name: '确认' });
+    const addButtons = screen.getAllByRole('button', { name: /Add/ });
+    await userEvent.click(addButtons[1]); // 元data盘
+    const confirm = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdc/));
-    expect(await screen.findByText(/元数据盘必须镜像，请选 2 或 3 块/)).toBeTruthy();
+    expect(await screen.findByText(/元data盘必须Mirror，请选 2 或 3  disks/)).toBeTruthy();
     expect(confirm.disabled).toBe(true);
     await userEvent.click(screen.getByText(/sdg/));
     await userEvent.click(confirm);
     await waitFor(() => expect(addSpecial).toHaveBeenCalledWith('pool-cold', { disks: ['/dev/sdc', '/dev/sdg'] }));
 
-    await userEvent.click(screen.getAllByRole('button', { name: /添加/ })[2]); // 热备盘
-    const confirm2 = await screen.findByRole('button', { name: '确认' });
+    await userEvent.click(screen.getAllByRole('button', { name: /Add/ })[2]); // 热备盘
+    const confirm2 = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdi/));
     await userEvent.click(confirm2);
     await waitFor(() => expect(addSpare).toHaveBeenCalledWith('pool-cold', { disks: ['/dev/sdi'] }));
@@ -613,15 +613,15 @@ describe('存储页', () => {
     const { unmount } = renderPage();
     await userEvent.click(await screen.findByText('backup'));
     await screen.findByText('raidz2-0');
-    expect(screen.queryByRole('button', { name: /扩一块盘/ })).toBeNull();
-    expect(screen.getByText(/不支持 raidz 单盘扩容/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /扩一 disks盘/ })).toBeNull();
+    expect(screen.getByText(/不支持 raidz 单盘Expand/)).toBeTruthy();
     unmount();
 
     stubApi({ addPoolDisk, listPools: async () => list([...POOLS, { ...RAIDZ_POOL, RaidzExpandable: true }]) });
     renderPage();
     await userEvent.click(await screen.findByText('backup'));
-    await userEvent.click(await screen.findByRole('button', { name: '给 raidz2-0 扩一块盘' }));
-    const confirm = await screen.findByRole('button', { name: '确认' });
+    await userEvent.click(await screen.findByRole('button', { name: '给 raidz2-0 扩一 disks盘' }));
+    const confirm = await screen.findByRole('button', { name: 'Confirm' });
     await userEvent.click(screen.getByText(/sdc/));
     await userEvent.click(confirm);
     await waitFor(() => expect(addPoolDisk).toHaveBeenCalledWith('pool-backup', { disks: ['/dev/sdc'], mode: 'attach', target: 'raidz2-0' }));
@@ -630,8 +630,8 @@ describe('存储页', () => {
   // 表格显示布局，详情按组展示成员，降级的组点名掉线的成员。
   it('列表显示布局，详情按组展示成员', async () => {
     renderPage();
-    expect(await screen.findByText('镜像（RAID1）×2')).toBeTruthy();
-    expect(screen.getByText('条带')).toBeTruthy();
+    expect(await screen.findByText('Mirror（RAID1）×2')).toBeTruthy();
+    expect(screen.getByText('Stripe')).toBeTruthy();
 
     await userEvent.click(screen.getByText('cold'));
     expect(await screen.findByText('mirror-0')).toBeTruthy();
@@ -673,8 +673,8 @@ describe('别的节点的池详情', () => {
     await userEvent.click(await screen.findByText('cold'));
     await screen.findByText('mirror-0');
     await waitFor(() => expect(listClusterDisks).toHaveBeenCalledWith('n2'));
-    await userEvent.click(screen.getAllByRole('button', { name: /添加/ })[0]);
-    await screen.findByRole('button', { name: '确认' });
+    await userEvent.click(screen.getAllByRole('button', { name: /Add/ })[0]);
+    await screen.findByRole('button', { name: 'Confirm' });
     expect(await screen.findByText(/sdx/)).toBeTruthy();
     expect(screen.queryByText(/sdc/)).toBeNull();
   });

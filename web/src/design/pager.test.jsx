@@ -6,28 +6,28 @@ import { Pager } from './primitives.jsx';
 import { usePaged } from '../lib/hooks.js';
 
 describe('Pager', () => {
-  it('显示总数、每页条数可选 10/20/50，翻页与切换条数都回调', async () => {
+  it('Shows total, offers 10/20/50 rows per page, and calls page/size handlers', async () => {
     const onPage = vi.fn(), onSize = vi.fn();
     render(<Pager page={1} size={10} total={35} onPage={onPage} onSize={onSize}/>);
-    expect(screen.getByText('共 35 条')).toBeTruthy();
+    expect(screen.getByText('Total 35 entries')).toBeTruthy();
     expect(screen.getByText('1 / 4')).toBeTruthy();
-    const sizes = screen.getByLabelText('每页条数');
+    const sizes = screen.getByLabelText('Rows per page');
     expect([...sizes.options].map(o => o.value)).toEqual(['10', '20', '50']);
     await userEvent.selectOptions(sizes, '20');
     expect(onSize).toHaveBeenCalledWith(20);
-    await userEvent.click(screen.getByRole('button', { name: '下一页' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(onPage).toHaveBeenCalledWith(2);
-    expect(screen.getByRole('button', { name: '上一页' }).disabled).toBe(true);
+    expect(screen.getByRole('button', { name: 'Previous' }).disabled).toBe(true);
   });
 
-  it('不超过一页最小条数时不显示', () => {
+  it('Hides pagination when content fits on the smallest page', () => {
     const { container } = render(<Pager page={1} size={10} total={10} onPage={() => {}} onSize={() => {}}/>);
     expect(container.textContent).toBe('');
   });
 
-  it('条数调大后只剩一页也要能调回来', () => {
+  it('Allows changing page size back even when all content fits', () => {
     render(<Pager page={1} size={50} total={30} onPage={() => {}} onSize={() => {}}/>);
-    expect(screen.getByLabelText('每页条数')).toBeTruthy();
+    expect(screen.getByLabelText('Rows per page')).toBeTruthy();
   });
 });
 
@@ -37,13 +37,13 @@ function List({ items }) {
 }
 
 describe('usePaged', () => {
-  it('默认每页 10 条，切到 20 条回到第一页', async () => {
+  it('Defaults to ten rows and resets to page one after selecting twenty', async () => {
     const items = Array.from({ length: 25 }, (_, i) => `row-${i}`);
     render(<List items={items}/>);
     expect(screen.getAllByRole('listitem')).toHaveLength(10);
-    await userEvent.click(screen.getByRole('button', { name: '下一页' }));
+    await userEvent.click(screen.getByRole('button', { name: 'Next' }));
     expect(screen.getAllByRole('listitem')[0].textContent).toBe('row-10');
-    await userEvent.selectOptions(screen.getByLabelText('每页条数'), '20');
+    await userEvent.selectOptions(screen.getByLabelText('Rows per page'), '20');
     expect(screen.getAllByRole('listitem')).toHaveLength(20);
     expect(screen.getAllByRole('listitem')[0].textContent).toBe('row-0');
   });

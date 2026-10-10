@@ -61,14 +61,14 @@ describe('终端所在节点', () => {
     renderPage();
     const row = (await screen.findByText('一号机')).closest('tr');
     expect(row.textContent).toContain('10.0.0.4');
-    expect(screen.getAllByText('节点').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('Node').length).toBeGreaterThan(0);
   });
 
   it('单机不加这一列', async () => {
     stubApi({ listClusterNodes: async () => list([{ id: 'n1', ip: '10.0.0.3', ha_state: 'active', online: true }]) });
     renderPage();
     await screen.findByText('一号机');
-    expect(screen.queryByText('节点')).toBeNull();
+    expect(screen.queryByText('Node')).toBeNull();
   });
 });
 
@@ -89,8 +89,8 @@ describe('终端页', () => {
       { ID: 'terminal-E', Name: '旧数据机', MAC: 'AABBCCDDEE05', IP: '192.168.50.105', GroupID: 'g-1', IsSuper: false, State: 'unknown' }]) });
     renderPage();
     expect(await screen.findByText('旧数据机')).toBeTruthy();
-    expect(screen.queryByText('未知')).toBeNull();
-    expect(screen.getByRole('button', { name: /离线\s*3/ })).toBeTruthy();
+    expect(screen.queryByText('Unknown')).toBeNull();
+    expect(screen.getByRole('button', { name: /Offline\s*3/ })).toBeTruthy();
   });
 
   // 四个列表一起取、分开 settle：分组列表失败只丢分组名，不能丢客户机。
@@ -105,14 +105,14 @@ describe('终端页', () => {
   it('终端接口挂了要报错，而不是显示成没有终端', async () => {
     stubApi({ listTerminals: async () => { throw new Error('后端不可用'); } });
     renderPage();
-    expect(await screen.findByText(/后端不可用|加载失败/)).toBeTruthy();
+    expect(await screen.findByText(/Backend unavailable|Load failed/)).toBeTruthy();
   });
 
   it('搜索按名称与 MAC 收窄', async () => {
     renderPage();
     await screen.findByText('一号机');
 
-    const box = screen.getByPlaceholderText(/搜索/);
+    const box = screen.getByPlaceholderText(/Search/);
     await userEvent.type(box, '美术');
     await waitFor(() => expect(screen.queryByText('一号机')).toBeNull());
     expect(screen.getByText('美术教室机')).toBeTruthy();
@@ -131,13 +131,13 @@ describe('终端页', () => {
     await screen.findByText('二号机');
 
     await userEvent.click(screen.getByText('二号机'));
-    await userEvent.click(await screen.findByRole('button', { name: /存还原点|超管停机/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Save Restore Point|Super Admin Shutdown/ }));
 
-    await userEvent.click(await screen.findByRole('button', { name: /保存还原点|存盘停机/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Save Restore Point|Save Restore Point/ }));
     expect(stopSuper).not.toHaveBeenCalled();
 
     await userEvent.type(screen.getByPlaceholderText('2026Q2-update'), '  装完office  ');
-    await userEvent.click(screen.getByRole('button', { name: /保存还原点|存盘停机/ }));
+    await userEvent.click(screen.getByRole('button', { name: /Save Restore Point|Save Restore Point/ }));
     // 名称要去掉首尾空格，否则会存成另一个还原点名。
     await waitFor(() => expect(stopSuper).toHaveBeenCalledWith('terminal-B', { reduction_name: '装完office' }));
   });
@@ -155,14 +155,14 @@ describe('终端页', () => {
     renderPage();
     await screen.findByText('二号机');
     await userEvent.click(screen.getByText('二号机'));
-    await userEvent.click(await screen.findByRole('button', { name: /存还原点|超管停机/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Save Restore Point|Super Admin Shutdown/ }));
 
     await userEvent.type(await screen.findByPlaceholderText('2026Q2-update'), 'sys-v2');
     // 两块盘都列出；勾选 E: 并命名，D: 不勾。
-    expect(await screen.findByLabelText('保存数据盘 D:')).toBeTruthy();
-    await userEvent.click(screen.getByLabelText('保存数据盘 E:'));
-    await userEvent.type(screen.getByLabelText('数据盘 E: 还原点名称'), ' 装完游戏 ');
-    await userEvent.click(screen.getByRole('button', { name: /保存还原点|存盘停机/ }));
+    expect(await screen.findByLabelText('Save Data Disk D:')).toBeTruthy();
+    await userEvent.click(screen.getByLabelText('Save Data Disk E:'));
+    await userEvent.type(screen.getByLabelText('Data Disk E: Restore Point Name'), ' 装完游戏 ');
+    await userEvent.click(screen.getByRole('button', { name: /Save Restore Point|Save Restore Point/ }));
     await waitFor(() => expect(stopSuper).toHaveBeenCalledWith('terminal-B', {
       reduction_name: 'sys-v2',
       data_disks: [{ disk_id: 'disk-e', reduction_name: '装完游戏' }],
@@ -179,10 +179,10 @@ describe('终端页', () => {
     renderPage();
     await screen.findByText('二号机');
     await userEvent.click(screen.getByText('二号机'));
-    await userEvent.click(await screen.findByRole('button', { name: /存还原点|超管停机/ }));
+    await userEvent.click(await screen.findByRole('button', { name: /Save Restore Point|Super Admin Shutdown/ }));
     await userEvent.type(await screen.findByPlaceholderText('2026Q2-update'), 'sys-v2');
-    await userEvent.click(await screen.findByLabelText('保存数据盘 D:'));
-    await userEvent.click(screen.getByRole('button', { name: /保存还原点|存盘停机/ }));
+    await userEvent.click(await screen.findByLabelText('Save Data Disk D:'));
+    await userEvent.click(screen.getByRole('button', { name: /Save Restore Point|Save Restore Point/ }));
     expect(stopSuper).not.toHaveBeenCalled();
   });
 });
@@ -192,13 +192,13 @@ it('在线的超管机，超管操作直接禁用', async () => {
   const stopSuper = vi.fn(async () => ({ task_id: 'task-super_stop-1' }));
   stubApi({ stopSuper });
   renderPage();
-  await screen.findByText('还开着的超管机');
-  await userEvent.click(screen.getByText('还开着的超管机'));
+  await screen.findByText('还开着的Super Admin');
+  await userEvent.click(screen.getByText('还开着的Super Admin'));
 
-  const save = await screen.findByRole('button', { name: /存还原点/ });
+  const save = await screen.findByRole('button', { name: /Save Restore Point/ });
   expect(save.disabled).toBe(true);
-  expect(screen.getByRole('button', { name: '取消超管' }).disabled).toBe(true);
-  expect(screen.getByText(/关机后可/)).toBeTruthy();
+  expect(screen.getByRole('button', { name: 'Disable Super Admin' }).disabled).toBe(true);
+  expect(screen.getByText(/shut down/)).toBeTruthy();
   await userEvent.click(save);
   expect(stopSuper).not.toHaveBeenCalled();
 });
@@ -206,11 +206,11 @@ it('在线的超管机，超管操作直接禁用', async () => {
 it('在线的客户机，编辑表单里的终端类型开关也禁用', async () => {
   stubApi({});
   renderPage();
-  const row = (await screen.findByText('一号机')).closest('tr');   // terminal-A: 在线、普通
-  await userEvent.click(within(row).getByRole('button', { name: '编辑' }));
-  expect((await screen.findByRole('button', { name: '超管机' })).disabled).toBe(true);
-  expect(screen.getByRole('button', { name: '普通终端' }).disabled).toBe(true);
-  expect(screen.getByText(/关机后/)).toBeTruthy();
+  const row = (await screen.findByText('一号机')).closest('tr');   // terminal-A: Online、普通
+  await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+  expect((await screen.findByRole('button', { name: 'Super Admin' })).disabled).toBe(true);
+  expect(screen.getByRole('button', { name: 'Regular Client' }).disabled).toBe(true);
+  expect(screen.getByText(/shut down/)).toBeTruthy();
 });
 
 // 「取消超管」会当场删掉超管盘，未保存的改动无法找回，必须先确认后果。
@@ -221,14 +221,14 @@ it('取消超管要先确认，说清楚会丢弃没保存的改动', async () =
   await screen.findByText('二号机');
 
   await userEvent.click(screen.getByText('二号机'));
-  await userEvent.click(await screen.findByRole('button', { name: '取消超管' }));
-  let dialog = (await screen.findByText(/丢弃.*没保存|无法恢复/)).closest('.card');
-  await userEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+  await userEvent.click(await screen.findByRole('button', { name: 'Disable Super Admin' }));
+  let dialog = (await screen.findByText(/Discard.*unsaved|cannot be undone/)).closest('.card');
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
   expect(disableSuper).not.toHaveBeenCalled();
 
-  await userEvent.click(screen.getByRole('button', { name: '取消超管' }));
-  dialog = (await screen.findByText(/丢弃.*没保存|无法恢复/)).closest('.card');
-  await userEvent.click(within(dialog).getByRole('button', { name: /丢弃|确认/ }));
+  await userEvent.click(screen.getByRole('button', { name: 'Disable Super Admin' }));
+  dialog = (await screen.findByText(/Discard.*unsaved|cannot be undone/)).closest('.card');
+  await userEvent.click(within(dialog).getByRole('button', { name: /Discard|Confirm/ }));
   await waitFor(() => expect(disableSuper).toHaveBeenCalledWith('terminal-B'));
 });
 
@@ -238,16 +238,16 @@ it('编辑时把超管改回普通终端也要先确认', async () => {
   stubApi({ updateTerminal });
   renderPage();
   const row = (await screen.findByText('二号机')).closest('tr');
-  await userEvent.click(within(row).getByRole('button', { name: '编辑' }));
-  await userEvent.click(await screen.findByRole('button', { name: '普通终端' }));
-  await userEvent.click(screen.getByRole('button', { name: '保存' }));
+  await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+  await userEvent.click(await screen.findByRole('button', { name: 'Regular Client' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-  const dialog = (await screen.findByText(/无法恢复/)).closest('.card');
-  await userEvent.click(within(dialog).getByRole('button', { name: '取消' }));
+  const dialog = (await screen.findByText(/cannot be undone/)).closest('.card');
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Cancel' }));
   expect(updateTerminal).not.toHaveBeenCalled();
 
-  await userEvent.click(screen.getByRole('button', { name: '保存' }));
-  await userEvent.click(within((await screen.findByText(/无法恢复/)).closest('.card')).getByRole('button', { name: /丢弃|确认/ }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+  await userEvent.click(within((await screen.findByText(/cannot be undone/)).closest('.card')).getByRole('button', { name: /Discard|Confirm/ }));
   await waitFor(() => expect(updateTerminal).toHaveBeenCalledWith('terminal-B', expect.objectContaining({ is_super: false })));
 });
 
@@ -262,18 +262,18 @@ it('换到网段不含原 IP 的分组时清空 IP，交给后端在新分组里
   });
   renderPage();
   const row = (await screen.findByText('美术教室机')).closest('tr');
-  await userEvent.click(within(row).getByRole('button', { name: '编辑' }));
+  await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
   const ip = await screen.findByDisplayValue('192.168.60.101');
   const dialog = ip.closest('.card');
   await userEvent.selectOptions(within(dialog).getByDisplayValue('美术教室'), 'g-1');
   expect(ip.value).toBe('');
-  expect(within(dialog).getByText(/留空将在新分组网段内自动分配/)).toBeTruthy();
+  expect(within(dialog).getByText(/Leave blank for automatic allocation in the new group subnet/)).toBeTruthy();
 
   await userEvent.selectOptions(within(dialog).getByDisplayValue('教学一班'), 'g-2');
   expect(ip.value).toBe('192.168.60.101');
 
   await userEvent.selectOptions(within(dialog).getByDisplayValue('美术教室'), 'g-1');
-  await userEvent.click(within(dialog).getByRole('button', { name: '保存' }));
+  await userEvent.click(within(dialog).getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(updateTerminal).toHaveBeenCalledWith('terminal-C', expect.objectContaining({ ip: '', group_id: 'g-1' })));
 });
 
@@ -281,10 +281,10 @@ it('表格默认每页 10 台，能切换条数', async () => {
   const many = Array.from({ length: 12 }, (_, i) => ({ ID: `t-${i}`, Name: `机器${String(i).padStart(2, '0')}`, MAC: `AABBCCDDEE${String(i).padStart(2, '0')}`, IP: `192.168.50.${110 + i}`, GroupID: 'g-1', IsSuper: false, State: 'offline' }));
   stubApi({ listTerminals: async () => list(many) });
   renderPage();
-  expect(await screen.findByText('共 12 条')).toBeTruthy();
+  expect(await screen.findByText('Total 12 entries')).toBeTruthy();
   expect(screen.getByText('机器09')).toBeTruthy();
   expect(screen.queryByText('机器10')).toBeNull();
-  await userEvent.selectOptions(screen.getByLabelText('每页条数'), '20');
+  await userEvent.selectOptions(screen.getByLabelText('Rows per page'), '20');
   expect(screen.getByText('机器11')).toBeTruthy();
 });
 
@@ -294,10 +294,10 @@ it('编辑超管机但不改终端类型时不打扰', async () => {
   stubApi({ updateTerminal });
   renderPage();
   const row = (await screen.findByText('二号机')).closest('tr');
-  await userEvent.click(within(row).getByRole('button', { name: '编辑' }));
-  await userEvent.click(screen.getByRole('button', { name: '保存' }));
+  await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
+  await userEvent.click(screen.getByRole('button', { name: 'Save' }));
   await waitFor(() => expect(updateTerminal).toHaveBeenCalledWith('terminal-B', expect.objectContaining({ is_super: true })));
-  expect(screen.queryByText(/无法恢复/)).toBeNull();
+  expect(screen.queryByText(/cannot be undone/)).toBeNull();
 });
 
 
@@ -311,15 +311,15 @@ it('超管机的数据盘能在线发布', async () => {
     ]),
   });
   renderPage();
-  await screen.findByText('还开着的超管机');
-  await userEvent.click(screen.getByText('还开着的超管机'));
+  await screen.findByText('还开着的Super Admin');
+  await userEvent.click(screen.getByText('还开着的Super Admin'));
 
-  expect(await screen.findByText('2026-09-14')).toBeTruthy();   // 当前发布点
-  expect(screen.getByText(/1[23]\.\d+ GiB/)).toBeTruthy(); // 未发布改动
-  await userEvent.click(screen.getByRole('button', { name: /保存并发布/ }));
+  expect(await screen.findByText('2026-09-14')).toBeTruthy();   // 当前Publish点
+  expect(screen.getByText(/1[23]\.\d+ GiB/)).toBeTruthy(); // 未Publish改动
+  await userEvent.click(screen.getByRole('button', { name: /Save and Publish/ }));
 
   await userEvent.type(await screen.findByPlaceholderText(/永劫无间|2026/), '装了永劫无间');
-  await userEvent.click(screen.getByRole('button', { name: /^发布$|确认发布/ }));
+  await userEvent.click(screen.getByRole('button', { name: /^Publish$|Publish/ }));
   await waitFor(() => expect(publishDataDisk).toHaveBeenCalledWith('terminal-D', { disk_id: 'gd-1', name: '装了永劫无间' }));
 });
 
@@ -331,16 +331,16 @@ it('没有改动、或者还没开过机，就不让发布', async () => {
     ]),
   });
   renderPage();
-  await screen.findByText('还开着的超管机');
-  await userEvent.click(screen.getByText('还开着的超管机'));
+  await screen.findByText('还开着的Super Admin');
+  await userEvent.click(screen.getByText('还开着的Super Admin'));
 
   const rows = await screen.findAllByRole('row');
   const d = rows.find(r => within(r).queryByText('D:'));
   const e = rows.find(r => within(r).queryByText('E:'));
-  expect(within(d).getByRole('button', { name: /保存并发布/ }).disabled).toBe(true);
-  expect(within(d).getByText(/无改动/)).toBeTruthy();
-  expect(within(e).getByRole('button', { name: /保存并发布/ }).disabled).toBe(true);
-  expect(within(e).getByText(/开机后/)).toBeTruthy();
+  expect(within(d).getByRole('button', { name: /Save and Publish/ }).disabled).toBe(true);
+  expect(within(d).getByText(/No changes/)).toBeTruthy();
+  expect(within(e).getByRole('button', { name: /Save and Publish/ }).disabled).toBe(true);
+  expect(within(e).getByText(/after boot/)).toBeTruthy();
 });
 
 // 弹窗里要写明：存还原点不会结束超管。
@@ -349,22 +349,22 @@ it('存还原点的弹窗要说清楚保存后还是超管机', async () => {
   renderPage();
   await screen.findByText('二号机');
   await userEvent.click(screen.getByText('二号机'));
-  await userEvent.click(await screen.findByRole('button', { name: /存还原点/ }));
-  expect(await screen.findByText(/仍为超管机/)).toBeTruthy();
+  await userEvent.click(await screen.findByRole('button', { name: /Save Restore Point/ }));
+  expect(await screen.findByText(/remains Super Admin/)).toBeTruthy();
 });
 
 // 超管机的用途说明收在问号后面；常用约束（同一配置只能一台、关机后才能切换）一直显示。
 it('终端类型：约束一直显示，超管机的说明收在问号后面', async () => {
   stubApi({});
   renderPage();
-  const row = (await screen.findByText('美术教室机')).closest('tr');  // terminal-C：离线普通终端
-  await userEvent.click(within(row).getByRole('button', { name: '编辑' }));
+  const row = (await screen.findByText('美术教室机')).closest('tr');  // terminal-C：OfflineRegular Client
+  await userEvent.click(within(row).getByRole('button', { name: 'Edit' }));
 
-  expect(await screen.findByText(/同一配置同时只能有一台超管机/)).toBeTruthy();
-  expect(screen.queryByText(/超管机用于修改镜像内容/)).toBeNull();
+  expect(await screen.findByText(/Only one Super Admin can use a configuration at a time/)).toBeTruthy();
+  expect(screen.queryByText(/Super Admin edits image contents/)).toBeNull();
 
-  await userEvent.click(screen.getByRole('button', { name: '终端类型说明' }));
-  expect(await screen.findByText(/超管机用于修改镜像内容/)).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: 'Help for Client Type' }));
+  expect(await screen.findByText(/Super Admin edits image contents/)).toBeTruthy();
 });
 
 // 勾选只对眼前这一页有效：筛选、换视图后清空，批量删除不会删到看不见的行。
@@ -373,15 +373,15 @@ it('筛选或切换视图后清空勾选', async () => {
   renderPage();
   const row = (await screen.findByText('一号机')).closest('tr');
   await userEvent.click(row.querySelector('input[type="checkbox"]'));
-  expect(screen.getByText('已选 1')).toBeTruthy();
+  expect(screen.getByText('Selected 1')).toBeTruthy();
 
-  await userEvent.type(screen.getByPlaceholderText(/搜索/), '美术');
+  await userEvent.type(screen.getByPlaceholderText(/Search/), '美术');
   await waitFor(() => expect(screen.queryByText(/已选/)).toBeNull());
 
-  await userEvent.clear(screen.getByPlaceholderText(/搜索/));
+  await userEvent.clear(screen.getByPlaceholderText(/Search/));
   const row2 = (await screen.findByText('一号机')).closest('tr');
   await userEvent.click(row2.querySelector('input[type="checkbox"]'));
-  expect(screen.getByText('已选 1')).toBeTruthy();
-  await userEvent.click(screen.getByRole('button', { name: '矩阵' }));
+  expect(screen.getByText('Selected 1')).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: 'Grid' }));
   await waitFor(() => expect(screen.queryByText(/已选/)).toBeNull());
 });

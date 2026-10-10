@@ -1,4 +1,4 @@
-// 分组绑定系统镜像 + 配置 + 还原点及 DHCP 网络参数；数据盘（挂载点 + 镜像 + 配置）在同一弹窗里一起设置。
+// A group binds a system image, configuration, restore point and DHCP settings; configure data disks in the same dialog.
 import React from 'react';
 import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
@@ -8,18 +8,18 @@ import { api } from '../../lib/api.js';
 import { useResource, useMutation } from '../../lib/hooks.js';
 import { classifyGroupNetwork, groupWindow, intToIp4, relaySnippet } from '../../lib/network.js';
 
-// 新建分组预填的公共 DNS，放在输入框里，有内网 DNS 的现场可直接改。
-// 国内的放第一位：Windows 先问 DNS1、超时才问 DNS2，8.8.8.8 在国内常超时。
-// 不能留空：dnsmasq 这里 port=0 不做解析，客户机拿不到 DNS 就解析不了任何域名。
+// Prepopulate public DNS for new groups; operators may replace it with internal DNS.
+// Prioritize local DNS because Windows queries DNS1 first and may wait for timeouts before DNS2.
+// DNS must not be empty: dnsmasq port=0 disables resolution and clients need a resolver.
 const DEFAULT_DNS1 = "114.114.114.114";
 const DEFAULT_DNS2 = "223.5.5.5";
 const { useState, useEffect } = React;
 
-// 各种网络状态在卡片和表单里的叫法。
+// Network status labels shared between group cards and forms.
 const NET_STATUS = {
-  same:    { chip: "emerald", text: "同网段" },
-  relay:   { chip: "amber",   text: "跨网段·中继" },
-  blocked: { chip: "rose",    text: "不通" },
+  same:    { chip: "emerald", text: "Same Subnet" },
+  relay:   { chip: "amber",   text: "Cross-subnet · Relay" },
+  blocked: { chip: "rose",    text: "Blocked" },
   unknown: { chip: "",        text: "" },
 };
 const rangeText = (startIP, max) => { const w = groupWindow(startIP, max); return w ? `${intToIp4(w.start)}–${intToIp4(w.end)}` : startIP || "—"; };
@@ -40,20 +40,20 @@ function PageGroups() {
   const [modal, setModal] = useState(null); // add | edit | fixnet
   const [form, setForm] = useState({});
   const [fix, setFix] = useState(null); // { group, target, preview }
-  // 服务器的客户机网段：默认值取自它，所有地址区间都对照它判断。单独获取，失败只影响判断，不影响页面。
+  // Load the server client subnet independently for suggested defaults and range validation.
   const { data: network, reload: reloadNetwork } = useResource(() => api.getNetwork(30).catch(() => null), []);
-  // 存储节点下拉用的集群名单；单机或获取失败时整个下拉隐藏。
+  // Cluster roster for storage-node selection; hide the selector on standalone nodes or failed loads.
   const { data: nodesData } = useResource(() => api.listClusterNodes().catch(() => null), []);
   const clusterNodes = (nodesData && nodesData.items) || [];
 
-  // 分开 settle：镜像、客户机信息获取失败不能清空分组列表。
+  // Fetch independently so failed image/client requests do not clear groups.
   const { data, loading, error, reload: load } = useResource(async () => {
     const [gr, ir, tr] = await Promise.allSettled([api.listGroups(), api.listImages(), api.listTerminals()]);
     if (gr.status === "rejected") throw gr.reason;
     const groups = (gr.value && gr.value.items) || [];
     const diskResults = await Promise.allSettled(groups.map(g => api.listGroupDisks(g.ID)));
     const disks = Object.fromEntries(groups.map((g, i) => [g.ID, diskResults[i].status === "fulfilled" ? asItems(diskResults[i].value) : []]));
-    // 把配置、还原点的原始 ID（带纳秒后缀，操作者看不懂）换成名称，查不到就显示 ID。
+    // Resolve configuration and restore-point IDs to names, falling back to IDs.
     const imageIds = [...new Set([...groups.map(g => g.SystemImageID), ...Object.values(disks).flat().map(d => d.ImageID)].filter(Boolean))];
     const configIds = [...new Set(groups.map(g => g.SystemConfigID).filter(Boolean))];
     const [cfgResults, redResults] = await Promise.all([
@@ -88,18 +88,18 @@ function PageGroups() {
   const onlineOf = (gid) => termsOf(gid).filter(t => t.State === "online").length;
 
   const openAdd = () => {
-    // 默认值取自服务器的客户机网段，不能写死在代码里，否则分组会落到没人服务的网段。
+    // Derive defaults from the server client subnet rather than hard-coded addresses.
     const sug = network?.suggest;
     setForm({ name: "", start_ip: sug?.start_ip || "", client_max: sug?.client_max || 30, gateway: sug?.gateway || "", netmask: sug?.netmask || "255.255.255.0", dns1: DEFAULT_DNS1, dns2: DEFAULT_DNS2, is_default: false, system_image_id: "", system_config_id: "", storage_server_id: "", disks: [], newDisks: [], removedDisks: [] });
     setModal("add");
   };
-  // fillSuggested 按表单要的台数，在客户机网段内换一个可用区间。
+  // fillSuggested finds a free range on the client subnet for the requested number of clients.
   const fillSuggested = async () => {
     try {
       const view = await api.getNetwork(Number(form.client_max) || 30);
-      if (!view?.suggest) { store.toast("服务器网段里放不下这么多台，缩小客户机数再试", "err"); return; }
+      if (!view?.suggest) { store.toast("Not enough addresses in the server subnet. Reduce the client count and retry.", "err"); return; }
       setForm(f => ({ ...f, start_ip: view.suggest.start_ip, netmask: view.suggest.netmask, gateway: view.suggest.gateway || "" }));
-    } catch (e) { store.toast(e.message || "读取服务器网络失败", "err"); }
+    } catch (e) { store.toast(e.message || "Failed to load server network", "err"); }
   };
   const netStatus = classifyGroupNetwork(form, network);
   const openEdit = (g) => {
@@ -108,9 +108,9 @@ function PageGroups() {
     setModal("edit");
   };
   const save = async () => {
-    if (!form.name?.trim()) { store.toast("请输入分组名称", "err"); return; }
-    if (netStatus === "blocked") { store.toast("网段不在服务器的客户机网段，先改到服务器网段或打开跨网段分组", "err"); return; }
-    if (!form.system_image_id || !form.system_config_id) { store.toast("请选择镜像 / 配置", "err"); return; }
+    if (!form.name?.trim()) { store.toast("Enter a group name", "err"); return; }
+    if (netStatus === "blocked") { store.toast("The group subnet is outside the server client subnet. Move it or enable cross-subnet groups.", "err"); return; }
+    if (!form.system_image_id || !form.system_config_id) { store.toast("Select an image and configuration", "err"); return; }
     const diskProblem = checkNewDisks(form);
     if (diskProblem) { store.toast(diskProblem, "err"); return; }
     const body = {
@@ -123,16 +123,16 @@ function PageGroups() {
     if (modal === "add") {
       const ok = await run(async () => {
         const g = await api.createGroup(body);
-        // 分组已建好：之后数据盘再失败，弹窗也要转为编辑，重新保存只补数据盘，不再建一次分组。
+        // If group creation succeeds but disk setup fails, switch to edit mode so retrying only adds remaining disks.
         setForm(f => ({ ...f, id: g.ID }));
         setModal("edit");
-        await applyDisks(g.ID, form, "分组已创建");
-      }, "分组已创建", { reload: load, errMsg: "保存失败" });
+        await applyDisks(g.ID, form, "Group created");
+      }, "Group created", { reload: load, errMsg: "Save failed" });
       if (ok) setModal(null);
       return;
     }
-    // 改网络参数前先预览影响：区间一挪，组内机器地址跟着换，运行中的机器续租时
-    // dnsmasq 不再给原地址，Windows 的 IP 一变 iSCSI 就断，要在保存前告诉运维。
+    // Preview network changes: moving a range changes member IP addresses on DHCP renewal.
+    // Changed Windows IPs break iSCSI sessions; warn operators before saving.
     const before = groups.find(g => g.ID === form.id);
     const moved = before && (before.StartIP !== body.start_ip || before.ClientMax !== body.client_max
       || (before.Netmask || "") !== (body.netmask || "") || (before.Gateway || "") !== (body.gateway || ""));
@@ -147,20 +147,20 @@ function PageGroups() {
           return;
         }
       } catch (e) {
-        store.toast(e.message || "无法预览地址变化", "err");
+        store.toast(e.message || "Cannot preview address changes", "err");
         return;
       }
     }
-    if (await run(() => saveEdit(form.id, body, form), "分组已更新", { reload: load, errMsg: "保存失败" })) setModal(null);
+    if (await run(() => saveEdit(form.id, body, form), "Group updated", { reload: load, errMsg: "Save failed" })) setModal(null);
   };
   const saveEdit = async (id, body, f) => {
     await api.updateGroup(id, body);
-    await applyDisks(id, f, "分组已保存");
+    await applyDisks(id, f, "Group saved");
   };
-  // applyDisks 先移除再添加，逐块成功就从表单里划掉，失败时重新保存只做剩下的。
+  // applyDisks removes before adding and records each success so retries apply only remaining changes.
   const applyDisks = async (groupId, f, saved) => {
     for (const d of f.removedDisks || []) {
-      try { await api.deleteGroupDisk(d.ID); } catch (e) { throw new Error(`${saved}，数据盘 ${d.MountTarget} 未移除：${e.message}`); }
+      try { await api.deleteGroupDisk(d.ID); } catch (e) { throw new Error(`${saved}; data disk ${d.MountTarget} could not be removed: ${e.message}`); }
       setForm(cur => ({ ...cur, removedDisks: cur.removedDisks.filter(x => x.ID !== d.ID) }));
     }
     for (const row of f.newDisks || []) {
@@ -168,7 +168,7 @@ function PageGroups() {
       let created;
       try {
         created = await api.createGroupDisk(groupId, { mount_target: mount, image_id: row.image_id, config_id: row.config_id });
-      } catch (e) { throw new Error(`${saved}，数据盘 ${mount} 未添加：${e.message}`); }
+      } catch (e) { throw new Error(`${saved}; data disk ${mount} could not be added: ${e.message}`); }
       setForm(cur => ({ ...cur, newDisks: cur.newDisks.filter(x => x.key !== row.key),
         disks: [...cur.disks, created && created.ID ? created : { ID: row.key, MountTarget: mount, ImageID: row.image_id, ConfigID: row.config_id }] }));
     }
@@ -176,53 +176,53 @@ function PageGroups() {
   const onDelete = async (g) => {
     const n = termsOf(g.ID).length;
     const message = n > 0
-      ? `分组 ${g.Name} 下还有 ${n} 台终端，删除会失败。\n请先把终端移动到其他分组或删除。`
-      : `删除分组 ${g.Name}？`;
-    const ok = await conf.ask({ title: "删除分组", message, danger: true });
+      ? `Group ${g.Name} still has ${n} clients. Move or delete them before deleting the group.`
+      : `Delete group ${g.Name}?`;
+    const ok = await conf.ask({ title: "Delete Group", message, danger: true });
     if (!ok) return;
-    await run(() => api.deleteGroup(g.ID), "分组已删除", { reload: load, errMsg: "删除失败" });
+    await run(() => api.deleteGroup(g.ID), "Group deleted", { reload: load, errMsg: "Delete failed" });
   };
-  const onSetDefault = (g) => run(() => api.setDefaultGroup(g.ID), `${g.Name} 已设为默认分组`, { reload: load });
+  const onSetDefault = (g) => run(() => api.setDefaultGroup(g.ID), `${g.Name} set as default group`, { reload: load });
   const netStatusOf = (g) => (network?.groups || []).find(x => x.id === g.ID)?.status || classifyGroupNetwork({ start_ip: g.StartIP, client_max: g.ClientMax }, network);
-  // openFix 算出分组要挪到的区间及对组内机器的影响，写入前先展示。
+  // openFix previews a safe range and client IP changes before writing.
   const openFix = async (g) => {
     try {
       const view = await api.getNetwork(g.ClientMax || 30);
-      if (!view?.suggest) { store.toast("服务器网段里放不下这么多台，先缩小该组的客户机数", "err"); return; }
+      if (!view?.suggest) { store.toast("Not enough addresses in the server subnet. Reduce the group client count.", "err"); return; }
       const target = { start_ip: view.suggest.start_ip, client_max: g.ClientMax, netmask: view.suggest.netmask, gateway: view.suggest.gateway || "" };
       const preview = await api.previewGroupNetwork(g.ID, target);
       setFix({ group: g, target, preview });
       setModal("fixnet");
-    } catch (e) { store.toast(e.message || "无法预览", "err"); }
+    } catch (e) { store.toast(e.message || "Cannot preview changes", "err"); }
   };
   const applyFix = async () => {
     const g = fix.group, t = fix.target;
-    // 表单来的改动带完整 body（名称、镜像可能一起改了）；「改到服务器网段」只改网络部分，其余照旧。
+    // Keep other form fields intact; Move to Server Subnet changes only network settings.
     const body = fix.body || { name: g.Name, is_default: !!g.IsDefault, start_ip: t.start_ip, client_max: t.client_max, gateway: t.gateway, netmask: t.netmask, dns1: g.DNS1 || "", dns2: g.DNS2 || "", system_image_id: g.SystemImageID, system_config_id: g.SystemConfigID };
     const commit = fix.body ? () => saveEdit(g.ID, body, form) : () => api.updateGroup(g.ID, body);
-    if (await run(commit, `${g.Name} 已改到 ${rangeText(t.start_ip, t.client_max)}`, { reload: () => { load(); reloadNetwork(); }, errMsg: "修改失败" })) { setModal(null); setFix(null); }
+    if (await run(commit, `${g.Name} moved to ${rangeText(t.start_ip, t.client_max)}`, { reload: () => { load(); reloadNetwork(); }, errMsg: "Update failed" })) { setModal(null); setFix(null); }
   };
 
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div className="card" style={{ padding: 14, display: "flex", alignItems: "center", gap: 12 }}>
-        <SearchBox value={search} onChange={setSearch} placeholder="搜索分组名称 / IP 段" width={280}/>
-        <span className="chip">{groups.length} 分组</span>
-        <span className="chip emerald">{groups.reduce((s, g) => s + onlineOf(g.ID), 0)} 在线</span>
-        <span className="chip">{groups.reduce((s, g) => s + (g.ClientMax || 0), 0)} 终端容量</span>
+        <SearchBox value={search} onChange={setSearch} placeholder="Search group name / IP range" width={280}/>
+        <span className="chip">{groups.length} groups</span>
+        <span className="chip emerald">{groups.reduce((s, g) => s + onlineOf(g.ID), 0)} Online</span>
+        <span className="chip">{groups.reduce((s, g) => s + (g.ClientMax || 0), 0)} Client capacity</span>
         <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
-          <button className="btn ghost icon" onClick={() => load()} title="立即刷新" aria-label="立即刷新"><Icons.Refresh size={13}/></button>
-          <button className="btn primary" onClick={openAdd}><Icons.Plus size={12}/> 新建分组</button>
+          <button className="btn ghost icon" onClick={() => load()} title="Refresh now" aria-label="Refresh now"><Icons.Refresh size={13}/></button>
+          <button className="btn primary" onClick={openAdd}><Icons.Plus size={12}/> New Group</button>
         </div>
       </div>
 
       {!filtered.length && (
         <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--fg-faint)", fontSize: 13 }}>
-          {loading ? "加载中…" : error ? `加载失败：${error}` : "暂无分组"}
+          {loading ? "Loading…" : error ? `Load failed: ${error}` : "No groups"}
         </div>
       )}
 
-      {/* 用 auto-fill 不用 auto-fit：auto-fit 会折叠空轨道，只有一个分组时卡片会撑满整行。 */}
+      {/* Use auto-fill instead of auto-fit so a single group does not fill the entire row. */}
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(430px, 1fr))", gap: 14 }}>
         {filtered.map(g => {
           const online = onlineOf(g.ID), registered = termsOf(g.ID).length, cap = g.ClientMax || 0;
@@ -238,34 +238,34 @@ function PageGroups() {
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                     <span style={{ fontSize: 14, fontWeight: 600 }}>{g.Name}</span>
-                    {g.IsDefault && <span className="chip cyan">默认</span>}
-                    {/* 不显示分组 ID：机器生成，操作者用不上，名称已能区分。 */}
+                    {g.IsDefault && <span className="chip cyan">Default</span>}
+                    {/* Hide generated group IDs; names provide sufficient identification. */}
                   </div>
-                  {/* 单行显示，过长截断不换行，避免在词中间折行。 */}
+                  {/* Keep labels on one line and truncate overly long values. */}
                   <div className="mono meta" style={{ marginTop: 3, whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", display: "flex", alignItems: "center", gap: 6 }}>
                     <span>{g.StartIP} → {ipRangeEnd(g.StartIP, g.ClientMax)}</span>
-                    {(() => { const st = NET_STATUS[netStatusOf(g)]; return st?.text ? <span className={`chip ${st.chip}`} title={st.chip === "rose" ? "不在服务器客户机网卡的网段内，这组机器拿不到地址" : ""}>{st.text}</span> : null; })()}
+                    {(() => { const st = NET_STATUS[netStatusOf(g)]; return st?.text ? <span className={`chip ${st.chip}`} title={st.chip === "rose" ? "Outside the server client interface subnet; these clients cannot obtain an address" : ""}>{st.text}</span> : null; })()}
                   </div>
                 </div>
-                {/* 三个数各自带标签，竖向对齐，免得「0 / 40 / 40」里分不清哪个是哪个。 */}
+                {/* Label each count separately for clarity. */}
                 <div style={{ display: "flex", alignItems: "flex-start", flexShrink: 0 }}>
-                  <GroupStat value={online} label="在线" color={online ? "var(--emerald)" : "var(--cyan)"}/>
+                  <GroupStat value={online} label="Online" color={online ? "var(--emerald)" : "var(--cyan)"}/>
                   <StatSep/>
-                  <GroupStat value={registered} label="已分配" color="var(--fg)"/>
+                  <GroupStat value={registered} label="Assigned" color="var(--fg)"/>
                   <StatSep/>
-                  <GroupStat value={cap} label="容量" color={full ? "var(--amber)" : "var(--fg-mute)"}
-                    title={full ? "已分配数已达容量，组内已满，新机器无法加入；可在「编辑」里调大最大客户机数" : "这个分组最多可分配的终端数"}/>
+                  <GroupStat value={cap} label="Capacity" color={full ? "var(--amber)" : "var(--fg-mute)"}
+                    title={full ? "This group is full. Increase Maximum Clients under Edit to add more." : "Maximum number of clients assignable to this group"}/>
                 </div>
               </div>
 
-              {/* 卡片只放日常要看的：系统盘和数据盘；网关、掩码、DNS 在编辑弹窗里。 */}
+              {/* Show system and data disks on cards; gateway, mask and DNS belong in the edit dialog. */}
               <div style={{ padding: "12px 16px", display: "grid", gridTemplateColumns: "max-content 1fr", gap: "8px 14px", alignItems: "center", fontSize: 13 }}>
-                <span className="meta">系统盘</span>
+                <span className="meta">System Disk</span>
                 <span style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                   {img?.Name || "—"}<span className="meta"> / </span>{nameOf(g.SystemConfigID)}
                   {g.SystemReductionID && <span className="meta"> · {nameOf(g.SystemReductionID)}</span>}
                 </span>
-                <span className="meta">数据盘</span>
+                <span className="meta">Data Disks</span>
                 <span style={{ display: "flex", gap: 6, flexWrap: "wrap", minWidth: 0 }}>
                   {disksOf(g.ID).length
                     ? disksOf(g.ID).map(d => (
@@ -277,55 +277,55 @@ function PageGroups() {
               </div>
 
               <div style={{ padding: "10px 16px", borderTop: "1px solid var(--line-soft)", display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
-                <button className="btn" onClick={() => goto("terminals", { groupId: g.ID })}><Icons.Eye size={12}/> 查看终端</button>
-                {netStatusOf(g) === "blocked" && <button className="btn primary" onClick={() => openFix(g)}>改到服务器网段</button>}
-                {!g.IsDefault && <button className="btn" onClick={() => onSetDefault(g)}>设为默认</button>}
-                <button className="btn" onClick={() => openEdit(g)}><Icons.Cog size={12}/> 编辑</button>
-                <button className="btn ghost icon danger" onClick={() => onDelete(g)} title="删除分组" aria-label={`删除分组 ${g.Name}`}><Icons.Trash size={12}/></button>
+                <button className="btn" onClick={() => goto("terminals", { groupId: g.ID })}><Icons.Eye size={12}/> View Clients</button>
+                {netStatusOf(g) === "blocked" && <button className="btn primary" onClick={() => openFix(g)}>Move to Server Subnet</button>}
+                {!g.IsDefault && <button className="btn" onClick={() => onSetDefault(g)}>Set Default</button>}
+                <button className="btn" onClick={() => openEdit(g)}><Icons.Cog size={12}/> Edit</button>
+                <button className="btn ghost icon danger" onClick={() => onDelete(g)} title="Delete Group" aria-label={`Delete group ${g.Name}`}><Icons.Trash size={12}/></button>
               </div>
             </div>
           );
         })}
       </div>
 
-      {/* 新建 / 编辑 */}
+      {/* Create / Edit */}
       <Modal open={modal === "add" || modal === "edit"} onClose={() => !busy && setModal(null)} size="md"
-        title={modal === "add" ? "新建终端分组" : "编辑分组"}
-        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>取消</button><button className="btn primary" disabled={busy || netStatus === "blocked"} title={netStatus === "blocked" ? "网段不在服务器的客户机网段，先改到服务器网段或打开跨网段分组" : ""} onClick={save}>{busy ? "保存中…" : "保存"}</button></>}>
+        title={modal === "add" ? "Create Client Group" : "Edit Group"}
+        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy || netStatus === "blocked"} title={netStatus === "blocked" ? "The group subnet is outside the server client subnet. Move it or enable cross-subnet groups." : ""} onClick={save}>{busy ? "Saving…" : "Save"}</button></>}>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <Field label="分组名称" required><input className="input" aria-label="分组名称" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })}/></Field>
-          <Field label="设为默认分组"><Toggle checked={!!form.is_default} onChange={v => setForm({ ...form, is_default: v })} onLabel="是" offLabel="否"/></Field>
+          <Field label="Group Name" required><input className="input" aria-label="Group Name" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })}/></Field>
+          <Field label="Set as Default Group"><Toggle checked={!!form.is_default} onChange={v => setForm({ ...form, is_default: v })} onLabel="Yes" offLabel="No"/></Field>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <Field label="起始 IP" required><input className="input mono" aria-label="起始 IP" style={{ width: "100%" }} value={form.start_ip || ""} onChange={e => setForm({ ...form, start_ip: e.target.value })}/></Field>
-          <Field label="最大客户机数" required><input className="input mono" type="number" aria-label="最大客户机数" style={{ width: "100%" }} value={form.client_max || 0} onChange={e => setForm({ ...form, client_max: +e.target.value })}/></Field>
+          <Field label="Starting IP" required><input className="input mono" aria-label="Starting IP" style={{ width: "100%" }} value={form.start_ip || ""} onChange={e => setForm({ ...form, start_ip: e.target.value })}/></Field>
+          <Field label="Maximum Clients" required><input className="input mono" type="number" aria-label="Maximum Clients" style={{ width: "100%" }} value={form.client_max || 0} onChange={e => setForm({ ...form, client_max: +e.target.value })}/></Field>
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
-          <Field label={netStatus === "relay" ? "网关（中继地址）" : "网关"} required={netStatus === "relay"}
-            help={netStatus === "relay" ? "该网段在交换机上的三层接口地址，也就是做 DHCP 中继的那台" : "客户机上网用的路由器地址；服务器自己做路由时填服务器；没有路由器可留空"}>
-            <input className="input mono" aria-label={netStatus === "relay" ? "网关（中继地址）" : "网关"} style={{ width: "100%" }} value={form.gateway || ""} onChange={e => setForm({ ...form, gateway: e.target.value })}/>
+          <Field label={netStatus === "relay" ? "Gateway (Relay Address)" : "Gateway"} required={netStatus === "relay"}
+            help={netStatus === "relay" ? "Layer 3 interface address on the switch performing DHCP relay." : "Router address for client Internet access; use server if it routes traffic or leave blank if there is no router."}>
+            <input className="input mono" aria-label={netStatus === "relay" ? "Gateway (Relay Address)" : "Gateway"} style={{ width: "100%" }} value={form.gateway || ""} onChange={e => setForm({ ...form, gateway: e.target.value })}/>
           </Field>
-          <Field label="子网掩码" required><input className="input mono" aria-label="子网掩码" style={{ width: "100%" }} value={form.netmask || ""} onChange={e => setForm({ ...form, netmask: e.target.value })}/></Field>
+          <Field label="Subnet Mask" required><input className="input mono" aria-label="Subnet Mask" style={{ width: "100%" }} value={form.netmask || ""} onChange={e => setForm({ ...form, netmask: e.target.value })}/></Field>
         </div>
         <NetworkStatusLine status={netStatus} form={form} network={network} onFill={fillSuggested} toast={store.toast}/>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(200px, 1fr))", gap: 12 }}>
           <Field label="DNS1"><input className="input mono" aria-label="DNS1" style={{ width: "100%" }} value={form.dns1 || ""} onChange={e => setForm({ ...form, dns1: e.target.value })}/></Field>
           <Field label="DNS2"><input className="input mono" aria-label="DNS2" style={{ width: "100%" }} value={form.dns2 || ""} onChange={e => setForm({ ...form, dns2: e.target.value })}/></Field>
         </div>
-        <ImageBindingPicker images={images.filter(i => i.Purpose !== "data")} imageLabel="系统镜像"
-          configHelp="客户机开机使用该配置的应用还原点；超管机使用该配置的最新还原点。镜像 / 配置与网络的改动，对组内终端于下次开机生效；改了网段，组内终端的地址会自动换到新网段。"
+        <ImageBindingPicker images={images.filter(i => i.Purpose !== "data")} imageLabel="System Image"
+          configHelp="Regular clients boot the applied restore point; Super Admin clients use the latest restore point. Image, configuration and network changes apply at next boot. Moving subnets updates client addresses."
           imageId={form.system_image_id} configId={form.system_config_id}
           onChange={({ image_id, config_id }) => setForm({ ...form, system_image_id: image_id, system_config_id: config_id })}/>
         <DataDisksEditor images={images} systemImageId={form.system_image_id} form={form} setForm={setForm}
           imageName={(id) => imageById[id]?.Name || id} configName={nameOf} onCreateImage={() => goto("images")}/>
         {clusterNodes.length > 1 && (
-          <Field label="存储节点" help="该组客户机的磁盘由哪台服务器提供。默认自动均衡：开机时挑当前最闲的健康节点，机器会尽量回到上次那台（克隆还在、缓存是热的）。固定到某台适合让某个班独占一台机器。改动对组内终端于下次开机生效；节点故障时自动回退到主机。">
-            <select className="input" aria-label="存储节点" style={{ width: "100%" }} value={form.storage_server_id || ""}
+          <Field label="Storage Node" help="Select the storage node serving this group's disks. Automatic balancing chooses a healthy, lightly loaded node and prefers the previous host for cache locality. Pinning a node dedicates its resources. Changes apply at next boot; failures fall back to the active node.">
+            <select className="input" aria-label="Storage Node" style={{ width: "100%" }} value={form.storage_server_id || ""}
               onChange={e => setForm({ ...form, storage_server_id: e.target.value })}>
-              <option value="">自动均衡（推荐）</option>
+              <option value="">Automatic balancing (recommended)</option>
               {clusterNodes.map(n => (
                 <option key={n.id} value={n.id} disabled={!n.online}>
-                  固定到 {n.ip || n.name || n.id}{n.ha_state === "active" ? "（主机）" : ""}{n.online ? "" : "（离线）"}
+                  Pin to {n.ip || n.name || n.id}{n.ha_state === "active" ? " (active)" : ""}{n.online ? "" : " (offline)"}
                 </option>
               ))}
             </select>
@@ -333,31 +333,31 @@ function PageGroups() {
         )}
       </Modal>
 
-      {/* 把落在网段外的分组挪回客户机网段 */}
-      <Modal open={modal === "fixnet" && !!fix} onClose={() => !busy && setModal(null)} size="md" title={fix ? `${fix.group.Name} · 改到服务器网段` : ""}
-        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>取消</button><button className="btn primary" disabled={busy} onClick={applyFix}>{busy ? "修改中…" : "确认修改"}</button></>}>
+      {/* Move a group outside the subnet back into the client subnet. */}
+      <Modal open={modal === "fixnet" && !!fix} onClose={() => !busy && setModal(null)} size="md" title={fix ? `${fix.group.Name} · Move to Server Subnet` : ""}
+        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={applyFix}>{busy ? "Updating…" : "Confirm Change"}</button></>}>
         {fix && <>
           <div style={{ display: "grid", gridTemplateColumns: "max-content 1fr", gap: "4px 12px", fontSize: 14, marginBottom: 10 }}>
-            <span className="meta">现在</span><span className="mono">{rangeText(fix.group.StartIP, fix.group.ClientMax)} · 网关 {fix.group.Gateway || "无"}</span>
-            <span className="meta">改为</span><span className="mono">{rangeText(fix.target.start_ip, fix.target.client_max)} · 掩码 {fix.target.netmask} · 网关 {fix.target.gateway || "无"}</span>
+            <span className="meta">Current</span><span className="mono">{rangeText(fix.group.StartIP, fix.group.ClientMax)} · Gateway {fix.group.Gateway || "None"}</span>
+            <span className="meta">Change to</span><span className="mono">{rangeText(fix.target.start_ip, fix.target.client_max)} · Mask {fix.target.netmask} · Gateway {fix.target.gateway || "None"}</span>
           </div>
           {fix.preview.terminals.length
             ? <>
-                <div className="hint" style={{ marginBottom: 6 }}>组内 {fix.preview.terminals.length} 台终端的地址跟着换（保持相对位置），旧租约会释放。</div>
-                {/* 运行中的机器续租时才换地址，Windows 的 IP 一变 iSCSI 就断，所以要单独提示。 */}
+                <div className="hint" style={{ marginBottom: 6 }}>Group's {fix.preview.terminals.length} client addresses will change while retaining their relative positions; old leases are released.</div>
+                {/* Running clients change IPs upon lease renewal, potentially disconnecting Windows iSCSI. */}
                 {fix.preview.online_count > 0 && (
                   <div className="hint" style={{ marginBottom: 6, color: "var(--amber)" }}>
-                    其中 {fix.preview.online_count} 台正在运行。它们不会立刻换地址，而是在租约续期时换——那一刻会掉线并重启。
-                    建议等这些机器关机后再改。
+                    Among them, {fix.preview.online_count} running clients will change IPs at lease renewal, not immediately, potentially disconnecting and rebooting.
+                    Wait until these clients are shut down before making this change.
                   </div>
                 )}
                 <div style={{ overflowX: "auto" }}><table className="t">
-                  <thead><tr><th>终端</th><th>MAC</th><th>现在</th><th>改为</th><th>状态</th></tr></thead>
+                  <thead><tr><th>Client</th><th>MAC</th><th>Current</th><th>Change to</th><th>Status</th></tr></thead>
                   <tbody>{fix.preview.terminals.map(t => <tr key={t.id}><td>{t.name || t.id}</td><td className="mono">{t.mac}</td><td className="mono">{t.old_ip}</td><td className="mono">{t.new_ip}</td>
-                    <td>{t.online ? <span className="chip amber">运行中</span> : <span className="meta">关机</span>}</td></tr>)}</tbody>
+                    <td>{t.online ? <span className="chip amber">Running</span> : <span className="meta">Off</span>}</td></tr>)}</tbody>
                 </table></div>
               </>
-            : <div className="hint">组内没有需要换地址的终端。</div>}
+            : <div className="hint">No clients in this group need an IP address change.</div>}
         </>}
       </Modal>
 
@@ -366,7 +366,7 @@ function PageGroups() {
   );
 }
 
-// GroupStat 是卡片右上角的一个计数：数字在上，标签在下，居中对齐。
+// GroupStat displays a vertically stacked count and label.
 function GroupStat({ value, label, color, title }) {
   return (
     <div title={title} style={{ display: "flex", flexDirection: "column", alignItems: "center", minWidth: 36 }}>
@@ -377,8 +377,8 @@ function GroupStat({ value, label, color, title }) {
 }
 const StatSep = () => <span className="mono" style={{ fontSize: 16, lineHeight: 1.25, color: "var(--line)", padding: "0 6px" }}>/</span>;
 
-// useImageConfigs 维持「镜像 → 配置」级联：镜像为空或不在可选列表里时落到第一项，配置同理。
-// <select> 的值不匹配任何选项时仍显示第一项，下一级却按空值查成「无可用配置」，所以要把值落到实际显示的那项上。
+// useImageConfigs keeps image/configuration selectors in sync with available options.
+// A select visually defaults to the first option; synchronize state to prevent an invalid downstream selection.
 function useImageConfigs(images, imageId, configId, onChange) {
   const [configs, setConfigs] = useState([]);
   useEffect(() => {
@@ -399,10 +399,10 @@ function useImageConfigs(images, imageId, configId, onChange) {
   return configs;
 }
 
-const imageOptions = (images) => (images.length ? images.map(i => ({ value: i.ID, label: `${i.Name} · ${i.OSType}` })) : [{ value: "", label: "无可用镜像" }]);
-const configOptions = (configs) => (configs.length ? configs.map(c => ({ value: c.ID, label: c.Name })) : [{ value: "", label: "无可用配置" }]);
+const imageOptions = (images) => (images.length ? images.map(i => ({ value: i.ID, label: `${i.Name} · ${i.OSType}` })) : [{ value: "", label: "No images available" }]);
+const configOptions = (configs) => (configs.length ? configs.map(c => ({ value: c.ID, label: c.Name })) : [{ value: "", label: "No configurations available" }]);
 
-function ImageBindingPicker({ images, imageId, configId, onChange, imageLabel = "系统镜像", configLabel = "启动配置", configHelp }) {
+function ImageBindingPicker({ images, imageId, configId, onChange, imageLabel = "System Image", configLabel = "Boot Configuration", configHelp }) {
   const configs = useImageConfigs(images, imageId, configId, onChange);
   return (
     <>
@@ -416,20 +416,20 @@ function ImageBindingPicker({ images, imageId, configId, onChange, imageLabel = 
   );
 }
 
-// 新加的数据盘必须填全，挂载目标不能和本组其它盘重复。
+// New data disks require complete fields and distinct mount targets.
 function checkNewDisks(form) {
   const taken = new Set((form.disks || []).map(d => d.MountTarget.toUpperCase()));
   for (const row of form.newDisks || []) {
     const mount = row.mount_target.trim();
-    if (!mount) return "请填写数据盘的挂载目标";
-    if (!row.image_id || !row.config_id) return `请为数据盘 ${mount} 选择镜像和配置`;
-    if (taken.has(mount.toUpperCase())) return `挂载目标 ${mount} 重复`;
+    if (!mount) return "Enter the data disk mount target";
+    if (!row.image_id || !row.config_id) return `Choose an image and configuration for data disk ${mount}`;
+    if (taken.has(mount.toUpperCase())) return `Mount target ${mount} is duplicated`;
     taken.add(mount.toUpperCase());
   }
   return "";
 }
 
-// nextDriveLetter 取 D: 起第一个没被本组占用的盘符；都占满时留空让操作者填。
+// nextDriveLetter chooses the first unused drive letter starting at D:.
 function nextDriveLetter(form) {
   const used = new Set([...(form.disks || []).map(d => d.MountTarget), ...(form.newDisks || []).map(r => r.mount_target)].map(m => m.trim().toUpperCase()));
   for (let c = 68; c <= 90; c++) {
@@ -441,8 +441,8 @@ function nextDriveLetter(form) {
 
 let diskKeySeq = 0;
 
-// 分组的数据盘（开机随系统盘一起挂载的镜像 + 配置），在新建 / 编辑弹窗里和分组一起保存。
-// 已有的盘只读：后端没有修改接口，要换就移除后重新添加。
+// Group data disks are mounted with the system disk and saved in the group creation/edit dialog.
+// Existing disks cannot be edited by the API; remove and readd to change them.
 function DataDisksEditor({ images, systemImageId, form, setForm, imageName, configName, onCreateImage }) {
   const [showHelp, setShowHelp] = useState(false);
   const sysOS = images.find(i => i.ID === systemImageId)?.OSType;
@@ -458,39 +458,39 @@ function DataDisksEditor({ images, systemImageId, form, setForm, imageName, conf
     <div style={{ marginTop: 4 }}>
       <div className="row" style={{ justifyContent: "space-between", marginBottom: 8 }}>
         <div className="card-title">
-          <Icons.Disk size={12}/> 数据盘
-          <button type="button" className="field-help" aria-label="数据盘说明" aria-expanded={showHelp} onClick={() => setShowHelp(v => !v)}>?</button>
+          <Icons.Disk size={12}/> Data Disks
+          <button type="button" className="field-help" aria-label="Data Disk Help" aria-expanded={showHelp} onClick={() => setShowHelp(v => !v)}>?</button>
         </div>
-        <button className="btn ghost" style={{ padding: "3px 8px" }} disabled={!dataImages.length} onClick={add}><Icons.Plus size={11}/> 添加数据盘</button>
+        <button className="btn ghost" style={{ padding: "3px 8px" }} disabled={!dataImages.length} onClick={add}><Icons.Plus size={11}/> Add Data Disk</button>
       </div>
       {showHelp && (
         <div className="hint" style={{ marginBottom: 8 }}>
-          随系统盘一起挂载的附加盘（如游戏盘），仅可选择与系统镜像同系统的数据盘镜像。已添加的数据盘不可修改，如需调整请移除后重新添加；改动对组内终端于下次开机生效。
+          Additional disks mounted alongside the system disk (such as game disks). Select compatible data-disk images for the same OS. Existing disks must be removed and readded to change them. Changes apply at next boot.
         </div>
       )}
       <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 6, overflow: "hidden" }}>
         <table className="t" style={{ margin: 0 }}>
-          <thead><tr><th style={{ width: 96 }}>挂载目标</th><th>镜像</th><th>配置</th><th className="t-actions"></th></tr></thead>
+          <thead><tr><th style={{ width: 96 }}>Mount Target</th><th>Image</th><th>Configuration</th><th className="t-actions"></th></tr></thead>
           <tbody>
             {existing.map(d => (
               <tr key={d.ID}>
                 <td className="mono" style={{ fontWeight: 600 }}>{d.MountTarget}</td>
                 <td className="muted">{imageName(d.ImageID)}</td>
                 <td className="muted">{configName(d.ConfigID)}</td>
-                <td className="t-actions"><div><button className="btn ghost icon danger" onClick={() => removeExisting(d)} title="移除数据盘" aria-label={`移除数据盘 ${d.MountTarget}`}><Icons.Trash size={12}/></button></div></td>
+                <td className="t-actions"><div><button className="btn ghost icon danger" onClick={() => removeExisting(d)} title="Remove Data Disk" aria-label={`Remove Data Disk ${d.MountTarget}`}><Icons.Trash size={12}/></button></div></td>
               </tr>
             ))}
             {added.map((row, i) => (
               <NewDiskRow key={row.key} index={i + 1} row={row} images={dataImages} linux={sysOS === "linux"}
                 onChange={(patch) => updateRow(row.key, patch)} onRemove={() => removeRow(row.key)}/>
             ))}
-            <TableState colSpan={4} empty={!existing.length && !added.length} hint="未设置数据盘"/>
+            <TableState colSpan={4} empty={!existing.length && !added.length} hint="No data disks configured"/>
           </tbody>
         </table>
       </div>
       {!dataImages.length && (
         <div className="hint" style={{ marginTop: 6 }}>
-          暂无{sysOS === "linux" ? " Linux" : " Windows"} 数据盘镜像，<span style={{ color: "var(--cyan)", cursor: "pointer" }} onClick={onCreateImage}>前往镜像页新建</span>。
+          No {sysOS === "linux" ? "Linux" : "Windows"} data-disk images. <span style={{ color: "var(--cyan)", cursor: "pointer" }} onClick={onCreateImage}>Create one in Image Management</span>.
         </div>
       )}
     </div>
@@ -500,19 +500,19 @@ function DataDisksEditor({ images, systemImageId, form, setForm, imageName, conf
 function NewDiskRow({ index, row, images, linux, onChange, onRemove }) {
   const pick = React.useCallback(({ image_id, config_id }) => onChange({ image_id, config_id }), [onChange]);
   const configs = useImageConfigs(images, row.image_id, row.config_id, pick);
-  const label = `新数据盘 ${index}`;
+  const label = `New Data Disk ${index}`;
   return (
     <tr>
-      <td><input className="input mono" style={{ width: "100%" }} aria-label={`${label} 的挂载目标`} placeholder={linux ? "/data" : "D:"}
+      <td><input className="input mono" style={{ width: "100%" }} aria-label={`${label} Mount Target`} placeholder={linux ? "/data" : "D:"}
         value={row.mount_target} onChange={e => onChange({ mount_target: e.target.value })}/></td>
-      <td><Select aria-label={`${label} 的镜像`} value={row.image_id || ""} onChange={v => onChange({ image_id: v, config_id: "" })} options={imageOptions(images)}/></td>
-      <td><Select aria-label={`${label} 的配置`} value={row.config_id || ""} onChange={v => onChange({ config_id: v })} options={configOptions(configs)}/></td>
-      <td className="t-actions"><div><button className="btn ghost icon danger" onClick={onRemove} title="移除" aria-label={`移除${label}`}><Icons.Trash size={12}/></button></div></td>
+      <td><Select aria-label={`${label} Image`} value={row.image_id || ""} onChange={v => onChange({ image_id: v, config_id: "" })} options={imageOptions(images)}/></td>
+      <td><Select aria-label={`${label} Configuration`} value={row.config_id || ""} onChange={v => onChange({ config_id: v })} options={configOptions(configs)}/></td>
+      <td className="t-actions"><div><button className="btn ghost icon danger" onClick={onRemove} title="Remove" aria-label={`Remove ${label}`}><Icons.Trash size={12}/></button></div></td>
     </tr>
   );
 }
 
-// NetworkStatusLine 在输入时就给出与服务端保存时相同的网络判定。
+// NetworkStatusLine previews the same network classification used during server-side save.
 function NetworkStatusLine({ status, form, network, onFill, toast }) {
   const [probe, setProbe] = useState(null); // { ip, reachable, rtt_ms } | { ip, error }
   const [showSnippet, setShowSnippet] = useState(false);
@@ -528,33 +528,33 @@ function NetworkStatusLine({ status, form, network, onFill, toast }) {
     </div>
   );
   if (status === "same") {
-    // 正常只给一行短提示，有问题才给处理说明。
-    return box("var(--emerald)", "var(--emerald-soft)", <><b>同网段</b> · 客户机开机可直接拿到地址</>);
+    // Keep normal status concise; show detailed guidance for problems.
+    return box("var(--emerald)", "var(--emerald-soft)", <><b>Same Subnet</b> · Clients can obtain addresses on boot.</>);
   }
   if (status === "blocked") {
     const sug = network.suggest;
     return box("var(--rose)", "var(--rose-soft)", <>
-      <b>不在服务器的客户机网段</b> · 服务器客户机网卡是 {iface}（{nets}），{range} 的客户机拿不到地址、开不了机。<br/>
-      改成服务器网段{sug ? <>（<button type="button" className="btn" style={{ padding: "1px 8px", marginLeft: 2 }} onClick={onFill}>填入 {rangeText(sug.start_ip, Number(form.client_max) || sug.client_max)}</button>）</> : ""}，
-      或者客户机确实在别的 VLAN → 到系统参数打开「跨网段分组」。
+      <b>Outside the server client subnet</b> · Server client interface: {iface} ({nets}), {range} clients cannot get addresses or boot.<br/>
+      Move to server subnet{sug ? <> (<button type="button" className="btn" style={{ padding: "1px 8px", marginLeft: 2 }} onClick={onFill}>Use {rangeText(sug.start_ip, Number(form.client_max) || sug.client_max)}</button>)</> : ""}, 
+      Alternatively, for another VLAN, enable Cross-subnet Groups in System Settings.
     </>);
   }
   const doProbe = async () => {
     const ip = (form.gateway || "").trim();
-    if (!ip) { toast("先填网关（中继地址）", "err"); return; }
-    try { setProbe(await api.probeNetwork(ip)); } catch (e) { setProbe({ ip, error: e.message || "检测失败" }); }
+    if (!ip) { toast("Enter the gateway (relay address) first", "err"); return; }
+    try { setProbe(await api.probeNetwork(ip)); } catch (e) { setProbe({ ip, error: e.message || "Test failed" }); }
   };
   return box("var(--amber)", "var(--amber-soft)", <>
-    <b>跨网段 · DHCP 中继</b> · 客户机在 {range} 所在网段，请求经交换机中继到服务器 {network.boot_host || nets}。网关必须填该网段在交换机上的三层接口（做中继的那台）。
+    <b>Cross-subnet · DHCP Relay</b> · Clients in {range} subnet have requests relayed to server {network.boot_host || nets}. Set gateway to the relay switch's Layer 3 interface for this subnet.
     <span style={{ display: "inline-flex", gap: 8, marginLeft: 6 }}>
-      <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={doProbe}>检测</button>
-      <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={() => setShowSnippet(v => !v)}>{showSnippet ? "收起" : "查看交换机配置"}</button>
+      <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={doProbe}>Test</button>
+      <button type="button" className="btn" style={{ padding: "1px 8px" }} onClick={() => setShowSnippet(v => !v)}>{showSnippet ? "Collapse" : "View Switch Configuration"}</button>
     </span>
     {probe && (probe.error
-      ? <div>检测失败：{probe.error}</div>
+      ? <div>Probe failed: {probe.error}</div>
       : probe.reachable
-        ? <div>从服务器 ping {probe.ip}：通{probe.rtt_ms ? `（${probe.rtt_ms} ms）` : ""} ✓</div>
-        : <div>从服务器 ping 不通 {probe.ip}。客户机可能拿不到地址：请网管检查该 VLAN 三层接口上的 DHCP 中继（helper-address {network.boot_host}）和到服务器的路由（交换机禁 ping 时可忽略）。</div>)}
+        ? <div>Ping from server to {probe.ip}: Reachable{probe.rtt_ms ? ` (${probe.rtt_ms} ms)` : ""} ✓</div>
+        : <div>Cannot ping {probe.ip}.Clients may not get addresses. Check DHCP relay (helper-address {network.boot_host}) and routing to the server. Ignore ping failures if the switch blocks ICMP.</div>)}
     {showSnippet && <pre className="mono" style={{ marginTop: 6, whiteSpace: "pre-wrap", fontSize: 12, color: "var(--fg)" }}>{relaySnippet(network.boot_host || nets)}</pre>}
   </>);
 }
