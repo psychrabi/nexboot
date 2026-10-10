@@ -209,7 +209,7 @@ function PageTerminals() {
   const applyBulkGroup = async () => {
     if (!form.group_id) { store.toast("Select a target group", "err"); return; }
     if (await run(() => api.moveTerminals({ terminal_ids: selectedIds, group_id: form.group_id }),
-      `Moved ${selectedIds.length}  clients`, { reload: load, errMsg: "Move failed" })) {
+      `Moved ${selectedIds.length} clients`, { reload: load, errMsg: "Move failed" })) {
       setModal(null); clearSel();
     }
   };
