@@ -3,8 +3,8 @@ import { render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { LoginPage } from './login.jsx';
 
-// 直接赋值的 globalThis.fetch 不归 restoreAllMocks 管，必须自己还原，否则会漏进
-// 同批次其它测试文件，让它们超时。
+// Directly assigning globalThis.fetch is not covered by restoreAllMocks; restore it manually
+// to prevent leaking into neighboring test files and causing timeouts.
 let realFetch;
 beforeEach(() => { realFetch = globalThis.fetch; });
 afterEach(() => {
@@ -12,10 +12,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-// 登录页脚只能写登录前确知的两件事：运维输入的地址和服务是否健康（/healthz 公开），
-// 不得出现编造的节点名或「单节点」。
+// Before login, the footer may show only the entered server address and public /healthz status.
+// Never invent the node name or claim a single-node deployment.
 describe('Login page footer', () => {
-  it('显示运维实际连接的地址，而不是编出来的主机名', async () => {
+  it('Shows the actual connection address instead of an invented hostname', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
     await waitFor(() => expect(screen.getByText(new RegExp(window.location.host))).toBeTruthy());
@@ -23,14 +23,14 @@ describe('Login page footer', () => {
     expect(screen.queryByText(/10\.0\.0\.10/)).toBeNull();
   });
 
-  it('不谎称单节点——集群规模要登录后才知道', async () => {
+  it('Does not imply a single-node deployment before login', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
     await waitFor(() => expect(screen.getByText(new RegExp(window.location.host))).toBeTruthy());
-    expect(screen.queryByText(/单节点/)).toBeNull();
+    expect(screen.queryByText(/single node/)).toBeNull();
   });
 
-  it('服务不健康时如实说，不硬画一个绿点', async () => {
+  it('Reports unhealthy services rather than showing a green status', async () => {
     globalThis.fetch = vi.fn(async () => { throw new Error('connection refused'); });
     render(<LoginPage onLogin={() => {}}/>);
     await waitFor(() => expect(screen.getByText(/Cannot reach service|Service unavailable/)).toBeTruthy());
@@ -38,8 +38,8 @@ describe('Login page footer', () => {
 });
 
 describe('Login page security messaging', () => {
-  // 服务端只有 ListenAndServe，登录框不得出现写死的加密承诺。
-  it('明文 HTTP 打开时不承诺加密，而是提示这是内网专用', async () => {
+  // The server uses ListenAndServe; the login form must not promise encryption unconditionally.
+  it('Warns about unencrypted HTTP and private-LAN usage', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
     expect(screen.queryByText(/TLS/)).toBeNull();
@@ -47,10 +47,10 @@ describe('Login page security messaging', () => {
     expect(screen.getByText(/UNENCRYPTED\s*HTTP/)).toBeTruthy();
   });
 
-  it('不放不通的入口：没有忘记密码死链，没有不进请求的记住设备', async () => {
+  it('Does not display nonfunctional password reset or remember-device links', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
-    expect(screen.queryByText(/忘记密码/)).toBeNull();
-    expect(screen.queryByText(/记住设备/)).toBeNull();
+    expect(screen.queryByText(/Forgot password/)).toBeNull();
+    expect(screen.queryByText(/Remember device/)).toBeNull();
   });
 });
