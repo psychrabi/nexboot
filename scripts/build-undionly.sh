@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# 重编 internal/boot/tftpassets/files/undionly.kpxe：Ubuntu 22.04 的 iPXE 源码与配置，
-# 不内嵌脚本（内嵌脚本会无视 DHCP 下发的启动地址）。与 snponly.efi 同一版本。
+# Rebuild internal/boot/tftpassets/files/undionly.kpxe using Ubuntu 22.04 iPXE source and configuration.
+# Do not embed a script because that would ignore the boot address supplied through DHCP. Match the snponly.efi version.
 set -euo pipefail
 out="$(cd "$(dirname "$0")/.." && pwd)/internal/boot/tftpassets/files/undionly.kpxe"
 docker run --rm --platform linux/arm64 ubuntu:22.04 bash -c '
