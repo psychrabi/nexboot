@@ -209,7 +209,7 @@ function PageTerminals() {
   const applyBulkGroup = async () => {
     if (!form.group_id) { store.toast("Select a target group", "err"); return; }
     if (await run(() => api.moveTerminals({ terminal_ids: selectedIds, group_id: form.group_id }),
-      `已移动 ${selectedIds.length}  clients`, { reload: load, errMsg: "Move failed" })) {
+      `Moved ${selectedIds.length}  clients`, { reload: load, errMsg: "Move failed" })) {
       setModal(null); clearSel();
     }
   };
@@ -227,7 +227,7 @@ function PageTerminals() {
   const doPublish = async () => {
     if (!form.publish_name?.trim()) { store.toast("Enter a restore-point name", "err"); return; }
     if (await run(() => api.publishDataDisk(form.id, { disk_id: form.disk_id, name: form.publish_name.trim() }),
-      "Publish task submitted; takes effect on the next client boot.", { reload: load, errMsg: "发布失败" })) setModal(null);
+      "Publish task submitted; takes effect on the next client boot.", { reload: load, errMsg: "Publish failed" })) setModal(null);
   };
   const openStopSuper = (t) => {
     // Save the system disk by default; explicitly select named group data disks.
@@ -294,7 +294,7 @@ function PageTerminals() {
       {selectedIds.length > 0 && (
         <div className="card" style={{ padding: 10, marginBottom: 14, display: "flex", alignItems: "center", gap: 10, background: "var(--cyan-soft)", borderColor: "oklch(0.55 0.1 200 / 0.4)" }}>
           <span className="chip cyan">Selected {selectedIds.length}</span>
-          <button className="btn" onClick={() => { setForm({ group_id: groups[0]?.ID || "" }); setModal("bulk-group"); }}>切换Group</button>
+          <button className="btn" onClick={() => { setForm({ group_id: groups[0]?.ID || "" }); setModal("bulk-group"); }}>Change Group</button>
           <button className="btn danger" onClick={bulkDelete}><Icons.Trash size={12}/> Delete</button>
           <button className="btn ghost" onClick={clearSel} style={{ marginLeft: "auto" }}>Clear Selection</button>
         </div>
@@ -309,7 +309,7 @@ function PageTerminals() {
           </select>
           <SearchBox value={search} onChange={setSearch} placeholder="Search name / MAC / IP" width={260}/>
           {/* Show filtered count only when filters are active. */}
-          {filterActive && <span className="chip cyan">筛出 {filtered.length} / {terminals.length}</span>}
+          {filterActive && <span className="chip cyan">Filtered {filtered.length} / {terminals.length}</span>}
           <div style={{ marginLeft: "auto" }} className="seg">
             <button className={view === "grid" ? "on" : ""} onClick={() => setView("grid")}>Grid</button>
             <button className={view === "table" ? "on" : ""} onClick={() => setView("table")}>List</button>
@@ -377,7 +377,7 @@ function PageTerminals() {
           <table className="t">
             <thead><tr>
               <th style={{ width: 36 }}><input type="checkbox" checked={visible.length > 0 && visible.every(t => selectedIds.includes(t.ID))} onChange={e => e.target.checked ? selectAll() : clearSel()}/></th>
-              <th>终端</th><th>MAC</th><th>IP</th><th>Group</th><th>System Image</th>{clustered && <th>Node</th>}<th>Status</th><th>Last Heartbeat</th><th className="t-actions"></th>
+              <th>Client</th><th>MAC</th><th>IP</th><th>Group</th><th>System Image</th>{clustered && <th>Node</th>}<th>Status</th><th>Last Heartbeat</th><th className="t-actions"></th>
             </tr></thead>
             <tbody>
               {visible.map(t => {
@@ -436,7 +436,7 @@ function PageTerminals() {
       </Modal>
 
       {/* Bulk group reassignment */}
-      <Modal open={modal === "bulk-group"} onClose={() => !busy && setModal(null)} title={`移动 ${selectedIds.length}  clients到Group`}
+      <Modal open={modal === "bulk-group"} onClose={() => !busy && setModal(null)} title={`Move ${selectedIds.length} clients to Group`}
         footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={applyBulkGroup}>{busy ? "Moving…" : "Apply"}</button></>}>
         <Field label="Target Group" required hint="Network and image changes for the new group apply at next boot">
           <Select value={form.group_id || ""} onChange={v => setForm({ ...form, group_id: v })} options={groups.map(g => ({ value: g.ID, label: g.Name }))}/>
@@ -445,7 +445,7 @@ function PageTerminals() {
 
       {/* Publish data disk online */}
       <Modal open={modal === "publish"} onClose={() => !busy && setModal(null)} title={`Publish Data Disk ${form.mount || ""}`}
-        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={doPublish}>{busy ? "Publishing…" : "发布"}</button></>}>
+        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={doPublish}>{busy ? "Publishing…" : "Publish"}</button></>}>
         <div className="hint" style={{ marginBottom: 10 }}>
           The disk will briefly go offline while publishing; shutdown is not required. Running clients use changes at next boot.
         </div>
@@ -524,7 +524,7 @@ function TerminalEdit({ t, groups, busy, onClose, onSave }) {
   const ipOutOfPool = !!form.ip?.trim() && formGroup && !ipInGroupPool(form.ip, formGroup);
   const ipHint = ipOutOfPool ? (
     <span style={{ color: "var(--amber)" }}>
-      不在「{formGroup.Name}」网段 {formGroup.StartIP} → {ipRangeEnd(formGroup.StartIP, formGroup.ClientMax)}; save will be rejected
+      Outside group {formGroup.Name} subnet {formGroup.StartIP} → {ipRangeEnd(formGroup.StartIP, formGroup.ClientMax)}; save will be rejected
     </span>
   ) : form.group_id !== t.GroupID
     ? "Leave blank for automatic allocation in the new group subnet; manually entered IP must belong to that subnet."
@@ -604,7 +604,7 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
           {t.IsSuper && t.PendingBundleID && (
             <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--fg-mute)" }}>
               <span className="chip amber"><Icons.Clock size={11}/> Driver finalization session in progress</span>
-              <span>已注入「{bundleNameById[t.PendingBundleID] || t.PendingBundleID}」; not yet committed</span>
+              <span>Injected {bundleNameById[t.PendingBundleID] || t.PendingBundleID}; not yet committed</span>
               <span className="row" style={{ color: "var(--cyan)", cursor: "pointer", gap: 2 }} onClick={gotoDrivers}>Manage in Driver Center<Icons.Chevron size={11}/></span>
             </div>
           )}
@@ -619,8 +619,8 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
             <DetailSection title="Group Network" icon={<Icons.Network size={12}/>}>
               <DetailKV k="Group" v={group?.Name || "—"}/>
               <DetailKV k="IP Range" v={group ? `${group.StartIP} → ${ipRangeEnd(group.StartIP, group.ClientMax)}` : "—"}/>
-              <DetailKV k="网关" v={group?.Gateway || "—"}/>
-              <DetailKV k="子网掩码" v={group?.Netmask || "—"}/>
+              <DetailKV k="Gateway" v={group?.Gateway || "—"}/>
+              <DetailKV k="Subnet Mask" v={group?.Netmask || "—"}/>
               <DetailKV k="DNS" v={group ? [group.DNS1, group.DNS2].filter(Boolean).join(" / ") || "—" : "—"}/>
             </DetailSection>
           </div>
@@ -633,7 +633,7 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
             {t.IsSuper && <div className="hint" style={{ marginBottom: 8 }}>Data disks can be published without shutdown; the disk briefly goes offline and takes effect at the next boot.</div>}
             <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 6, overflow: "hidden" }}>
               <table className="t" style={{ margin: 0 }}>
-                <thead><tr><th>Mount Target</th>{t.IsSuper ? <><th>Purpose</th><th>Current Published Point</th><th>Unpublished Changes</th><th/></> : <><th>镜像</th><th>配置</th></>}</tr></thead>
+                <thead><tr><th>Mount Target</th>{t.IsSuper ? <><th>Purpose</th><th>Current Published Point</th><th>Unpublished Changes</th><th/></> : <><th>Image</th><th>Configuration</th></>}</tr></thead>
                 <tbody>
                   {t.IsSuper ? superDisks.map(d => {
                     // Explain why publishing is unavailable.
