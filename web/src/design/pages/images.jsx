@@ -1,5 +1,5 @@
-// 三级模型：镜像 → 配置 → 还原点。镜像靠导入（或新建空数据盘）得到；后端没有发布、回滚、
-// 设默认的接口，页面也不提供这些操作。
+// Three-level model: Image → Configuration → Restore Point. Images are imported or created as blank data disks.
+// The backend has no publish, rollback, or set-default endpoint; do not expose those actions.
 import React from 'react';
 import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
@@ -11,7 +11,7 @@ import { fmtDateTime, redName } from '../../lib/format.js';
 import { useResource, useMutation, usePolling } from '../../lib/hooks.js';
 const { useState, useEffect, useRef } = React;
 
-// 尽力列出引用该对象的分组，删除确认时直接点名；查询失败返回空列表，最终以后端判定为准。
+// List referring groups in deletion confirmations when possible; the backend makes the final decision.
 async function groupsReferencing(pick) {
   try {
     const r = await api.listGroups();
@@ -20,7 +20,7 @@ async function groupsReferencing(pick) {
     return [];
   }
 }
-const namesClause = (names) => names.slice(0, 5).join("、") + (names.length > 5 ? ` 等 ${names.length} 个` : "");
+const namesClause = (names) => names.slice(0, 5).join(", ") + (names.length > 5 ? ` and ${names.length} items` : "");
 
 const GiB = 1024 ** 3;
 const fmtGiB = (b) => `${(Number(b || 0) / GiB).toFixed(1)} GiB`;
@@ -38,11 +38,11 @@ const normalizeImageName = (v) => {
   }
   return out.replace(/^[-_]+|[-_]+$/g, "");
 };
-const IMG_STATE = { normal: { t: "就绪", c: "emerald" }, importing: { t: "导入中", c: "cyan" }, error: { t: "错误", c: "rose" } };
-// 颜色只表示用途（系统盘青、数据盘紫）；系统靠图标形状区分，标签保持中性。
+const IMG_STATE = { normal: { t: "Ready", c: "emerald" }, importing: { t: "Importing", c: "cyan" }, error: { t: "Error", c: "rose" } };
+// Color indicates disk purpose; OS uses icon shape and neutral text.
 const OS_META = { windows: { t: "Windows" }, linux: { t: "Linux" } };
-// 镜像用途：系统盘用来启动，数据盘是挂在旁边的已格式化卷，两者在不同地方选用。
-const PURPOSE_META = { system: { t: "系统盘镜像", c: "cyan" }, data: { t: "数据盘镜像", c: "violet" } };
+// System images boot clients; data images are formatted volumes mounted alongside the system disk.
+const PURPOSE_META = { system: { t: "System Disk Image", c: "cyan" }, data: { t: "Data Disk Image", c: "violet" } };
 const purposeOf = (img) => (img.Purpose === "data" ? "data" : "system");
 const FS_META = { ntfs: { t: "NTFS（Windows）" }, ext4: { t: "ext4（Linux）" } };
 
@@ -59,26 +59,26 @@ function PageImages() {
   const [selImageId, setSelImageId] = useState(null);
 
   const [modal, setModal] = useState(null); // import | image | export | blank
-  // 两条进出路径并存：浏览器受运维上行带宽限制；服务器目录快得多，但文件只在当前服务的那台上。
+  // Support browser upload and server directory import. Browser upload is bandwidth-limited; server files stay on the serving node.
   const [importMode, setImportMode] = useState("upload");
   const [sources, setSources] = useState(null);
   const [form, setForm] = useState({});
   const [importDir, setImportDir] = useState("");
-  const [importPoolAvail, setImportPoolAvail] = useState(null); // 字节；null 表示取不到池空间
+  const [importPoolAvail, setImportPoolAvail] = useState(null); // bytes; null means pool capacity unavailable
   const [up, setUp] = useState(null); // { name, size, sent, state, error }
   const uploadIdRef = React.useRef("");
-  // 当前这次上传的 AbortController 兼作令牌：放弃、关弹窗或重选文件后旧循环立刻失效，不再发片、不再改进度。
+  // AbortController also identifies the current upload; cancellation, closing, or file replacement invalidates the old loop.
   const uploadCtlRef = React.useRef(null);
   const stopUpload = () => { if (uploadCtlRef.current) uploadCtlRef.current.abort(); uploadCtlRef.current = null; };
   useEffect(() => stopUpload, []);
-  // 集群下要说清文件传到哪台：上传只能落在当前主机（备机写闸门关闭），运维只看得到 VIP。
+  // State upload destination explicitly: uploads reach the active node, while operators access only the VIP.
   const nodesRes = useResource(() => api.listClusterNodes().catch(() => null), []);
   const nodes = (nodesRes.data && nodesRes.data.items) || [];
   const activeNode = nodes.find(n => n.ha_state === "active");
   const importPlaceholder = `${importDir || "/tank/imports"}/win11.vmdk`;
 
   const { data: imgData, loading, error, reload: loadImages } = useResource(() => api.listImages(), []);
-  // 后端按 ID（取自名称）排；这里系统盘在前、数据盘在后，各自按创建时间先后。
+  // Override backend ID ordering: system images first, then data images, each sorted by creation time.
   const images = [...((imgData && imgData.items) || [])].sort((a, b) =>
     (purposeOf(a) === purposeOf(b) ? 0 : purposeOf(a) === "system" ? -1 : 1)
     || ((Date.parse(a.CreatedAt) || 0) - (Date.parse(b.CreatedAt) || 0))
@@ -91,19 +91,19 @@ function PageImages() {
   const showReductions = (imageId, configId) => { setRedPick({ imageId, configId }); setModal(null); setTab("reductions"); };
   const selImage = images.find(i => i.ID === selImageId) || null;
 
-  // 有镜像在导入时轮询列表，让卡片自动变成就绪；卡片进度条用 store.tasks（已 3 秒轮询）。
+  // Poll while images import so cards update automatically; progress comes from store.tasks.
   usePolling(loadImages, { intervalMs: 3000, active: images.some(i => i.State === "importing") });
   const importTaskOf = (imageId) =>
     store.tasks.find(k => k.target === imageId && (k.status === "running" || k.status === "waiting"));
 
-  // 筛选结果变化时保持选中项有效
+  // Keep selected item valid when filters change
   useEffect(() => {
     if (!filtered.length) { if (selImageId) setSelImageId(null); return; }
     if (!filtered.some(i => i.ID === selImageId)) setSelImageId(filtered[0].ID);
   }, [images, purposeF, osF, q]); // eslint-disable-line
 
-  // 来自全局搜索或分组页的深链，每次跳转只消费一次；按 params 对象认，再跳同一镜像仍会打开。
-  // images 每次渲染都是新数组，不能当依赖，否则详情关掉马上又被弹开。
+  // Consume each deep-link navigation once, even when navigating to the same image again.
+  // Do not depend on the reconstructed images array; otherwise the modal reopens after closing.
   const imagesLoaded = !!imgData;
   const deepLinkSeen = useRef(null);
   useEffect(() => {
@@ -115,7 +115,7 @@ function PageImages() {
     }
   }, [route.params, imagesLoaded]); // eslint-disable-line
 
-  // ── 镜像操作 ──────────────────────────────────────────────────────────────
+  // Image actions ─────────────────────────────────────────────────────────
   const baseName = (n) => (n || "").split("/").pop().replace(/\.(zfs\.gz|zfs|gzip|vmdk|vhdx|vhd|qcow2|qcow|vdi|raw|img)$/i, "");
   const openImageDetail = (imageId) => {
     setSelImageId(imageId);
@@ -123,20 +123,20 @@ function PageImages() {
   };
   const setPurpose = async (purpose) => {
     if (!selImage || purpose === purposeOf(selImage)) return;
-    await run(() => api.setImagePurpose(selImage.ID, { purpose }), `${selImage.Name} 已改为${PURPOSE_META[purpose].t}`, { reload: loadImages, errMsg: "修改用途失败" });
+    await run(() => api.setImagePurpose(selImage.ID, { purpose }), `${selImage.Name}  changed to ${PURPOSE_META[purpose].t}`, { reload: loadImages, errMsg: "Could not change purpose" });
   };
   const openBlank = () => { setForm({ name: "", size_gib: 100, filesystem: "ntfs", label: "" }); setModal("blank"); };
   const doCreateBlank = async () => {
     const name = (form.name || "").trim();
-    if (!name) { store.toast("请输入数据盘名称", "err"); return; }
+    if (!name) { store.toast("Enter a data disk name", "err"); return; }
     const gib = Number(form.size_gib);
-    if (!(gib >= 1)) { store.toast("大小至少 1 GiB", "err"); return; }
-    // 名称原样提交，服务端折成 ASCII 数据集 ID；卷标只在填写时提交，留空即同名称。
+    if (!(gib >= 1)) { store.toast("Minimum size is 1 GiB", "err"); return; }
+    // Submit display name unchanged; backend normalizes dataset IDs to ASCII. Blank volume label defaults to name.
     const body = { name, size_bytes: Math.round(gib * GiB), filesystem: form.filesystem || "ntfs" };
     const label = (form.label || "").trim();
     if (label) body.label = label;
     if (await run(() => api.createBlankImage(body),
-      `数据盘 ${name} 创建任务已提交`, { reload: loadImages, errMsg: "创建失败" })) setModal(null);
+      `Data Disk ${name} creation task submitted`, { reload: loadImages, errMsg: "Create failed" })) setModal(null);
   };
   const openImport = async () => {
     setForm({ name: "", source_path: "", os_type: "windows", purpose: "system" });
@@ -149,19 +149,19 @@ function PageImages() {
       setImportDir((r && r.import_dir) || "");
       setImportPoolAvail(r && typeof r.pool_available === "number" ? r.pool_available : null);
     } catch {
-      // 取不到池空间时照常上传，只是少了提前拦截。
+      // Allow upload when capacity is unavailable; skip only preflight capacity rejection.
     }
   };
-  // 分片 8 MiB：太小则往返开销盖过传输，太大则每次失败重传量大，几十 G 的传输里失败是常态。
+  // Use 8 MiB chunks to balance request overhead and retransmission cost for large uploads.
   const CHUNK = 8 * 1024 * 1024;
 
-  // 从本机分片上传镜像文件，支持断点续传：每片声明起点，断开后先问服务器已收到多少再接着传。
+  // Browser upload is resumable: specify each chunk offset and query server progress after interruption.
   const uploadFile = async (file) => {
     if (!file) return;
-    // 池装不下就当场拒绝，否则传完几十 G 才在导入时被拒。
+    // Reject oversized uploads before transmission if pool capacity is known.
     if (importPoolAvail != null && file.size > importPoolAvail) {
       setUp({ name: file.name, size: file.size, sent: 0, state: "error",
-        error: `存储池放不下：文件 ${fmtGiB(file.size)}，可用 ${fmtGiB(importPoolAvail)}` });
+        error: `Insufficient pool space: file ${fmtGiB(file.size)}; available ${fmtGiB(importPoolAvail)}` });
       return;
     }
     stopUpload();
@@ -171,16 +171,16 @@ function PageImages() {
     setUp({ name: file.name, size: file.size, sent: 0, state: "uploading", error: "" });
     let session;
     try {
-      // 带上修改时间，服务端据此区分「同一个文件重选」和「同名同大小的另一个文件」，续错会拼出坏文件。
+      // Send modified timestamp to distinguish the same file from a different file with identical name and size.
       session = await api.beginUpload({ file_name: file.name, size_bytes: file.size, last_modified: file.lastModified });
     } catch (e) {
-      if (live()) setUp(u => ({ ...u, state: "error", error: e.message || "无法开始上传" }));
+      if (live()) setUp(u => ({ ...u, state: "error", error: e.message || "Could not start upload" }));
       return;
     }
     if (!live()) return;
     uploadIdRef.current = session.upload_id;
     let offset = session.received || 0;
-    // 续传时进度条从断点起画，不先显示 0%。
+    // On resume, render progress from the acknowledged offset rather than zero.
     if (offset > 0) setUp(u => ({ ...u, sent: offset }));
     let retriesLeft = 5;
     while (offset < file.size && live()) {
@@ -191,7 +191,7 @@ function PageImages() {
         offset = typeof r.received === "number" ? r.received : offset + blob.size;
         setUp(u => ({ ...u, sent: offset }));
         if (r.complete) {
-          // 上传完成后就是普通的导入源路径，后续照常导入。
+          // Completed uploads become regular import paths.
           setForm(prev => ({ ...prev, source_path: r.path || "",
             name: prev.name || normalizeImageName(baseName(file.name)) }));
           setUp(u => ({ ...u, sent: file.size, state: "done" }));
@@ -200,10 +200,10 @@ function PageImages() {
       } catch (e) {
         if (!live()) return;
         if (retriesLeft-- <= 0) {
-          setUp(u => ({ ...u, state: "error", error: e.message || "上传中断" }));
+          setUp(u => ({ ...u, state: "error", error: e.message || "Upload interrupted" }));
           return;
         }
-        // 断开后先问服务器已收到多少再续，否则可能重写或跳过一段，留下长度正确但内容损坏的文件。
+        // Query acknowledged offset before resuming to avoid gaps or corruption.
         try {
           const st = await api.uploadStatus(session.upload_id);
           if (!live()) return;
@@ -211,7 +211,7 @@ function PageImages() {
           setUp(u => ({ ...u, sent: offset }));
         } catch (e2) {
           if (!live()) return;
-          setUp(u => ({ ...u, state: "error", error: e2.message || "上传会话已失效，请重新上传" }));
+          setUp(u => ({ ...u, state: "error", error: e2.message || "Upload session expired. Please upload again." }));
           return;
         }
       }
@@ -223,10 +223,10 @@ function PageImages() {
     uploadIdRef.current = "";
     stopUpload();
     setUp(null);
-    if (id) { try { await api.abortUpload(id); } catch { /* 放弃即可，不必打扰用户 */ } }
+    if (id) { try { await api.abortUpload(id); } catch { /* Best-effort cancellation; do not interrupt user */ } }
   };
 
-  // 关弹窗只停本地循环、保留服务端会话，重选同一个文件还能续传；「放弃」才作废会话。
+  // Closing the modal stops local work but preserves upload state; Discard invalidates the server session.
   const closeImport = () => { stopUpload(); setModal(null); };
 
   const loadImportSources = async () => {
@@ -236,49 +236,49 @@ function PageImages() {
 
   const doImport = async () => {
     const name = (form.name || "").trim(), source = (form.source_path || "").trim();
-    if (!name) { store.toast("请输入镜像名称", "err"); return; }
+    if (!name) { store.toast("Enter an image name", "err"); return; }
     if (!source) {
-      store.toast(importMode === "server" ? "请先在服务器目录里选一个文件"
-        : up && up.state === "uploading" ? "文件还在上传中，传完就能导入"
-        : up && up.state === "error" ? "上传没成功，请重新选择文件"
-          : "请先选择要导入的镜像文件", "err");
+      store.toast(importMode === "server" ? "Select a file from the server directory first"
+        : up && up.state === "uploading" ? "Upload in progress. Import after completion."
+        : up && up.state === "error" ? "Upload failed. Select the file again."
+          : "Select an image file to import.", "err");
       return;
     }
     const normalizedName = normalizeImageName(name);
-    if (!normalizedName) { store.toast("镜像名称只能包含字母、数字、短横线或下划线", "err"); return; }
-    // 机器算出的名称直接规范化，不退回让用户重填。
+    if (!normalizedName) { store.toast("Image name may contain only letters, digits, hyphens and underscores", "err"); return; }
+    // Normalize generated names automatically instead of asking the user to reenter them.
     if (normalizedName !== name) {
       setForm(prev => ({ ...prev, name: normalizedName }));
-      store.toast(`镜像名称已规范化为 ${normalizedName}`, "info");
+      store.toast(`Image name normalized to ${normalizedName}`, "info");
     }
-    // 刚上传的源文件导完就删，留着白占几十 G；运维自己放的文件不走这条路，不会被误删。
+    // Clean up browser-uploaded sources after import; preserve files placed by the operator.
     if (await run(() => api.importImage({ name: normalizedName, source_path: source, os_type: form.os_type,
       purpose: form.purpose || "system", delete_source_after: importMode === "upload" }),
-      `镜像 ${normalizedName} 导入任务已提交`, { reload: loadImages, errMsg: "导入失败" })) setModal(null);
+      `Image ${normalizedName} import task submitted`, { reload: loadImages, errMsg: "Import failed" })) setModal(null);
   };
   const doDeleteImage = async () => {
     if (!selImage) return;
     const refs = await groupsReferencing(g => g.SystemImageID === selImage.ID);
     const message = refs.length
-      ? `${selImage.Name} 正被分组 ${namesClause(refs)} 用作系统盘，删除会失败。\n请先在分组中改绑其他镜像。`
-      : `删除 ${selImage.Name}？其全部配置与还原点将一并删除。若被分组用作数据盘，删除会失败。`;
-    const ok = await conf.ask({ title: "删除镜像", message, danger: true });
+      ? `${selImage.Name} is used by groups ${namesClause(refs)} as a system disk. Reassign those groups before deleting it.`
+      : `Delete ${selImage.Name}? All configurations and restore points will also be deleted. Deletion fails while groups use it as a data disk.`;
+    const ok = await conf.ask({ title: "Delete Image", message, danger: true });
     if (!ok) return;
-    await run(() => api.deleteImage(selImage.ID), "镜像已删除", { reload: loadImages, errMsg: "删除失败" });
+    await run(() => api.deleteImage(selImage.ID), "Image deleted", { reload: loadImages, errMsg: "Delete failed" });
   };
 
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <div className="tabs">
-        {[["images", "镜像", images.length], ["configs", "配置"], ["reductions", "还原点"]].map(([v, label, n]) => (
+        {[["images", "Image", images.length], ["configs", "Configuration"], ["reductions", "Restore Point"]].map(([v, label, n]) => (
           <div key={v} role="button" className={`tab ${tab === v ? "active" : ""}`} onClick={() => setTab(v)}>
             {label}{n != null && <span className="count">{n}</span>}
           </div>
         ))}
         <div style={{ flex: 1 }}/>
         {tab === "images" && <>
-          <button className="btn" style={{ marginBottom: 6 }} onClick={openBlank}><Icons.Disk size={12}/> 新建数据盘</button>
-          <button className="btn primary" style={{ marginBottom: 6, marginLeft: 6 }} onClick={openImport}><Icons.Plus size={12}/> 导入镜像</button>
+          <button className="btn" style={{ marginBottom: 6 }} onClick={openBlank}><Icons.Disk size={12}/> Create Data Disk</button>
+          <button className="btn primary" style={{ marginBottom: 6, marginLeft: 6 }} onClick={openImport}><Icons.Plus size={12}/> Import Image</button>
         </>}
       </div>
 
@@ -287,11 +287,11 @@ function PageImages() {
         onPick={(imageId, configId) => setRedPick({ imageId, configId })}/>}
 
       {tab === "images" && <div className="row" style={{ gap: 8 }}>
-        <Select aria-label="按用途筛选" value={purposeF} onChange={setPurposeF} style={{ width: 140 }}
-          options={[{ value: "all", label: "全部用途" }, { value: "system", label: "系统盘镜像" }, { value: "data", label: "数据盘镜像" }]}/>
-        <Select aria-label="按系统筛选" value={osF} onChange={setOsF} style={{ width: 130 }}
-          options={[{ value: "all", label: "全部系统" }, { value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/>
-        <SearchBox value={q} onChange={setQ} placeholder="搜索镜像名称"/>
+        <Select aria-label="Filter by Purpose" value={purposeF} onChange={setPurposeF} style={{ width: 140 }}
+          options={[{ value: "all", label: "All Purposes" }, { value: "system", label: "System Disk Image" }, { value: "data", label: "Data Disk Image" }]}/>
+        <Select aria-label="Filter by OS" value={osF} onChange={setOsF} style={{ width: 130 }}
+          options={[{ value: "all", label: "All Operating Systems" }, { value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/>
+        <SearchBox value={q} onChange={setQ} placeholder="Search image names"/>
       </div>}
 
       {tab === "images" &&       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 12, alignContent: "start" }}>
@@ -313,17 +313,17 @@ function PageImages() {
                 </div>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="ellip" style={{ fontSize: 14, fontWeight: 600 }}>{img.Name}</div>
-                  {/* 同时给逻辑大小和实占：只给一个数会被读成「这个镜像占了池这么多」。 */}
-                  <div className="mono meta" style={{ marginTop: 2 }}>逻辑 {fmtGiB(img.Size)} · 实占 {img.Used == null ? "—" : fmtGiB(img.Used)}</div>
+                  {/* Show both logical and allocated sizes to prevent misleading capacity estimates. */}
+                  <div className="mono meta" style={{ marginTop: 2 }}>Logical {fmtGiB(img.Size)} · Allocated {img.Used == null ? "—" : fmtGiB(img.Used)}</div>
                 </div>
                 <span className={`chip ${st.c}`}>{img.State === "importing" && <span className="dot cyan"/>}{st.t}</span>
               </div>
               {img.State === "importing" && (() => {
                 const task = importTaskOf(img.ID);
                 return (
-                  <div style={{ marginTop: 10 }} onClick={e => { e.stopPropagation(); goto("tasks"); }} title="点击查看任务详情">
+                  <div style={{ marginTop: 10 }} onClick={e => { e.stopPropagation(); goto("tasks"); }} title="View task details">
                     <div className="bar cyan"><span style={{ width: `${task?.progress || 0}%` }}/></div>
-                    <div className="meta" style={{ marginTop: 4 }}>{task ? `导入中 ${task.progress}%` : "导入排队中"} · 查看任务</div>
+                    <div className="meta" style={{ marginTop: 4 }}>{task ? `Importing ${task.progress}%` : "Import queued"} · View Task</div>
                   </div>
                 );
               })()}
@@ -339,25 +339,25 @@ function PageImages() {
         })}
         {!filtered.length && (
           <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--fg-faint)", fontSize: 13, gridColumn: "1 / -1" }}>
-            {loading ? "加载中…" : error ? `加载失败：${error}` : images.length ? "没有符合筛选条件的镜像" : "暂无镜像 · 右上角可导入镜像或新建数据盘"}
+            {loading ? "加载中…" : error ? `加载失败：${error}` : images.length ? "No images match the filters" : "No images. Use Import Image or Create Data Disk."}
           </div>
         )}
       </div>}
 
-      <Modal open={modal === "image"} onClose={() => setModal(null)} title={selImage ? selImage.Name : "镜像详情"} size="lg"
+      <Modal open={modal === "image"} onClose={() => setModal(null)} title={selImage ? selImage.Name : "Image Details"} size="lg"
         footer={selImage && <>
-          <button className="btn" onClick={() => setModal("export")}><Icons.Download size={12}/> 导出镜像</button>
-          <button className="btn danger" onClick={doDeleteImage}><Icons.Trash size={12}/> 删除镜像</button>
+          <button className="btn" onClick={() => setModal("export")}><Icons.Download size={12}/> Export Image</button>
+          <button className="btn danger" onClick={doDeleteImage}><Icons.Trash size={12}/> Delete Image</button>
         </>}>
         {!selImage ? (
-          <div style={{ padding: "4px 0", fontSize: 13, color: "var(--fg-faint)" }}>未选中镜像</div>
+          <div style={{ padding: "4px 0", fontSize: 13, color: "var(--fg-faint)" }}>未选中Image</div>
         ) : (
           <>
             <div className="row" style={{ gap: 10, marginBottom: 12, fontSize: 13 }}>
-              <span className="lbl">用途</span>
-              <Select value={purposeOf(selImage)} aria-label="镜像用途" onChange={setPurpose} style={{ width: 160 }}
-                options={[{ value: "system", label: "系统盘镜像" }, { value: "data", label: "数据盘镜像" }]}/>
-              <span className="hint">{selImage.Origin === "blank" ? "新建的空数据盘" : "导入的镜像"} · 被分组使用时不能改用途</span>
+              <span className="lbl">Purpose</span>
+              <Select value={purposeOf(selImage)} aria-label="Image Purpose" onChange={setPurpose} style={{ width: 160 }}
+                options={[{ value: "system", label: "System Disk Image" }, { value: "data", label: "Data Disk Image" }]}/>
+              <span className="hint">{selImage.Origin === "blank" ? "New blank data disk" : "Imported image"} · Purpose cannot be changed while groups use this image.</span>
             </div>
             {purposeOf(selImage) === "system" && <ImageHealthCard imageId={selImage.ID}/>}
 
@@ -366,41 +366,41 @@ function PageImages() {
         )}
       </Modal>
 
-      {/* 导入镜像 */}
+      {/* Image export and import dialogs */}
       {modal === "export" && selImage && <ExportModal busy={busy} run={run} onClose={() => setModal("image")}
-        title={`导出镜像 · ${selImage.Name}`}
-        source="导出内容为镜像导入时的初始数据，不包含各配置及还原点中的变更；如需导出某一还原点，请在「还原点」页签中操作。"
+        title={`Export Image · ${selImage.Name}`}
+        source="Exports the initially imported image without configuration or restore-point changes. To export a restore point, use its tab."
         ticket={(gzip) => api.exportImageTicket(selImage.ID, gzip)}
         toDir={() => api.exportImage(selImage.ID)}/>}
 
-      <Modal open={modal === "import"} onClose={() => !busy && closeImport()} title="导入镜像"
-        footer={<><button className="btn" disabled={busy} onClick={closeImport}>取消</button>
-          {/* 源路径要上传完成才有，传完之前按钮禁用并说明在等什么。 */}
+      <Modal open={modal === "import"} onClose={() => !busy && closeImport()} title="Import Image"
+        footer={<><button className="btn" disabled={busy} onClick={closeImport}>Cancel</button>
+          {/* Import source is unavailable until upload completes. Disable the button until then. */}
           <button className="btn primary" onClick={doImport}
             disabled={busy || (importMode === "server" ? !form.source_path : (!up || up.state !== "done"))}>
-            {busy ? "提交中…" : importMode === "upload" && up && up.state === "uploading" ? "上传中…" : "导入"}
+            {busy ? "Submitting…" : importMode === "upload" && up && up.state === "uploading" ? "Uploading…" : "Import"}
           </button></>}>
-        <Field label="镜像名称" required><input className="input" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Win11-Pro-2026Q1"/></Field>
-        {/* 两条路的取舍见 importMode 处注释；服务器目录这条必须写明是哪台。 */}
+        <Field label="Image Name" required><input className="input" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Win11-Pro-2026Q1"/></Field>
+        {/* Clarify the active node used for server-directory imports. */}
         <div className="row" style={{ gap: 0, marginBottom: 10 }}>
           <div className="btn-group">
             <button type="button" className={`btn ${importMode === "upload" ? "primary" : ""}`}
-              onClick={() => setImportMode("upload")}>从本机上传</button>
+              onClick={() => setImportMode("upload")}>Upload from Computer</button>
             <button type="button" className={`btn ${importMode === "server" ? "primary" : ""}`}
-              onClick={() => { setImportMode("server"); loadImportSources(); }}>从服务器目录</button>
+              onClick={() => { setImportMode("server"); loadImportSources(); }}>From Server Directory</button>
           </div>
         </div>
         {importMode === "server" ? (
-          <Field label="选择服务器上的文件" required
+          <Field label="Select Server File" required
             hint={sources
-              ? `目录在当前主机 ${sources.node || "?"} 的 ${sources.import_dir}——把文件 scp 到这台机器上，它就会出现在这里。`
-                + "导入过程中若发生主备切换，任务会失败，可在任务页看到。"
+              ? `Directory is on active node ${sources.node || "?"} at ${sources.import_dir} — copy files to this host via SCP to make them available.`
+                + "An HA switchover during import will fail the task; check Task Center."
                 + (sources.pool_available != null ? ` · 存储池可用 ${fmtGiB(sources.pool_available)}` : "")
-              : "正在读取服务器目录…"}>
+              : "Loading server directory…"}>
             <div style={{ border: "1px solid var(--line)", borderRadius: 6, maxHeight: 220, overflowY: "auto" }}>
               {(sources?.items || []).length === 0 && (
                 <div className="hint" style={{ padding: 12 }}>
-                  {sources ? "这个目录里还没有可导入的文件" : "读取中…"}
+                  {sources ? "No importable files found in this directory" : "读取中…"}
                 </div>
               )}
               {(sources?.items || []).map(f => (
@@ -416,11 +416,11 @@ function PageImages() {
             </div>
           </Field>
         ) : (
-          <Field label="选择本机文件" required
+          <Field label="Select Local File" required
             hint={(nodes.length > 1
-              ? "上传完成后即可导入，镜像会自动同步到集群所有节点"
-              : "上传完成后即可导入")
-              + "。支持断点续传：中断后重新选择同一个文件即可接着传。"
+              ? "After upload, the image can be imported and synchronized to all cluster nodes"
+              : "You can import after upload completes")
+              + ". Upload is resumable: reselect the same file after interruption."
               + (importPoolAvail != null ? ` · 存储池可用 ${fmtGiB(importPoolAvail)}` : "")}>
             <input className="input" type="file" style={{ width: "100%" }} disabled={up && up.state === "uploading"}
               onChange={e => uploadFile(e.target.files && e.target.files[0])}/>
@@ -435,12 +435,12 @@ function PageImages() {
                 </div>
                 <div className="row" style={{ justifyContent: "space-between", marginTop: 6 }}>
                   <span className="meta">
-                    {up.state === "done" ? "上传完成，可以导入了"
+                    {up.state === "done" ? "Upload finished; ready to import"
                       : up.state === "error" ? up.error
                         : `${fmtGiB(up.sent)} / ${fmtGiB(up.size)}`}
                   </span>
                   {up.state === "uploading" && (
-                    <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={cancelUpload}>放弃</button>
+                    <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={cancelUpload}>Discard</button>
                   )}
                 </div>
               </div>
@@ -448,29 +448,29 @@ function PageImages() {
           </Field>
         )}
 
-        <Field label="操作系统" required><Select value={form.os_type || "windows"} onChange={v => setForm({ ...form, os_type: v })} options={[{ value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/></Field>
-        <Field label="用途" required hint={form.purpose === "data" ? "数据盘镜像：挂给分组作 D 盘等，不烘焙启动脚本、不做引导体检" : "系统盘镜像：分组的启动盘"}>
-          <Select value={form.purpose || "system"} aria-label="用途" onChange={v => setForm({ ...form, purpose: v })} options={[{ value: "system", label: "系统盘镜像" }, { value: "data", label: "数据盘镜像" }]}/>
+        <Field label="Operating System" required><Select value={form.os_type || "windows"} onChange={v => setForm({ ...form, os_type: v })} options={[{ value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/></Field>
+        <Field label="Purpose" required hint={form.purpose === "data" ? "Data disk image: attach to groups as drive D:, etc. No startup script or boot health check." : "System disk image: boot volume for a group"}>
+          <Select value={form.purpose || "system"} aria-label="Purpose" onChange={v => setForm({ ...form, purpose: v })} options={[{ value: "system", label: "System Disk Image" }, { value: "data", label: "Data Disk Image" }]}/>
         </Field>
       </Modal>
 
-      {/* 新建空数据盘 */}
-      <Modal open={modal === "blank"} onClose={() => !busy && setModal(null)} title="新建数据盘"
-        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>取消</button><button className="btn primary" disabled={busy} onClick={doCreateBlank}>{busy ? "提交中…" : "创建"}</button></>}>
-        <Field label="数据盘名称" required><input className="input" aria-label="数据盘名称" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="games-d"/></Field>
-        <Field label="大小" required hint="稀疏分配，只占实际写入；建好后不能缩小">
+      {/* Create blank data disk */}
+      <Modal open={modal === "blank"} onClose={() => !busy && setModal(null)} title="Create Data Disk"
+        footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={doCreateBlank}>{busy ? "Submitting…" : "Create"}</button></>}>
+        <Field label="Data Disk名称" required><input className="input" aria-label="Data Disk名称" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="games-d"/></Field>
+        <Field label="Size" required hint="Thin provisioned; consumes only written space and cannot be shrunk.">
           <div className="row" style={{ gap: 8 }}>
-            <input className="input mono" type="number" min="1" step="1" aria-label="大小" style={{ width: 120 }} value={form.size_gib ?? 100} onChange={e => setForm({ ...form, size_gib: e.target.value })}/>
+            <input className="input mono" type="number" min="1" step="1" aria-label="Size" style={{ width: 120 }} value={form.size_gib ?? 100} onChange={e => setForm({ ...form, size_gib: e.target.value })}/>
             <span className="mono meta">GiB</span>
             <span style={{ flex: 1 }}/>
             {[100, 200, 500, 1000].map(g => <button key={g} type="button" className={`btn ${Number(form.size_gib) === g ? "primary" : ""}`} style={{ padding: "3px 8px" }} onClick={() => setForm({ ...form, size_gib: g })}>{g}</button>)}
           </div>
         </Field>
-        <Field label="文件系统" required hint={form.filesystem === "ext4" ? "给 Linux 分组用" : "给 Windows 分组用"}>
-          <Select value={form.filesystem || "ntfs"} aria-label="文件系统" onChange={v => setForm({ ...form, filesystem: v })} options={Object.entries(FS_META).map(([value, m]) => ({ value, label: m.t }))}/>
+        <Field label="File System" required hint={form.filesystem === "ext4" ? "For Linux groups" : "For Windows groups"}>
+          <Select value={form.filesystem || "ntfs"} aria-label="File System" onChange={v => setForm({ ...form, filesystem: v })} options={Object.entries(FS_META).map(([value, m]) => ({ value, label: m.t }))}/>
         </Field>
-        <Field label="卷标" hint={`客户机里显示的盘名，如「${(form.label || form.name || "游戏盘").trim() || "游戏盘"} (F:)」；留空用数据盘名称。盘符不在这里设，在分组的数据盘「挂载目标」里`}>
-          <input className="input" aria-label="卷标" style={{ width: "100%" }} value={form.label || ""} onChange={e => setForm({ ...form, label: e.target.value })} placeholder="留空 = 数据盘名称"/>
+        <Field label="Volume Label" hint={`Disk label shown on client, e.g. "${(form.label || form.name || "Games").trim() || "Games"} (F:)". Leave blank to use disk name. Set the drive letter under Mount Target in Group Management.`}>
+          <input className="input" aria-label="Volume Label" style={{ width: "100%" }} value={form.label || ""} onChange={e => setForm({ ...form, label: e.target.value })} placeholder="Blank = disk name"/>
         </Field>
       </Modal>
 
@@ -479,12 +479,12 @@ function PageImages() {
   );
 }
 
-// 镜像健康卡片（GET /api/images/{id}/health，POST .../health-check）。
+// Image health card (GET /api/images/{id}/health, POST .../health-check).
 const HEALTH_META = {
-  ok: { label: "健康", chip: "emerald" },
-  warn: { label: "警告", chip: "amber" },
-  block: { label: "阻断", chip: "rose" },
-  unknown: { label: "未知", chip: "" },
+  ok: { label: "Healthy", chip: "emerald" },
+  warn: { label: "Warning", chip: "amber" },
+  block: { label: "Blocked", chip: "rose" },
+  unknown: { label: "Unknown", chip: "" },
 };
 
 function ImageHealthCard({ imageId }) {
@@ -506,14 +506,14 @@ function ImageHealthCard({ imageId }) {
   };
   useEffect(() => { idRef.current = imageId; setReport(null); setMissing(false); setExpanded(false); load(); }, [imageId]);
 
-  // 检查以任务运行，useMutation 跟到结束再回调，避免慢检查时显示旧报告，失败时能说明原因。
+  // Health checks run as tasks; wait for completion before showing an updated report.
   const rerun = () => run(
     () => api.runImageHealthCheck(imageId),
-    "体检任务已发起",
+    "Health check started",
     {
-      errMsg: "体检发起失败",
+      errMsg: "Health check could not start",
       reload: async () => {
-        if (idRef.current !== imageId) return; // 检查期间已切换镜像
+        if (idRef.current !== imageId) return; // Image changed during the check
         await load();
       },
     },
@@ -523,18 +523,18 @@ function ImageHealthCard({ imageId }) {
   return (
     <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 8, padding: "10px 12px", marginBottom: 14 }}>
       <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-        <span className="lbl">镜像体检</span>
+        <span className="lbl">Image Health Check</span>
         {report && <span className={`chip ${meta.chip}`}>{meta.label}</span>}
         {report?.PartitionStyle && <span className="chip mono">{report.PartitionStyle.toUpperCase()}</span>}
-        {missing && <span className="chip">暂无报告</span>}
+        {missing && <span className="chip">No report</span>}
         <div style={{ flex: 1 }}/>
         {report && (report.Items || []).length > 0 && (
           <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={() => setExpanded(!expanded)}>
-            {expanded ? "收起" : `明细 ${(report.Items || []).length}`}
+            {expanded ? "Collapse" : `Details: ${(report.Items || []).length}`}
           </button>
         )}
         <button className="btn" style={{ padding: "2px 8px" }} disabled={running} onClick={rerun}>
-          <Icons.Refresh size={11}/> {running ? "体检中…" : "重跑体检"}
+          <Icons.Refresh size={11}/> {running ? "Checking…" : "Run Health Check"}
         </button>
       </div>
       {expanded && report && (
@@ -557,7 +557,7 @@ function ImageHealthCard({ imageId }) {
   );
 }
 
-// 详情里只读地概括每个配置：当前用哪个还原点、哪些分组在用；管理去还原点页。
+// Image details summarize configurations and active restore points; management actions live on the Restore Points tab.
 function ConfigOverview({ image, onManage }) {
   const { data } = useResource(async () => {
     const configs = ((await api.listConfigs(image.ID).catch(() => null)) || {}).items || [];
@@ -570,18 +570,18 @@ function ConfigOverview({ image, onManage }) {
   const rows = data || [];
   return (
     <div style={{ marginTop: 14 }}>
-      <div className="lbl" style={{ marginBottom: 8 }}>配置概况</div>
+      <div className="lbl" style={{ marginBottom: 8 }}>Configuration Overview</div>
       <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
         {rows.map(c => (
           <div key={c.ID} className="row" style={{ gap: 10, border: "1px solid var(--line-soft)", borderRadius: 6, padding: "8px 10px", background: "var(--bg-0)", fontSize: 13 }}>
             <Icons.Cog size={12} style={{ color: "var(--fg-mute)" }}/>
             <span style={{ fontWeight: 600 }}>{c.Name}</span>
-            <span className="meta">当前还原点 {c.current ? redName(c.current) : "—"} · 共 {c.count} 个</span>
-            <span className="meta ellip" style={{ flex: 1 }}><UsageCell users={c.users} empty="没有分组在用"/></span>
-            <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={() => onManage(c)} aria-label={`管理还原点 ${c.Name}`}>管理还原点<Icons.Chevron size={11}/></button>
+            <span className="meta">Current restore point {c.current ? redName(c.current) : "—"} · Total {c.count} items</span>
+            <span className="meta ellip" style={{ flex: 1 }}><UsageCell users={c.users} empty="No groups use this configuration"/></span>
+            <button className="btn ghost" style={{ padding: "2px 8px" }} onClick={() => onManage(c)} aria-label={`Manage Restore Points ${c.Name}`}>Manage Restore Points<Icons.Chevron size={11}/></button>
           </div>
         ))}
-        {data && !rows.length && <div className="hint">暂无配置 · 可在「配置」页新建</div>}
+        {data && !rows.length && <div className="hint">No configurations. Create one under Configurations.</div>}
       </div>
     </div>
   );
