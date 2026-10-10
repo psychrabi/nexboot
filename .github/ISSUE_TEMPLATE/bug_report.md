@@ -1,23 +1,23 @@
 ---
-name: Bug report / 问题报告
-about: Something does not work as expected / 功能和预期不一致
+name: Bug report
+about: Report behavior that does not match expectations
 labels: bug
 ---
 
-**What happened / 发生了什么**
+**What happened**
 
-**What you expected / 期望的结果**
+**What you expected**
 
-**Steps to reproduce / 复现步骤**
+**Steps to reproduce**
 1.
 2.
 
-**Environment / 环境**
+**Environment**
 - NexBoot version (`ndiskless --version`):
-- Server OS / 服务器系统:
-- Single node or cluster / 单机还是集群:
-- Client firmware (BIOS / UEFI), NIC model / 客户机固件与网卡型号:
-- Client image OS and build / 镜像系统与版本号:
+- Server operating system:
+- Single node or cluster:
+- Client firmware (BIOS / UEFI) and NIC model:
+- Client image operating system and build:
 
-**Logs / 日志**
+**Logs**
 <!-- journalctl -u ndiskless --since "-30min" -->
