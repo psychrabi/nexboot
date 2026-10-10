@@ -45,7 +45,7 @@ it('Task names match visible console actions', async () => {
     const row = rows.find(r => within(r).queryByText(id));
     return row.querySelectorAll('td')[1].textContent;
   };
-  await waitFor(() => expect(typeOf('task-1')).toBe('Shut Down and Save Restore Point'));
+  await waitFor(() => expect(typeOf('task-1')).toBe('Shut down and save restore point'));
   expect(typeOf('task-2')).toBe('Publish data disk');
   expect(typeOf('task-3')).toBe('Remove disk');
 });
