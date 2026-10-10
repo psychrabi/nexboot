@@ -220,7 +220,7 @@ describe('Configurations tab', () => {
     expect(await screen.findByText('Office installed')).toBeTruthy();
   });
 
-  it('Blocks deletion of an image's only configuration', async () => {
+  it("Blocks deletion of an image's only configuration", async () => {
     stubApi({ listConfigs: async (imageId) => list(imageId === 'win11'
       ? [...CONFIGS.win11, { ID: 'win11_work', ImageID: 'win11', Name: 'work', DefaultReductionID: null, CreatedAt: '2026-07-31T10:00:00Z' }]
       : CONFIGS[imageId] || []) });
