@@ -7,7 +7,7 @@ import { StoreProvider } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageAlarms } from './alarms.jsx';
 
-const alarm = (i, status = 'active') => ({ ID: `a${i}`, Severity: 'warn', Type: '复制滞后', Resource: `r${i}`, Value: 'v', Message: `m${i}`, Status: status, CreatedAt: '2026-09-30T13:00:00Z' });
+const alarm = (i, status = 'active') => ({ ID: `a${i}`, Severity: 'warn', Type: 'Replication lag', Resource: `r${i}`, Value: 'v', Message: `m${i}`, Status: status, CreatedAt: '2026-09-30T13:00:00Z' });
 
 function stub(all) {
   const listAlarms = vi.fn(async ({ status = '', page = 1, size = 50 } = {}) => {
