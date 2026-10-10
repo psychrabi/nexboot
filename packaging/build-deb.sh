@@ -1,17 +1,17 @@
 #!/bin/bash
-# 用已构建好的静态二进制打 ndiskless .deb。
-# 包只装文件；选池、写 env、启动服务需要现场输入，由装完后运行的 `ndiskless-configure`
-# （即 install-go.sh --provisioned）完成。postinst 不 enable/start：没有 env 的 unit 会反复崩溃重启。
+# Package the previously built static binary as an ndiskless .deb.
+# The package installs files only. Selecting a pool, writing env, and starting services require deployment choices
+# handled by ndiskless-configure (install-go.sh --provisioned). postinst must not start a unit without env.
 #
-# 布局与 install-go.sh 的预期一致，包安装与源码/tarball 安装路径相同：
+# Use the same directory layout as install-go.sh, source, and tarball installations:
 #   /opt/ndiskless/ndiskless              the binary
 #   /opt/ndiskless/scripts/install-go.sh  the configure logic (also as a wrapper)
 #   /opt/ndiskless/deploy/*               unit source + keepalived template/scripts
 #   /etc/systemd/system/ndiskless.service the canonical unit (from deploy/)
 #   /usr/sbin/ndiskless-configure         wrapper → install-go.sh --provisioned
 #
-# 用法：VERSION=<v> BINARY=<path> packaging/build-deb.sh [outdir]
-# 需要 dpkg-deb（dpkg-dev）。
+# Usage: VERSION=<v> BINARY=<path> packaging/build-deb.sh [outdir]
+# Requires dpkg-deb (dpkg-dev).
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -24,8 +24,8 @@ arch=amd64
 [ -f "$binary" ] || { echo "binary not found: $binary (run: make build-static)" >&2; exit 1; }
 command -v dpkg-deb >/dev/null || { echo "dpkg-deb missing (apt-get install dpkg-dev)" >&2; exit 1; }
 
-# 转成 Debian 版本号：去掉前导 v，把 git describe 标签后的 - 换成 ~，
-# 让 0.1.0-6-gabc 排在正式版 0.1.0 之前。
+# Convert to Debian version ordering: strip leading v and replace the post-tag - with ~
+# so 0.1.0-6-gabc sorts below the official 0.1.0 release.
 debver=${version#v}
 debver=$(printf '%s' "$debver" | sed -E 's/-([0-9]+-g[0-9a-f]+(-dirty)?)$/~\1/')
 
@@ -42,10 +42,10 @@ install -m 0644 "$repo/deploy/ndiskless.service" "$stage/opt/ndiskless/deploy/nd
 install -m 0644 "$repo/deploy/keepalived.conf.tmpl" "$stage/opt/ndiskless/deploy/keepalived.conf.tmpl"
 install -m 0755 "$repo/deploy/ndiskless-check.sh" "$stage/opt/ndiskless/deploy/ndiskless-check.sh"
 install -m 0755 "$repo/deploy/ndiskless-notify.sh" "$stage/opt/ndiskless/deploy/ndiskless-notify.sh"
-# unit 打包时直接放到位，postinst 只做 daemon-reload。
+# Install the unit file directly; postinst performs daemon-reload only.
 install -m 0644 "$repo/deploy/ndiskless.service" "$stage/etc/systemd/system/ndiskless.service"
 
-# ndiskless-configure 是薄包装，让运维敲命令而不是路径。
+# ndiskless-configure is a thin wrapper so operators invoke a command rather than a path.
 cat > "$stage/usr/sbin/ndiskless-configure" <<'WRAP'
 #!/bin/sh
 # Configure this node after the package is installed: pick the pool, write env,
@@ -55,7 +55,7 @@ exec /opt/ndiskless/scripts/install-go.sh --provisioned "$@"
 WRAP
 chmod 0755 "$stage/usr/sbin/ndiskless-configure"
 
-# zfsutils-linux 会带上 Ubuntu 预编译的内核模块，不需要 dkms 和内核头文件。
+# zfsutils-linux supplies the Ubuntu prebuilt kernel module; DKMS and kernel headers are unnecessary.
 cat > "$stage/DEBIAN/control" <<EOF
 Package: ndiskless
 Version: $debver
