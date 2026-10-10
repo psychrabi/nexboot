@@ -49,7 +49,7 @@ function layoutLabel(pool) {
   const layout = pool.Layout || "stripe";
   if (layout === "mirror") {
     const groups = (pool.Groups || []).filter(g => g.Role === "data" && g.Kind === "mirror").length;
-    return groups ? `Mirror (RAID1)×${groups}` : `Mirror (RAID1)${pool.GroupWidth || 2}-way`;
+    return groups ? `Mirror (RAID1)×${groups}` : `Mirror (RAID1) · ${pool.GroupWidth || 2}-way`;
   }
   return (LAYOUTS[layout] || {}).label || layout;
 }
@@ -75,7 +75,7 @@ function poolPlan(layout, width, disks) {
   }
   const parity = RAIDZ_PARITY[layout] || 0;
   const need = parity + 2;
-  if (n < need) return { ok: false, message: `${layout} At least ${need} disks required. Select ${need - n} more (selected ${n} disks)` };
+  if (n < need) return { ok: false, message: `${layout} requires at least ${need} disks. Select ${need - n} more (selected ${n} disks)` };
   return { ok: true, message: `${layout} ≈ ${fmtCap((n - parity) * min(sizes) * 0.9)} available · tolerates ${parity} disks` };
 }
 
@@ -244,7 +244,7 @@ function PageStorage() {
       () => (target ? api.clusterCreatePool(target, body) : api.createPool(body)),
       (target ? `Storage Pool ${name} submitted on ${nodeLabel(target)}; see Task Center for results` : `Storage Pool ${name} creation task submitted (background)`)
         + (createRole === "data" ? "; services restart automatically after creating the data pool" : ""),
-      { reload: load, errMsg: "CreateFailed" });
+      { reload: load, errMsg: "Creation failed" });
     if (ok) setModal(null);
   };
 
@@ -259,7 +259,7 @@ function PageStorage() {
     }) : await conf.ask({
       title: "Destroy Storage Pool",
       message: node
-        ? `Destroy ${where} on ${pool.Name} including all images, configurations, restore points and client clones. This cannot be undone. Verify the remote node address.`
+        ? `Destroy pool ${pool.Name} on ${where}, deleting all images, configurations, restore points and client clones. This cannot be undone. Verify the remote node address.`
         : `Destroy ${pool.Name} deletes all its images, configurations, restore points and client clones permanently.`,
       danger: true, confirmText: "Destroy", typeToConfirm: node ? where : pool.Name,
     });
@@ -514,7 +514,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
     }
     if (parity) {
       if (n !== width) return { ok: false, message: n < width ? `${layout} requires full groups of ${width} disks. Select ${width - n} more (selected ${n}).` : `${layout} requires groups of ${width} disks. Remove ${n - width} disks.` };
-      return { ok: true, message: `Add 1 groups of ${layout}` };
+      return { ok: true, message: `Add one ${layout} group` };
     }
     return { ok: true, message: `Add ${n} stripe members with no redundancy` };
   };
@@ -529,7 +529,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   const expanding = picker && typeof picker === "object" && picker.expand;
   const validateSpecial = (picked) => picked.length === 2 || picked.length === 3
     ? { ok: true, message: `Add one group of ${picked.length}-way mirrored metadata disks and migrate metadata/small blocks` }
-    : { ok: false, message: `Metadata disks must be mirrored. Select 2 or 3 disks (selected ${picked.length} disks); losing it loses the entire pool` };
+    : { ok: false, message: `Metadata disks must be mirrored. Select 2 or 3 disks (selected ${picked.length}); losing them could destroy the pool.` };
   const validateRaidzExpand = (picked) => picked.length === 1
     ? { ok: true, message: `${picked[0]} will join ${picker?.expand}; raidz rebalance can take hours or days on HDDs while online` }
     : { ok: false, message: "raidz expansion supports one new disk at a time" };
