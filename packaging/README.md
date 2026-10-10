@@ -1,49 +1,39 @@
-# 打包
+# Packaging
 
-把静态二进制打成 `.deb`，再连依赖打成断网可装的离线包。
+Package the static binary into a `.deb`, then package it with its dependencies for offline installation.
 
-## 命令
+## Commands
 
 ```sh
-make deb        # dist/ndiskless_<版本>_amd64.deb
-make offline    # dist/nexboot-offline-ubuntu24.04-amd64.tar.gz（deb + 47 依赖 + install.sh）
+make deb        # dist/ndiskless_<version>_amd64.deb
+make offline    # dist/nexboot-offline-ubuntu24.04-amd64.tar.gz (deb + 47 dependencies + install.sh)
 ```
 
-版本号从 `git describe` 来（同 `--version`）；deb 版本把 tag 后的 `-N-g<hash>` 转成
-`~N-g<hash>`，好让开发构建排在正式 tag 之下。
+The version comes from `git describe` (as with `--version`). For Debian versions, the `-N-g<hash>` suffix after the tag is converted to `~N-g<hash>` so development builds sort below the corresponding release tag.
 
-## 两条硬约束
+## Two Requirements
 
-1. **必须在 Linux 上跑**：`dpkg-deb` 只在 Debian/Ubuntu 有，本机（mac）跑不了。
-   在 Ubuntu 或 CI 上执行。
-2. **`make offline` 必须在与目标同版本的 Ubuntu 上、且这台能联网**：依赖 `.deb` 是
-   按发行版拉取的，24.04 的包不能拿去装 22.04。构建机可以是办公网机器，不必是机房里的。
-   如果构建机的 apt 源够不到某个包（比如镜像没同步 security 更新），`offline-bundle.sh`
-   会**明确报告缺哪个**并说包不完整——不会静默产出一个装不上的包。
+1. **Build on Linux.** `dpkg-deb` is available on Debian/Ubuntu, not on the local macOS host. Build on Ubuntu or in CI.
+2. **Run `make offline` on an internet-connected Ubuntu system matching the target release.** Dependency `.deb` packages are release-specific: Ubuntu 24.04 packages cannot simply be installed on 22.04. The build machine can be on an office network rather than the deployment network. If an APT mirror lacks a required package (for example, because security updates are not synchronized), `offline-bundle.sh` explicitly reports the missing package and marks the bundle incomplete instead of silently creating a broken installer.
 
-## 包里放什么、不放什么
+## Package Contents and Responsibilities
 
-deb 只管**文件**：
+The Debian package installs **files only**:
 
-```
-/opt/ndiskless/ndiskless               二进制
-/opt/ndiskless/scripts/install-go.sh   配置逻辑
-/opt/ndiskless/deploy/*                unit 源 + keepalived 模板/脚本
-/etc/systemd/system/ndiskless.service  规范 unit（就是 deploy/ 那份）
-/usr/sbin/ndiskless-configure          → install-go.sh --provisioned 的包装
+```text
+/opt/ndiskless/ndiskless               Executable
+/opt/ndiskless/scripts/install-go.sh   Configuration logic
+/opt/ndiskless/deploy/*                Unit source and keepalived templates/scripts
+/etc/systemd/system/ndiskless.service  Canonical unit from deploy/
+/usr/sbin/ndiskless-configure          Wrapper for install-go.sh --provisioned
 ```
 
-deb **不选池、不写 env、不启动**——那些要现场决策，是 `ndiskless-configure` 的事。
-`postinst` 只 `daemon-reload`；`prerm` 在卸载时 stop+disable。
+The package does **not** select a storage pool, write environment configuration, or start the service. Those decisions belong to `ndiskless-configure` at deployment. `postinst` only runs `daemon-reload`; `prerm` stops and disables the service during removal.
 
-`Depends:` 声明了运行依赖（dnsmasq / qemu-utils / targetcli-fb / zfsutils-linux /
-keepalived / curl）。ZFS 内核模块随 `zfsutils-linux` 来（Ubuntu 预编译，不用 dkms）。
+`Depends:` lists runtime dependencies (dnsmasq, qemu-utils, targetcli-fb, zfsutils-linux, keepalived, curl). On Ubuntu, the ZFS kernel module is provided with the distribution's ZFS packages without a separate DKMS build.
 
-## 验证状态
+## Verification Status
 
-真机 Ubuntu 24.04（`.56`）验证过：deb 构建、结构（8 文件路径正确）、版本注入、
-`Depends`、offline-bundle 抓齐 47 依赖闭包并对够不到的包明确报错。
+On an Ubuntu 24.04 test machine (`.56`), the following were verified: Debian package build, package structure (eight expected file paths), embedded version, `Depends`, and acquisition of the full 47-package dependency closure by the offline bundler, including explicit failure messages for unavailable packages.
 
-**未在真机跑完的**：`dpkg -i` → `ndiskless-configure` → 启动的完整生命周期。它会改动
-机器状态（`prerm` 卸载时停服务），留给干净测试 VM / `topology_suite` 覆盖，不在带手工
-配置的验证机上做。
+**Not yet verified end to end on physical hardware:** `dpkg -i` → `ndiskless-configure` → service startup. This lifecycle modifies machine state (`prerm` stops the service on removal); use a clean test VM or `topology_suite` instead of a manually configured verification host.

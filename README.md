@@ -4,7 +4,7 @@
 
 **Boot a whole internet cafe, LAN center or computer lab from one master image. PXE + iSCSI + ZFS in a single Go binary, with a web console and an optional HA cluster.**
 
-**English** · [简体中文](README.zh-CN.md)
+**English** · [Simplified Chinese](README.zh-CN.md)
 
 [![Star](https://img.shields.io/github/stars/waterlemon0108/nexboot?style=for-the-badge&logo=github&color=yellow)](https://github.com/waterlemon0108/nexboot/stargazers)
 
