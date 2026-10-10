@@ -14,7 +14,7 @@ function Field({ label, required, hint, help, helpInline, helpAfterLabel, childr
       <div style={{ fontSize: 12, color: "var(--fg-mute)", marginBottom: 6, fontWeight: 500 }}>
         {label} {required && <span style={{ color: "var(--rose)" }}>*</span>}
         {help && (
-          <button type="button" className="field-help" aria-label={`${label}Help`} aria-expanded={showHelp}
+          <button type="button" className="field-help" aria-label={`Help for ${label}`} aria-expanded={showHelp}
             onClick={() => setShowHelp(v => !v)}>?</button>
         )}
         {helpAfterLabel && help && showHelp && <span className="hint" style={{ marginLeft: 8, fontWeight: 400 }}>{help}</span>}
