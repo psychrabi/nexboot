@@ -1,162 +1,133 @@
-# 端到端功能矩阵
+# End-to-End Test Matrices
 
-对着一台真实部署的服务器跑的六个矩阵。它们覆盖的是单元测试结构上够不到的东西：
-ZFS 拒绝一个操作、LIO 导出一个 LUN、分区节点出现、镜像体检真的读到了 Windows 分区。
-每一项在这里失败，都对应一个只有真机会暴露的缺陷类别。
+These matrices run against a deployed server and cover behavior that unit tests cannot verify: ZFS rejecting operations, LIO exporting LUNs, partition block devices appearing, and Windows image health checks reading real partitions. Failures in these tests can expose defects specific to physical deployments.
 
-| 脚本 | 覆盖 |
+| Script | Coverage |
 | --- | --- |
-| `config_reduction_matrix.py` | 配置与还原点：新建/派生/合并/删除，正向与异常各一遍（38 项） |
-| `boot_matrix.py` | 开机链路：烘焙、克隆命名、数据盘 LUN 与盘符对齐、删终端回收、合并中断续跑 |
-| `adaptation_matrix.py` | 超管机离线适配：克隆建出、适配脚本与 GPO 注册落盘、重复注入需显式覆盖 |
-| `driver_matrix.py` | 驱动中心：上传驱动包（解析 .inf）、组合驱动集、归档下载、注入超管机 |
-| `platform_matrix.py` | 用户增删改密与登录、告警从产生到确认到自动恢复、审计落库 |
-| `pool_matrix.py` | 存储池：建池、加盘、换盘、读写缓存增删、销毁与盘的回收 |
-| `backup_matrix.py` | 本地备份：整库一条流、DB 副本随流、合并/超管保存后增量自愈、基准丢失退全量（需 ND_BACKUP_POOL 与 ND_WINDOWS_SOURCE） |
-| `ha_matrix.py` | 双机热备：VIP 漂移计时、故障切换/回归/计划切换、隔离下激活门、双程数据存活（需 ND_NODE_A/B、ND_VIP、ND_CLUSTER_TOKEN） |
-| `cluster_matrix.py` | 三节点集群：节点注册、分组放置到存储节点、故障回退与恢复、quorum 激活门、清理路由（需 ND_NODE_A/B/C、ND_VIP、ND_CLUSTER_TOKEN） |
-| `failover_matrix.py` | 带客户机的异常切换：整机断电、网卡断链、切换正确性、旧主带未复制数据复活、隔离防脑裂、连续切换、复制中断追平 |
-| `cluster_ops_matrix.py` | 集群管理面：内部端点的认证边界、池身份按节点、集群容量聚合、按节点看盘、跨节点重启/看日志、点错节点必须拒绝（按 `ND_NODES` 的节点数自适应，单机跑降级断言） |
-| `balance_matrix.py` | 客户机放置：自动均衡摊开、上次落点粘住、显式绑定压过均衡、解绑回到均衡、节点掉线后改投健康节点 |
-| `ha_recovery_matrix.py` | 高可用自愈与人工救场：持 VIP 却是备机→自行激活、两台同时持 VIP（分区）→不得抢、不持 VIP 却是主机→退位、强制激活不跳过防双写栅栏 |
-| `topology_suite.py` | 拓扑分级驱动：把同一批机器依次拉成单机 → 双机 → 三机，每一级跑该级该有的矩阵（**破坏性**，见下） |
+| `config_reduction_matrix.py` | Configuration and restore-point creation, branching, merging, and deletion, including success and failure paths (38 cases) |
+| `boot_matrix.py` | Boot path, baked startup scripts, clone naming, data-disk LUNs and drive letters, clone reclamation after client deletion, and interrupted merge recovery |
+| `adaptation_matrix.py` | Offline Super Admin adaptation, clone creation, script and GPO registration injection, and explicit confirmation of repeat injection |
+| `driver_matrix.py` | Driver-pack upload and INF parsing, bundle creation and downloads, and Super Admin injection |
+| `platform_matrix.py` | User creation/deletion/password changes and login, alert lifecycle through acknowledgement and recovery, and audit persistence |
+| `pool_matrix.py` | Pool creation, disk additions and replacement, read/write cache changes, destruction, and disk reclamation |
+| `backup_matrix.py` | Local backups, full-database streaming with a DB copy, incremental recovery after merges/Super Admin commits, and fallback to full backup when the baseline is lost (requires `ND_BACKUP_POOL` and `ND_WINDOWS_SOURCE`) |
+| `ha_matrix.py` | Two-node HA, VIP transition timing, failover/recovery/planned switchover, fencing under isolation, and survival of data in both directions (requires `ND_NODE_A/B`, `ND_VIP`, `ND_CLUSTER_TOKEN`) |
+| `cluster_matrix.py` | Three-node clusters, node registration, placing groups on storage nodes, failback/recovery, quorum fencing, and routing cleanup (requires `ND_NODE_A/B/C`, `ND_VIP`, `ND_CLUSTER_TOKEN`) |
+| `failover_matrix.py` | Failover with clients under power loss, link failures, rejoining a former active node with unreplicated data, split-brain prevention, repeated failovers, and replication catch-up |
+| `cluster_ops_matrix.py` | Cluster management, internal endpoint authentication, pool identity per node, capacity aggregation, node-local disks, remote service restarts/log inspection, and rejecting operations sent to the wrong node (adapts to the count in `ND_NODES`) |
+| `balance_matrix.py` | Automatic client placement balance, sticky placement, explicit affinity overrides, reverting to automatic mode, and failover to a healthy node |
+| `ha_recovery_matrix.py` | HA automatic recovery and manual rescue: standby holding VIP becomes active; partitioned nodes holding VIP must not compete; an active node without VIP steps down; forced activation still respects the double-write fence |
+| `topology_suite.py` | Destructive staged topology testing: convert the same machines from standalone to two-node to three-node, running appropriate matrices at each stage |
 
-## 离线配置检查
+## Offline Configuration Checks
 
-以下检查不连接服务器，验证 `reset.py`、`wait_settled.py` 缺少 `ND_VIP` 时提前拒绝，以及按完整地址识别自定义 VIP：
+These checks need no server. They verify that `reset.py` and `wait_settled.py` reject a missing `ND_VIP` and recognize custom VIPs using the full address:
 
 ```sh
 python3 tools/e2e/test_environment.py
 ```
 
-## 前置
+## Prerequisites
 
-- 目标机已部署并可登录，本机可 `ssh` 到它（脚本用 `sshpass`，需先 `brew install sshpass` 或 `apt install sshpass`）
-- 池里有导入目录；`boot_matrix.py` 与 `adaptation_matrix.py` 还需要一个**能通过体检的真实 Windows 镜像源文件**
-  （zfs 流最快，几十秒导完）。64M 的假 raw 过不了体检，建组会被阻断。
+- A deployed, reachable server with valid login credentials and SSH access. The scripts use `sshpass`; install with `brew install sshpass` or `apt install sshpass`.
+- An import directory in the pool. `boot_matrix.py` and `adaptation_matrix.py` also require a **real Windows image source that passes health checks**. A ZFS stream can import quickly. A dummy 64 MiB raw file fails image health checks and prevents group creation.
 
-## 跑法
+## Running Cluster Matrices
 
-### 集群矩阵：用 `run/` 下的编排，别手拼环境变量
+Use the orchestration scripts under `run/`; do not manually assemble the environment variables.
 
-集群那几个矩阵要跑在**集群内部的某台节点上**（节点之间要能直连，从外面经端口转发
-够不着），而且「哪台当 A、哪台当 B」不能写死——三台都参选 VRRP 之后，虚 IP 可能
-落在任何一台，而 `ha_matrix` 要在 A 和 B 之间做计划切换，A 必须是**此刻真正在写**
-的那台。这些知识都编码在 `run/` 里了：
+Cluster test matrices must execute **on a node within the cluster**, where nodes can communicate directly. Port-forwarded requests from a development workstation are insufficient. Node A and B cannot be fixed in advance because the VIP may move to any of three VRRP participants. In `ha_matrix`, node A must be the **current active writer** during planned switchover. The run scripts handle these requirements.
 
 ```sh
 cd tools/e2e/run
-cp env.example env && vi env      # 按现场改：三台地址、VIP、口令、池名、镜像源
-./sync.sh                          # 把 harness 铺到**每台**节点（不是只铺一台）
-# 然后到任一节点上，进入 env 中 ND_E2E_DIR 指定目录的 run/ 子目录：
-./all.sh                           # 五套回归
-./one.sh backup_matrix.py          # 单跑一个，排查时用
-./topology.sh                      # 分级：单机 → 双机 → 三机（**破坏性**，会重装）
+cp env.example env && vi env     # Set node addresses, VIP, credentials, pool, and image source
+./sync.sh                        # Deploy harness to every node
+# On any cluster node, in ND_E2E_DIR/run:
+./all.sh                         # All regression suites
+./one.sh backup_matrix.py        # One suite for targeted debugging
+./topology.sh                    # Destructive standalone → two-node → three-node test
 ```
 
-`env` 含口令，已在 `.gitignore` 里；只提交 `env.example`。
+The `env` file contains secrets and is ignored by Git. Commit `env.example` only.
 
-### 没有真实 Windows 镜像时
+### Without a Real Windows Image
 
-`boot_matrix` / `backup_matrix` 需要一个**能过导入体检**的镜像源。手头没有真实
-镜像时用夹具造一个最小的（1G 表观、实占几 MB）：
+`boot_matrix` and `backup_matrix` need an image that passes import health checks. If no real Windows image is available, create a small synthetic fixture (1 GiB apparent size, only a few MiB allocated):
 
 ```sh
 sudo tools/e2e/fixtures/mkwin.sh /var/lib/ndiskless/imports/winmin.raw 1G
 ```
 
-体检的阻断项实际只有两条（`Windows/System32` 和 `drivers/msiscsi.sys`），夹具把
-它们连同网卡 INF、BCD 一并放进去。**它不代表真实 Windows 能启动**——但那两个矩阵
-断言的是流、增量、克隆命名、超管保存这些，与镜像内容无关。要验真实启动得用真镜像。
+The blocking health checks require `Windows/System32` and `drivers/msiscsi.sys`. The fixture includes these paths, NIC INF files, and BCD. **This fixture is not a bootable Windows system.** It is suitable for tests of streams, incremental changes, clone names, and Super Admin commits, where bootability is not asserted. Use a real image to test Windows startup.
 
-缺镜像源时两个矩阵会**整段跳过并说明原因**，不会空跑成一串指向别处的失败。
+Without an image source, the relevant suites **skip with an explanation** rather than recording misleading failures.
 
-### 单机矩阵：直接跑
+### Running Standalone Matrices Directly
 
 ```sh
 export ND_BASE=http://192.168.124.56:18080
-export ND_PASSWORD='...'                       # 也用作 SSH 密码，除非另设 ND_SSH_PASSWORD
-export ND_WINDOWS_SOURCE=/tank/imports/xxx.gzip # boot / adaptation 两个矩阵需要
+export ND_PASSWORD='...'                        # Also used for SSH unless ND_SSH_PASSWORD is specified
+export ND_WINDOWS_SOURCE=/tank/imports/xxx.gzip # Needed by boot and adaptation suites
 
 python3 tools/e2e/config_reduction_matrix.py
 python3 tools/e2e/boot_matrix.py
 python3 tools/e2e/adaptation_matrix.py
 python3 tools/e2e/driver_matrix.py
 python3 tools/e2e/platform_matrix.py
-python3 tools/e2e/pool_matrix.py     # 需要四块空闲块设备，见下
+python3 tools/e2e/pool_matrix.py                # Requires four unused block devices
 ```
 
-## 造测试盘（存储池矩阵）
+## Test Disks for Storage-Pool Matrices
 
-产品只把 lsblk 的 `TYPE=disk` 当候选盘，loop 回环文件不算。没有整块空闲物理盘时，
-用内核自带的 scsi_debug 造四块**互相独立**的假盘：
+The product accepts devices with `lsblk TYPE=disk` as candidate disks; loopback files do not qualify. If no spare physical drives are available, use the kernel's `scsi_debug` module to create four **independent** simulated disks:
 
 ```sh
 modprobe scsi_debug dev_size_mb=1024 add_host=4 num_tgts=1 per_host_store=1
 ```
 
-三个参数都不能省：`num_tgts=4` 会让四个 target 共用同一份存储，ZFS 会报
-「one or more vdevs refer to the same device」；`per_host_store=1` 才让每个 host
-拿到自己的后端存储。跑完 `rmmod scsi_debug` 收走，重新 modprobe 即得干净的盘。
+All parameters matter. Setting `num_tgts=4` causes targets to share backing storage, which makes ZFS report that multiple vdevs refer to the same device. `per_host_store=1` gives each host separate storage. After testing, use `rmmod scsi_debug` to remove the devices; reloading the module creates fresh ones.
 
-全部通过时退出码为 0，失败项会在末尾再列一遍。其余可调项见 `ndapi.py` 顶部注释
-（`ND_USER`/`ND_SSH_HOST`/`ND_SSH_USER`/`ND_POOL`/`ND_IMPORT_DIR`）。
+A successful suite exits with code 0 and lists failed cases again at the end. See comments at the top of `ndapi.py` for other settings: `ND_USER`, `ND_SSH_HOST`, `ND_SSH_USER`, `ND_POOL`, and `ND_IMPORT_DIR`.
 
-## 多节点矩阵的跑法
+## Running Multi-Node Matrices
 
-节点之间要能直连，所以矩阵在**集群内部**跑（把 `tools/e2e/` 复制到任一节点上执行），
-不是从开发机经端口转发打进去。
+Nodes must communicate directly, so copy `tools/e2e/` to a node inside the cluster rather than running tests through workstation port forwarding.
 
-编排在 [`run/`](run/) 里，别再手拼环境变量：变量有十来个，漏一个的后果往往是
-**静默的**（下面那条就是例子）。
+The `run/` scripts define the many required variables. Missing one may cause **silent** failures.
 
 ```sh
 cd tools/e2e/run && cp env.example env && vi env
-./sync.sh                       # 铺到每台节点
-# 到任一节点，进入 ND_E2E_DIR 指定目录的 run/ 子目录，再执行 ./all.sh
+./sync.sh                       # Copy harness to all nodes
+# On a node, enter ND_E2E_DIR/run and execute ./all.sh
 ```
 
-**`ND_PASSWORD` 与 `ND_SSH_PASSWORD` 要分清。** 混用时 SSH 会静默失败，而失败的形式是
-「读到空」——断言据此给出的是一个看起来成立的错误结论，比直接报错更难发现。
-`env.example` 把两者分开列着，就是为了不让人省掉这一步。
+**Distinguish `ND_PASSWORD` from `ND_SSH_PASSWORD`.** Using the wrong SSH password may cause commands to fail silently and return empty data, producing plausible but incorrect assertions. `env.example` declares the variables separately for this reason.
 
-## 拓扑分级套件（破坏性）
+## Destructive Topology Suite
 
-`topology_suite.py` 按产品文档的升级路径把三台机器依次拉成单机 → 双机 → 三机，
-每一级跑该级该有的矩阵。这么走而不是在三节点上「模拟」三种形态，是因为产品只支持
-往上加节点；而升级路径本身正是最容易出事的地方——第二台加入时，花名册里只有第一台
-的那一行曾被当成「本机的旧身份」。
+`topology_suite.py` follows the supported upgrade path: standalone → two nodes → three nodes, running the relevant suites at each stage. This tests the actual expansion path, not simulations of topologies on an existing three-node cluster. The system supports adding nodes, and the upgrade step itself is a source of subtle bugs: the original node was once the only entry in the roster and was treated as the local identity.
 
 ```sh
-./topology.sh                       # 在节点的 ND_E2E_DIR/run 中运行；ND_STAGES 可只跑某几级
+./topology.sh       # Run on a node under ND_E2E_DIR/run; ND_STAGES can restrict stages
 ```
 
-每一级跑的矩阵：单机跑集群管理、负载均衡、**开机链路**、**本地备份**；双机加上
-双机热备与带客户机的异常切换；三机再跑一遍开机链路（**「超管保存必须落在写入者上」
-这条只有多节点时才验得了**）与三节点集群矩阵。
+Standalone tests cover cluster management, balancing, **boot chain**, and **local backup**. Two-node tests add HA and failover with clients. Three-node tests rerun the boot chain (including the critical check that Super Admin commits go to the active writer) and run the cluster matrix.
 
-开机链路此前不被任何套件引用、只能手动单跑，于是那个「超管保存落在备机上、快照被
-复制流回滚」的缺陷躲过了很多轮——把它接进来正是为了不再发生这种事。
+Earlier, boot-path tests were only executed manually; consequently, a defect in which a Super Admin commit landed on standby and was reverted by snapshot replication escaped multiple regression cycles. Keeping the boot matrix in staged testing helps prevent recurrence.
 
-它会在每台上**清掉目录库、配置和 keepalived 后重装**。数据池留着不动：镜像、配置、
-还原点住在池里，服务启动时会重新认领回来；分组、终端、用户恢复不了，而它们恰好是
-每个矩阵自己建、自己清的。
+The suite **clears the catalogue database, configuration, and keepalived setup on each machine, then reinstalls**. Data pools are left intact: images, configurations, and restore points persist in their datasets and are rediscovered on startup. Groups, clients, and users are not recovered; the matrices create and clean up these records themselves.
 
-## 两条硬规矩
+## Important Safety Rules
 
-**不要对生产池运行。** 六个脚本都会删除并重建自己的测试镜像、分组、终端、驱动包与用户；
-`pool_matrix.py` 还会建/毁自己的存储池（只碰它自己建的那个，绝不碰已有池）。
+**Never run against production pools.** The matrices delete and recreate their own test images, groups, clients, driver packs, and users. `pool_matrix.py` creates and destroys only the test pool it created; it does not touch preexisting pools.
 
-**读结果时当心三个假失败**（脚本里已经绕开，改写时别退回去）：
+When interpreting results, avoid these false failures (existing tests handle them; preserve these safeguards when modifying tests):
 
-- 任务要在一段历史里找，不能只看最新一条——导入镜像后紧跟着自动体检任务，
-  `limit=1` 会把成功的导入判成失败。
-- 删终端走 ID（`/api/terminals/terminal-AABBCC112233`），传 MAC 得 404 且静默，
-  看起来像「克隆没回收」。
-- 列表接口与 `/boot/data-disks` 都返回 `{items:[...]}` 包装，和裸数组比会假失败。
-- 归档/导出这类返回文件的接口要用 `get_bytes()`，`call()` 按文本解码会在 zip 的第一个字节上炸。
-- 告警的 `Resource` 是镜像 **ID** 而不是显示名（导入时中文名会折成 ASCII），按显示名匹配会永远找不到。
-- 条件不具备时用 `skip()` 而不是记成通过——记成通过就是矩阵在虚报自己的覆盖。
+- Task history must be searched beyond the most recent entry. Importing an image immediately starts an image health check, so `limit=1` may hide the successful import.
+- Delete terminals by ID (`/api/terminals/terminal-AABBCC112233`), not MAC; using MAC returns 404 and can look like a failed clone cleanup.
+- List endpoints and `/boot/data-disks` return `{items:[...]}`, not plain arrays.
+- Archive/export endpoints return binary data; use `get_bytes()`. Text-decoding ZIP bytes through `call()` fails immediately.
+- An alert's `Resource` contains the image **ID**, not its display name (non-ASCII names may be normalized during import).
+- Use `skip()` when prerequisites are missing; reporting success instead would overstate test coverage.
 
-矩阵通过后，还需用真实客户机手动确认能进入桌面、数据盘盘符可见，以及
-`adapt.ps1` 在 Windows 内确实装上了驱动；这些结果不能由接口断言代替。
+After passing the matrices, manually confirm with a real client that the OS reaches the desktop, data disk drive letters appear, and `adapt.ps1` installs Windows drivers successfully. API assertions cannot replace these end-to-end observations.
