@@ -58,7 +58,7 @@ describe('API client', () => {
 
   it('Does not report session expiration for missing login error messages', async () => {
     globalThis.fetch.mockImplementation(() => respond({ status: 401, contentType: 'text/plain', body: '' }));
-    await expect(api.login('admin', 'wrong')).rejects.toThrow(/用户名或密码/);
+    await expect(api.login('admin', 'wrong')).rejects.toThrow(/Invalid username or password/);
   });
 
   // Expired tokens clear the session and notify the app shell.
@@ -110,7 +110,7 @@ describe('API client', () => {
   // URL-encode IDs, including non-ASCII configuration names and colon-separated MACs.
   it('Encodes URL path parameters', async () => {
     globalThis.fetch.mockImplementation(() => respond({ body: {} }));
-    await api.getImage('教学一班/win11');
-    expect(globalThis.fetch.mock.calls[0][0]).toBe(`/api/images/${encodeURIComponent('教学一班/win11')}`);
+    await api.getImage('Café/win11');
+    expect(globalThis.fetch.mock.calls[0][0]).toBe(`/api/images/${encodeURIComponent('Café/win11')}`);
   });
 });
