@@ -19,7 +19,7 @@ describe('Async task receipts', () => {
   beforeEach(() => vi.useFakeTimers({ shouldAdvanceTime: true }));
   afterEach(() => { vi.useRealTimers(); vi.restoreAllMocks(); });
 
-  it('Shows the task's recorded failure reason', async () => {
+  it("Shows the task's recorded failure reason", async () => {
     const toast = vi.fn();
     const reload = vi.fn();
     vi.spyOn(api, 'getTask')
