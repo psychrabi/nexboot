@@ -1,4 +1,4 @@
-// 后端没有取消、重试、删除任务的接口，所以行内不提供这些操作。
+// The backend has no cancel/retry/delete task endpoints, so those actions are not offered.
 import React from 'react';
 import { Icons } from '../icons.jsx';
 import { api } from '../../lib/api.js';
@@ -8,10 +8,10 @@ import { TASK_LABELS, fmtDateTimeSec as fmtDateTime, pad2 } from '../../lib/form
 const { useState } = React;
 
 const STATUS = {
-  pending: { t: "等待中", c: "" },
-  running: { t: "执行中", c: "cyan" },
-  success: { t: "成功", c: "emerald" },
-  failed:  { t: "失败", c: "rose" },
+  pending: { t: "Pending", c: "" },
+  running: { t: "Running", c: "cyan" },
+  success: { t: "Succeeded", c: "emerald" },
+  failed:  { t: "Failed", c: "rose" },
 };
 const duration = (t) => {
   if (!t.FinishedAt || !t.CreatedAt) return "—";
@@ -22,7 +22,7 @@ const duration = (t) => {
   return s < 60 ? `${s}s` : `${Math.floor(s / 60)}m${pad2(s % 60)}s`;
 };
 
-// shortTaskID 去掉 "task-<类型>-" 前缀，只留那串纳秒时间戳。
+// shortTaskID strips the task type prefix and retains the nanosecond timestamp.
 const shortTaskID = (id) => String(id || "").replace(/^task-[a-z_]+-/, "");
 
 function PageTasks() {
@@ -36,7 +36,7 @@ function PageTasks() {
   const total = (data && data.total) || 0;
   const unreachable = (data && data.unreachable) || [];
 
-  // 尽力查出客户机、镜像名称给「对象」列用，查不到就显示原始 MAC 或 ID。
+  // Resolve client and image names for the target column; fall back to MAC or ID.
   const { data: refData } = useResource(async () => {
     const [tr, ir] = await Promise.allSettled([api.listTerminals(), api.listImages()]);
     const items = (r) => (r.status === "fulfilled" && r.value && r.value.items) || [];
@@ -48,7 +48,7 @@ function PageTasks() {
   }, []);
   const refLabel = (ref) => {
     if (!ref) return "";
-    // 池的 ID 是「pool-<节点>--<池名>」，服务器另有一列，这里只留池名
+    // Pool IDs contain a node and pool name; since server has its own column, display only the pool name.
     const pool = /^pool-[0-9a-f]+--(.+)$/.exec(ref);
     if (pool) return pool[1];
     const norm = String(ref).replace(/[:\-.\s]/g, "").toUpperCase();
@@ -57,7 +57,7 @@ function PageTasks() {
     return ref;
   };
 
-  // 本页还有未结束的任务时自动刷新。
+  // Automatically poll while this page contains unfinished tasks.
   const hasInflight = tasks.some(t => t.Status === "running" || t.Status === "pending");
   usePolling(reload, { intervalMs: 3000, active: hasInflight });
 
@@ -65,11 +65,11 @@ function PageTasks() {
   const goPage = (p) => { setPage(p); setExpanded(null); };
 
   const filters = [
-    { id: "", label: "全部" },
-    { id: "running", label: "执行中", color: "cyan" },
-    { id: "pending", label: "等待中" },
-    { id: "success", label: "成功", color: "emerald" },
-    { id: "failed", label: "失败", color: "rose" },
+    { id: "", label: "All" },
+    { id: "running", label: "Running", color: "cyan" },
+    { id: "pending", label: "Pending" },
+    { id: "success", label: "Succeeded", color: "emerald" },
+    { id: "failed", label: "Failed", color: "rose" },
   ];
 
   return (
@@ -77,13 +77,13 @@ function PageTasks() {
       <div className="card-h">
         <SegFilter value={status} onChange={setFilter} options={filters}/>
         <div className="row" style={{ gap: 8 }}>
-          {unreachable.length > 0 && <span className="meta" style={{ color: "var(--amber)" }}>{unreachable.join("、")} 读不到，它上面的任务没有列出</span>}
-          <span className="meta">共 {total} 条{hasInflight ? " · 3 秒自动刷新" : ""}</span>
-          <button className="btn ghost icon" onClick={() => reload()} title="立即刷新" aria-label="立即刷新"><Icons.Refresh size={13}/></button>
+          {unreachable.length > 0 && <span className="meta" style={{ color: "var(--amber)" }}>{unreachable.join("、")} is unreachable; its tasks could not be listed</span>}
+          <span className="meta">Total {total} tasks{hasInflight ? " · Refreshing every 3 seconds" : ""}</span>
+          <button className="btn ghost icon" onClick={() => reload()} title="Refresh now" aria-label="Refresh now"><Icons.Refresh size={13}/></button>
         </div>
       </div>
       <table className="t">
-        <thead><tr><th>任务ID</th><th>类型</th><th>对象</th><th>服务器</th><th>进度</th><th>状态</th><th>创建时间</th><th>耗时</th></tr></thead>
+        <thead><tr><th>Task ID</th><th>Type</th><th>Target</th><th>Server</th><th>Progress</th><th>Status</th><th>Created At</th><th>Duration</th></tr></thead>
         <tbody>
           {tasks.map(t => {
             const st = STATUS[t.Status] || { t: t.Status, c: "" };
@@ -91,7 +91,7 @@ function PageTasks() {
             return (
               <React.Fragment key={t.ID}>
                 <tr style={{ cursor: "pointer" }} onClick={() => setExpanded(isOpen ? null : t.ID)}>
-                  {/* 类型自己有一列，ID 不必再带前缀；完整 ID 在 title 里。 */}
+                  {/* The Type column makes the ID prefix redundant; the full ID is in the title. */}
                   <td className="mono" style={{ fontSize: 12 }} title={t.ID}>{shortTaskID(t.ID)}</td>
                   <td style={{ whiteSpace: "nowrap" }}>{TASK_LABELS[t.Type] || t.Type}</td>
                   <td className="muted ellip" style={{ maxWidth: 220 }} title={t.TargetRef || ""}>{t.TargetName || refLabel(t.TargetRef) || t.Message || "—"}</td>
@@ -106,7 +106,7 @@ function PageTasks() {
                     {t.Status === "running" && t.Message && (
                       <div className="meta ellip" style={{ marginTop: 3, maxWidth: 220 }}>{t.Message}</div>
                     )}
-                    {/* 失败第一眼要看到的是「为什么」，不必点开。 */}
+                    {/* Show failure reasons immediately, without requiring expansion. */}
                     {t.Status === "failed" && t.Error && (
                       <div className="meta ellip" style={{ marginTop: 3, maxWidth: 340, color: "var(--rose)" }} title={t.Error}>{t.Error}</div>
                     )}
@@ -119,10 +119,10 @@ function PageTasks() {
                   <tr>
                     <td colSpan={8} style={{ background: "var(--bg-0)", padding: "10px 16px" }}>
                       <div style={{ display: "grid", gridTemplateColumns: "auto 1fr", gap: "4px 16px", fontSize: 12 }}>
-                        <span style={{ color: "var(--fg-faint)" }}>消息</span><span>{t.Message || "—"}</span>
-                        <span style={{ color: "var(--fg-faint)" }}>结果</span><span className="mono">{t.Result || "—"}</span>
-                        <span style={{ color: "var(--fg-faint)" }}>结束时间</span><span className="mono">{fmtDateTime(t.FinishedAt)}</span>
-                        {t.Error && <><span style={{ color: "var(--rose)" }}>错误</span><span style={{ color: "var(--rose)" }}>{t.Error}</span></>}
+                        <span style={{ color: "var(--fg-faint)" }}>Message</span><span>{t.Message || "—"}</span>
+                        <span style={{ color: "var(--fg-faint)" }}>Result</span><span className="mono">{t.Result || "—"}</span>
+                        <span style={{ color: "var(--fg-faint)" }}>Finished At</span><span className="mono">{fmtDateTime(t.FinishedAt)}</span>
+                        {t.Error && <><span style={{ color: "var(--rose)" }}>Error</span><span style={{ color: "var(--rose)" }}>{t.Error}</span></>}
                       </div>
                     </td>
                   </tr>
@@ -130,7 +130,7 @@ function PageTasks() {
               </React.Fragment>
             );
           })}
-          <TableState colSpan={8} loading={loading} error={error} empty={!tasks.length} hint="暂无任务"/>
+          <TableState colSpan={8} loading={loading} error={error} empty={!tasks.length} hint="No tasks"/>
         </tbody>
       </table>
       <Pager {...pager(total)} onPage={goPage} onSize={(n) => { setSize(n); setExpanded(null); }}/>
