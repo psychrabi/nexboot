@@ -14,7 +14,7 @@ afterEach(() => {
 
 // 登录页脚只能写登录前确知的两件事：运维输入的地址和服务是否健康（/healthz 公开），
 // 不得出现编造的节点名或「单节点」。
-describe('登录页页脚', () => {
+describe('Login page footer', () => {
   it('显示运维实际连接的地址，而不是编出来的主机名', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
@@ -33,18 +33,18 @@ describe('登录页页脚', () => {
   it('服务不健康时如实说，不硬画一个绿点', async () => {
     globalThis.fetch = vi.fn(async () => { throw new Error('connection refused'); });
     render(<LoginPage onLogin={() => {}}/>);
-    await waitFor(() => expect(screen.getByText(/连不上|不可用/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/Cannot reach service|Service unavailable/)).toBeTruthy());
   });
 });
 
-describe('登录页的安全提示', () => {
+describe('Login page security messaging', () => {
   // 服务端只有 ListenAndServe，登录框不得出现写死的加密承诺。
   it('明文 HTTP 打开时不承诺加密，而是提示这是内网专用', async () => {
     globalThis.fetch = vi.fn(async () => ({ ok: true, status: 200 }));
     render(<LoginPage onLogin={() => {}}/>);
     expect(screen.queryByText(/TLS/)).toBeNull();
     expect(screen.queryByText(/ENCRYPTED/i)).toBeNull();
-    expect(screen.getByText(/明文\s*HTTP/)).toBeTruthy();
+    expect(screen.getByText(/UNENCRYPTED\s*HTTP/)).toBeTruthy();
   });
 
   it('不放不通的入口：没有忘记密码死链，没有不进请求的记住设备', async () => {
