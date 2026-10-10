@@ -216,7 +216,7 @@ describe('Configurations tab', () => {
     expect(within(row).getByText('Win 11')).toBeTruthy();
     expect(within(row).getByText('0')).toBeTruthy();
     expect(within(row).getByText('Not Latest')).toBeTruthy();
-    await userEvent.click(within(row).getByRole('button', { name: /2 items/ }));
+    await userEvent.click(within(row).getByRole('button', { name: /2/ }));
     expect(await screen.findByText('Office installed')).toBeTruthy();
   });
 
@@ -368,7 +368,7 @@ describe('Restore Points tab', () => {
     await userEvent.click(await screen.findByRole('button', { name: 'Export as Image File Office installed' }));
     await userEvent.click(await screen.findByRole('button', { name: /Export to Server Directory/ }));
     await waitFor(() => expect(exportReduction).toHaveBeenCalledWith('win11_default_office'));
-    expect(await screen.findByText(/destination: 192\.168\.10\.3  on /)).toBeTruthy();
+    expect(await screen.findByText(/destination: 192\.168\.10\.3 on /)).toBeTruthy();
   });
 
   it('Omits Assign to Group from image details', async () => {
@@ -406,7 +406,7 @@ describe('Restore Points tab', () => {
     const dialog = (await screen.findByText(/Delete 2 restore points/)).closest('.card');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Delete' }));
     await waitFor(() => expect(deleteReduction).toHaveBeenCalledTimes(2));
-    expect(await screen.findByText(/work 依赖/)).toBeTruthy();
+    expect(await screen.findByText(/derived configuration work/)).toBeTruthy();
   });
 
   it('Blocks selecting or deleting the currently applied restore point', async () => {
@@ -483,9 +483,9 @@ describe('Image cards', () => {
       { ID: 's-new', Name: 'New System Disk', OSType: 'linux', State: 'normal', Purpose: 'system', CreatedAt: at('20') },
     ]) });
     renderPage();
-    await screen.findByText('新System Disk');
-    const names = [...document.querySelectorAll('.card .ellip')].map(e => e.textContent).filter(n => n.endsWith('盘'));
-    expect(names).toEqual(['旧System Disk', '新System Disk', '旧Data Disk', '新Data Disk']);
+    await screen.findByText('New System Disk');
+    const names = [...document.querySelectorAll('.card .ellip')].map(e => e.textContent).filter(n => /(?:System|Data) Disk$/.test(n));
+    expect(names).toEqual(['旧System Disk', 'New System Disk', '旧Data Disk', '新Data Disk']);
   });
 
   it('Uses disk icon for data images and OS-specific icons for system images', async () => {
@@ -671,7 +671,7 @@ describe('Server-directory import/export', () => {
     await userEvent.click(screen.getByRole('button', { name: /Export Image/ }));
     await userEvent.click(screen.getByRole('button', { name: /Export to Server Directory/ }));
     await waitFor(() => expect(exportImage).toHaveBeenCalledWith('win11'));
-    expect(await screen.findByText(/导出任务已提交，destination: 192\.168\.10\.3  on  \/var\/lib\/ndiskless\/imports\/Win 11\.zfs/)).toBeTruthy();
+    expect(await screen.findByText(/Export task submitted; destination: 192\.168\.10\.3 on \/var\/lib\/ndiskless\/imports\/Win 11\.zfs/)).toBeTruthy();
   });
 });
 
