@@ -237,7 +237,7 @@ function PageDrivers() {
           <input className="input" style={{ width: '100%' }} value={bundleForm.name}
             onChange={e => setBundleForm({ ...bundleForm, name: e.target.value })} placeholder="2026 Common NIC Boot Drivers"/>
         </Field>
-        <Field label="Boot-critical NIC Driver Packs" required hint="仅列出已Enable的 boot_critical_nic 包">
+        <Field label="Boot-critical NIC Driver Packs" required hint="Only enabled boot_critical_nic packages are listed">
           {bootPacks.length === 0
             ? <div className="muted" style={{ fontSize: 13 }}>No enabled boot-critical NIC driver packs. Upload and classify one first.</div>
             : bootPacks.map(({ pack }) => (
@@ -314,7 +314,7 @@ function DriverCureCard({ bundles, superTerminal, conf, reload }) {
       const sameBundle = pendingId === bundleId;
       const ok = await conf.ask({
         title: 'Overwrite Uncommitted Driver Changes',
-        message: `Previously injected "${bundleName(pendingId)}」（${fmtTime(superTerminal.PendingBundleAt)}），但还没做『Shut Down and Save Restore Point』。继续${sameBundle ? 're-' : ''}inject will recreate the Super Admin system disk with unsaved changes. Only the most recently injected bundle will apply on the next boot. Continue?`,
+        message: `Previously injected "${bundleName(pendingId)}" (${fmtTime(superTerminal.PendingBundleAt)}), but changes have not been saved as a restore point. Continuing to ${sameBundle ? 're-' : ''}inject will recreate the Super Admin system disk with unsaved changes. Only the most recently injected bundle will apply on the next boot. Continue?`,
         danger: true, confirmText: 'Overwrite Injection Anyway',
       });
       if (!ok) return;
