@@ -7,7 +7,7 @@ import { useResource, usePageState } from '../../lib/hooks.js';
 import { fmtDateTimeSec as fmtDateTime } from '../../lib/format.js';
 const { useState } = React;
 
-const MODULES = ["镜像", "终端", "分组", "存储", "User", "服务器", "备份", "驱动", "适配", "日志", "系统"];
+const MODULES = [["镜像", "Images"], ["终端", "Clients"], ["分组", "Groups"], ["存储", "Storage"], ["用户", "Users"], ["服务器", "Servers"], ["备份", "Backups"], ["驱动", "Drivers"], ["适配", "Adaptation"], ["日志", "Logs"], ["系统", "System"]];
 const fmtCost = (ms) => {
   ms = Number(ms || 0);
   if (ms <= 0) return "—";
