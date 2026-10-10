@@ -184,7 +184,7 @@ describe('集群节点', () => {
     const panel = await screen.findByTestId('node-services');
     await userEvent.click(within(panel).getByRole('button', { name: 'Restart' }));
     // 危险动作先问一句，问的是哪台机器上的哪个服务
-    const dialog = (await screen.findByText('RestartService')).closest('.card');
+    const dialog = (await screen.findByText('Restart Service')).closest('.card');
     expect(dialog.textContent).toContain('192.168.10.4');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Restart' }));
 
@@ -277,11 +277,11 @@ describe('集群服务矩阵', () => {
     // 主机那台的磁盘就是「运行中」
     expect(within(rowFor('192.168.10.4')).getAllByText('Running').length).toBeGreaterThan(0);
     // 有异常的那台在行上直接标出来
-    expect(within(standby).getByText(/1  issues/)).toBeTruthy();
+    expect(within(standby).getByText(/1 issues/)).toBeTruthy();
     // 行末的总判定仍是「正常」，格子里是「运行中」
     expect(within(rowFor('192.168.10.4')).getByText('Healthy')).toBeTruthy();
     // 顶部汇总与出问题的那一行各标一次
-    expect(within(list).getAllByText(/1  issues/).length).toBe(2);
+    expect(within(list).getAllByText(/1 issues/).length).toBe(2);
   });
 
   it('全部符合预期时说「全部就绪」，不数「几个在跑」', async () => {
@@ -414,7 +414,7 @@ describe('能力视角', () => {
     expect(within(cap).queryByText('target.service')).toBeNull();
     expect(within(cap).queryByText('Disabled')).toBeNull();
     expect(within(cap).queryByText('systemd Unit')).toBeNull();
-    expect(within(cap).queryByText(/开机跑完即退出/)).toBeNull();
+    expect(within(cap).queryByText(/unit exits after boot/)).toBeNull();
   });
 
   it('要排障时展开才看到单元、开机自启这些实现细节', async () => {
@@ -521,8 +521,8 @@ describe('服务器页以节点为中心', () => {
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     expect(within(list).queryByRole('button', { name: 'Details' })).toBeNull();
-    expect(screen.queryByText(/回退到Active/)).toBeNull();
-    expect(screen.queryByText(/Standby不跑 DHCP 是对的/)).toBeNull();
+    expect(screen.queryByText(/fall back to the active node/)).toBeNull();
+    expect(screen.queryByText(/DHCP should not run on standby/)).toBeNull();
   });
 });
 
@@ -596,12 +596,12 @@ describe('数据备份以节点为单位', () => {
 
     expect(within(rowFor('192.168.10.3')).getByText('w')).toBeTruthy();
     // 欠着一轮的那台要说出来，而不是画成正常
-    expect(within(rowFor('192.168.10.4')).getByText(/待同步|落后/)).toBeTruthy();
+    expect(within(rowFor('192.168.10.4')).getByText(/Pending Sync|lagging/)).toBeTruthy();
     // 没有备份池的那台不能画成正常
     expect(within(rowFor('192.168.10.5')).getByText(/No Backup Pool/)).toBeTruthy();
     expect(within(rowFor('192.168.10.5')).queryByText('Healthy')).toBeNull();
     // 表里已逐台说明，上面不再挂只有一枚标签的横幅。
-    expect(within(panel).queryByText(/ nodes存有副本/)).toBeNull();
+    expect(within(panel).queryByText(/nodes have backup copies/)).toBeNull();
   });
 });
 
@@ -850,9 +850,9 @@ describe('集群节点 · 添加节点', () => {
 
     const dialog = screen.getByTestId('adopt-nodes');
     expect(dialog.querySelectorAll('input[type="text"]').length).toBe(0); // 没有任何要填的字段
-    expect(dialog.textContent).not.toContain('池名要与集群一致'); // 各Node池名自己定
+    expect(dialog.textContent).not.toContain('Pool names must match across the cluster'); // 各Node池名自己定
     expect(dialog.textContent).toContain('Storage Pool Management');
-    await user.click(within(dialog).getByRole('button', { name: /Join Cluster|纳管/ }));
+    await user.click(within(dialog).getByRole('button', { name: /Join Cluster/ }));
 
     await waitFor(() => expect(adopt).toHaveBeenCalledWith({ address: '192.168.10.4:8080' }));
   });
