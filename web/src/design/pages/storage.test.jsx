@@ -155,7 +155,7 @@ describe('Storage management cluster aggregation', () => {
     const dlg = await openCreateDialog();
     const typeSel = within(dlg).getByLabelText('Pool Type');
     expect(optionsOf(typeSel)).toEqual(['Backup Pool']);
-    expect(within(dlg).getByText(/This node already hasData Pool tank，only a backup pool can be created/)).toBeTruthy();
+    expect(within(dlg).getByText(/This node already has data pool tank; only a backup pool can be created/)).toBeTruthy();
     await userEvent.type(within(dlg).getByPlaceholderText('tank2'), 'bak');
     await userEvent.click(within(dlg).getByRole('button', { name: /^Stripe/ }));
     await userEvent.click(await within(dlg).findByText('/dev/sdc'));
@@ -630,7 +630,7 @@ describe('Storage Pool Management', () => {
   // Show pool layout in the list and group-level degraded member details in the dialog.
   it('Displays layout and grouped details', async () => {
     renderPage();
-    expect(await screen.findByText('Mirror（RAID1）×2')).toBeTruthy();
+    expect(await screen.findByText('Mirror (RAID1)×2')).toBeTruthy();
     expect(screen.getByText('Stripe')).toBeTruthy();
 
     await userEvent.click(screen.getByText('cold'));
