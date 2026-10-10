@@ -106,7 +106,7 @@ function PageSettings() {
         Role permissions and menu management are not yet supported by the backend.
       </div>
 
-      {/* 新建 */}
+      {/* Create user */}
       <Modal open={modal === "add"} onClose={() => !busy && setModal(null)} title="Create User" size="sm"
         footer={<><button className="btn" disabled={busy} onClick={() => setModal(null)}>Cancel</button><button className="btn primary" disabled={busy} onClick={doAdd}>{busy ? "Creating…" : "Create"}</button></>}>
         <Field label="Username" required><input className="input mono" style={{ width: "100%" }} value={form.username || ""} onChange={e => setForm({ ...form, username: e.target.value })} placeholder="operator"/></Field>
@@ -190,7 +190,7 @@ function ClientNetworkSettings({ store }) {
     .concat((view.interfaces || []).map(i => ({ value: i.name, label: `${i.name} · ${(i.addrs || []).join(", ") || "No Address"}` })));
   const save = async (allow) => {
     setSaveError("");
-    const ok = await run(() => api.saveNetwork({ client_iface: chosenIface, allow_cross_subnet: allow }), allow ? "Cross-subnet groups enabled. dnsmasq will receive requests on all interfaces" : "已Save", {
+    const ok = await run(() => api.saveNetwork({ client_iface: chosenIface, allow_cross_subnet: allow }), allow ? "Cross-subnet groups enabled. dnsmasq will receive requests on all interfaces" : "Saved", {
       reload: () => { setIface(null); reload(); },
       errMsg: "Save failed",
     });
