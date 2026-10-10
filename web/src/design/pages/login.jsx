@@ -1,17 +1,18 @@
-import React from 'react';
-import { Icons } from '../icons.jsx';
-import { BRAND, Logo, Wordmark } from '../brand.jsx';
-import { api } from '../../lib/api.js';
+import React from "react";
+import { Icons } from "../icons.jsx";
+import { BRAND, Logo, Wordmark } from "../brand.jsx";
+import { api } from "../../lib/api.js";
 const { useState: useLS, useEffect: useLE, useRef: useLR } = React;
 
 // Display transport security based on the browser connection, not assumptions about server TLS.
-const secure = typeof window !== "undefined" && window.location.protocol === "https:";
+const secure =
+  typeof window !== "undefined" && window.location.protocol === "https:";
 
 function LoginBootGrid() {
   // Decorative mini-client cells simulate PXE boot.
   const [tick, setTick] = useLS(0);
   useLE(() => {
-    const id = setInterval(() => setTick(t => t + 1), 180);
+    const id = setInterval(() => setTick((t) => t + 1), 180);
     return () => clearInterval(id);
   }, []);
 
@@ -24,7 +25,7 @@ function LoginBootGrid() {
         speed: 0.5 + ((i * 13) % 15) / 10,
         ip: `10.0.${(i >> 4) + 1}.${(i & 15) * 16 + 10}`,
         seat: `T${String((i % 24) + 1).padStart(2, "0")}`,
-        flicker: ((i * 7) % 9) === 0,
+        flicker: (i * 7) % 9 === 0,
       });
     }
     return arr;
@@ -33,7 +34,7 @@ function LoginBootGrid() {
   return (
     <div className="login-grid">
       {cells.map((c, i) => {
-        const phase = ((tick * c.speed - c.offset) % 220 + 220) % 220;
+        const phase = (((tick * c.speed - c.offset) % 220) + 220) % 220;
         // 0–60 idle, 60–120 boot animation, 120–200 online, 200–220 reset.
         let state = "idle";
         if (phase < 60) state = "idle";
@@ -42,13 +43,18 @@ function LoginBootGrid() {
         else state = "off";
         const load = state === "on" ? 30 + ((i * 17 + tick) % 60) : 0;
         return (
-          <div key={i} className={`bgcell s-${state} ${c.flicker && state === "on" ? "flicker" : ""}`}>
+          <div
+            key={i}
+            className={`bgcell s-${state} ${c.flicker && state === "on" ? "flicker" : ""}`}
+          >
             <div className="bgcell-h">
-              <span className="bgdot"/>
+              <span className="bgdot" />
               <span className="bgseat">{c.seat}</span>
             </div>
             <div className="bgip">{c.ip}</div>
-            <div className="bgbar"><span style={{ width: `${load}%` }}/></div>
+            <div className="bgbar">
+              <span style={{ width: `${load}%` }} />
+            </div>
           </div>
         );
       })}
@@ -59,10 +65,25 @@ function LoginBootGrid() {
 function LoginAside() {
   // Show capabilities only; actual statistics are unavailable before login.
   const stats = [
-    { label: "Network Boot", value: "PXE", unit: "iPXE chainload", color: "emerald" },
+    {
+      label: "Network Boot",
+      value: "PXE",
+      unit: "iPXE chainload",
+      color: "emerald",
+    },
     { label: "System Disk", value: "iSCSI", unit: "Kernel LIO", color: "cyan" },
-    { label: "Restore Points", value: "ZFS", unit: "Instant clones", color: "violet" },
-    { label: "Driver Adaptation", value: "Offline", unit: "No OS boot required", color: "amber" },
+    {
+      label: "Restore Points",
+      value: "ZFS",
+      unit: "Instant clones",
+      color: "violet",
+    },
+    {
+      label: "Driver Adaptation",
+      value: "Offline",
+      unit: "No OS boot required",
+      color: "amber",
+    },
   ];
 
   // Scrolling boot log
@@ -85,52 +106,104 @@ function LoginAside() {
   }, []);
 
   const [logIdx, setLogIdx] = useLS(0);
-  useLE(() => { const id = setInterval(() => setLogIdx(i => (i + 1) % logs.length), 950); return () => clearInterval(id); }, [logs.length]);
+  useLE(() => {
+    const id = setInterval(() => setLogIdx((i) => (i + 1) % logs.length), 950);
+    return () => clearInterval(id);
+  }, [logs.length]);
   const window6 = [];
   for (let i = 0; i < 7; i++) window6.push(logs[(logIdx + i) % logs.length]);
 
   return (
     <div className="login-aside">
       <div className="login-brand">
-        <div className="login-mark"><Logo size={56}/></div>
+        <div className="login-mark">
+          <Logo size={56} />
+        </div>
         <div>
-          <div className="login-brand-name"><Wordmark size={26}/></div>
-          <div className="login-brand-sub">{BRAND.tagline} · {BRAND.taglineZh}</div>
+          <div className="login-brand-name">
+            <Wordmark size={26} />
+          </div>
+          <div className="login-brand-sub">
+            {BRAND.tagline} · {BRAND.taglineZh}
+          </div>
         </div>
       </div>
 
       <div className="login-tag">
-        <span className="mono" style={{ color: "var(--cyan)", letterSpacing: "0.18em", fontSize: 11 }}>{BRAND.motto}</span>
-        <span style={{ flex: 1 }}/>
+        <span
+          className="mono"
+          style={{
+            color: "var(--cyan)",
+            letterSpacing: "0.18em",
+            fontSize: 11,
+          }}
+        >
+          {BRAND.motto}
+        </span>
+        <span style={{ flex: 1 }} />
       </div>
 
       <div className="login-headline">
         <div className="login-eyebrow mono">ONE PLATFORM · EVERY ENDPOINT</div>
-        <h1>One platform.<br/>Manage every diskless endpoint.</h1>
-        <p>From image imports to restore points, group networks to online status,<br/>manage everything in one place.</p>
+        <h1>
+          One platform.
+          <br />
+          Manage every diskless endpoint.
+        </h1>
+        <p>
+          From image imports to restore points, group networks to online status,
+          <br />
+          manage everything in one place.
+        </p>
       </div>
 
       <div className="login-stats">
         {stats.map((s, i) => (
           <div key={i} className={`login-stat c-${s.color}`}>
             <div className="login-stat-label">{s.label}</div>
-            <div className="login-stat-num mono">{s.value}<span className="login-stat-unit"> {s.unit}</span></div>
+            <div className="login-stat-num mono">
+              {s.value}
+              <span className="login-stat-unit"> {s.unit}</span>
+            </div>
           </div>
         ))}
       </div>
 
       <div className="login-log">
         <div className="login-log-h">
-          <span className="dot cyan"/>
-          <span className="mono" style={{ fontSize: 11, color: "var(--fg-mute)", letterSpacing: "0.12em" }}>BOOT&nbsp;·&nbsp;FLOW</span>
-          <span style={{ flex: 1 }}/>
+          <span className="dot cyan" />
+          <span
+            className="mono"
+            style={{
+              fontSize: 11,
+              color: "var(--fg-mute)",
+              letterSpacing: "0.12em",
+            }}
+          >
+            BOOT&nbsp;·&nbsp;FLOW
+          </span>
+          <span style={{ flex: 1 }} />
           <span className="mono meta">Diskless boot process</span>
         </div>
         <div className="login-log-body mono">
           {window6.map((l, i) => (
-            <div key={`${logIdx}-${i}`} className="login-log-line" style={{ opacity: 0.4 + (i / window6.length) * 0.6 }}>
-              <span style={{ color: "var(--fg-faint)" }}>{String(Date.now() % 100000 + i * 7).slice(-5)} </span>
-              <span style={{ color: l.includes("[ ⋯ ]") ? "var(--amber)" : l.includes("[ OK ]") ? "var(--emerald)" : "var(--fg-mute)" }}>
+            <div
+              key={`${logIdx}-${i}`}
+              className="login-log-line"
+              style={{ opacity: 0.4 + (i / window6.length) * 0.6 }}
+            >
+              <span style={{ color: "var(--fg-faint)" }}>
+                {String((Date.now() % 100000) + i * 7).slice(-5)}{" "}
+              </span>
+              <span
+                style={{
+                  color: l.includes("[ ⋯ ]")
+                    ? "var(--amber)"
+                    : l.includes("[ OK ]")
+                      ? "var(--emerald)"
+                      : "var(--fg-mute)",
+                }}
+              >
                 {l}
               </span>
             </div>
@@ -153,7 +226,10 @@ function LoginForm({ onLogin }) {
 
   const submit = async (e) => {
     e && e.preventDefault();
-    if (!user || !pass) { setErr("Enter username and password"); return; }
+    if (!user || !pass) {
+      setErr("Enter username and password");
+      return;
+    }
     setErr("");
     setBusy(true);
     setStep("AUTH · Verifying credentials...");
@@ -179,7 +255,9 @@ function LoginForm({ onLogin }) {
         setStep(steps[i]);
         setTimeout(tick, 300);
       } else {
-        setTimeout(() => { onLogin(data.user || { username: user }); }, 200);
+        setTimeout(() => {
+          onLogin(data.user || { username: user });
+        }, 200);
       }
     };
     setTimeout(tick, 300);
@@ -187,36 +265,57 @@ function LoginForm({ onLogin }) {
 
   return (
     <form className="login-card" onSubmit={submit}>
-      <div className="login-card-corner tl"/>
-      <div className="login-card-corner tr"/>
-      <div className="login-card-corner bl"/>
-      <div className="login-card-corner br"/>
+      <div className="login-card-corner tl" />
+      <div className="login-card-corner tr" />
+      <div className="login-card-corner bl" />
+      <div className="login-card-corner br" />
 
       <div className="login-card-head">
         <div className="row" style={{ gap: 10 }}>
-          <span className={secure ? "dot cyan" : "dot amber"}/>
-          <span className="mono" style={{ fontSize: 11, letterSpacing: "0.16em", color: "var(--fg-mute)" }}>
-            {secure ? <>SECURE&nbsp;·&nbsp;TLS</> : <>PRIVATE LAN&nbsp;·&nbsp;UNENCRYPTED&nbsp;HTTP</>}
+          <span className={secure ? "dot cyan" : "dot amber"} />
+          <span
+            className="mono"
+            style={{
+              fontSize: 11,
+              letterSpacing: "0.16em",
+              color: "var(--fg-mute)",
+            }}
+          >
+            {secure ? (
+              <>SECURE&nbsp;·&nbsp;TLS</>
+            ) : (
+              <>PRIVATE LAN&nbsp;·&nbsp;UNENCRYPTED&nbsp;HTTP</>
+            )}
           </span>
         </div>
-        <div className="mono" style={{ fontSize: 11, color: "var(--fg-faint)" }}>
+        <div
+          className="mono"
+          style={{ fontSize: 11, color: "var(--fg-faint)" }}
+        >
           {new Date().toISOString().slice(0, 19).replace("T", " ")}
         </div>
       </div>
 
       <h2 className="login-title">
         Console Login
-        <span className="login-title-cursor"/>
+        <span className="login-title-cursor" />
       </h2>
-      <div className="login-sub">Sign in with an administrator account to access {BRAND.name} console</div>
+      <div className="login-sub">
+        Sign in with an administrator account to access {BRAND.name} console
+      </div>
 
       <label className="login-field">
         <span className="login-field-label">
           <span>Username</span>
-          <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 11 }}>USER</span>
+          <span
+            className="mono"
+            style={{ color: "var(--fg-faint)", fontSize: 11 }}
+          >
+            USER
+          </span>
         </span>
         <div className="login-input">
-          <Icons.Group size={14}/>
+          <Icons.Group size={14} />
           <input
             value={user}
             onChange={(e) => setUser(e.target.value)}
@@ -230,10 +329,15 @@ function LoginForm({ onLogin }) {
       <label className="login-field">
         <span className="login-field-label">
           <span>Password</span>
-          <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 11 }}>PASS</span>
+          <span
+            className="mono"
+            style={{ color: "var(--fg-faint)", fontSize: 11 }}
+          >
+            PASS
+          </span>
         </span>
         <div className="login-input">
-          <Icons.Shield size={14}/>
+          <Icons.Shield size={14} />
           <input
             type={showPass ? "text" : "password"}
             value={pass}
@@ -245,37 +349,44 @@ function LoginForm({ onLogin }) {
           <button
             type="button"
             className="login-eye"
-            onClick={() => setShowPass(s => !s)}
+            onClick={() => setShowPass((s) => !s)}
             tabIndex={-1}
             title={showPass ? "Hide" : "Show"}
           >
-            <Icons.Eye size={14}/>
+            <Icons.Eye size={14} />
           </button>
         </div>
       </label>
 
-
       {err && (
         <div className="login-err">
-          <span className="dot err"/>
+          <span className="dot err" />
           <span>{err}</span>
         </div>
       )}
 
-      <button type="submit" className={`login-submit ${busy ? "busy" : ""}`} disabled={busy}>
-        <span className="login-submit-bg"/>
+      <button
+        type="submit"
+        className={`login-submit ${busy ? "busy" : ""}`}
+        disabled={busy}
+      >
+        <span className="login-submit-bg" />
         <span className="login-submit-content">
           {busy ? (
             <>
-              <span className="login-spin"/>
-              <span className="mono" style={{ fontSize: 12 }}>{step}</span>
+              <span className="login-spin" />
+              <span className="mono" style={{ fontSize: 12 }}>
+                {step}
+              </span>
             </>
           ) : (
             <>
-              <Icons.Power size={14}/>
+              <Icons.Power size={14} />
               <span>Open Console</span>
-              <span style={{ flex: 1 }}/>
-              <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>↵</span>
+              <span style={{ flex: 1 }} />
+              <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>
+                ↵
+              </span>
             </>
           )}
         </span>
@@ -283,7 +394,7 @@ function LoginForm({ onLogin }) {
 
       {/* Only display verifiable pre-login details: the requested server address and public /healthz status.
           Node identity and cluster size are unknown before login. */}
-      <ServiceFoot/>
+      <ServiceFoot />
     </form>
   );
 }
@@ -293,26 +404,45 @@ function ServiceFoot() {
   useLE(() => {
     let alive = true;
     fetch("/healthz")
-      .then(r => alive && setHealth(r.ok ? "ok" : "bad"))
+      .then((r) => alive && setHealth(r.ok ? "ok" : "bad"))
       .catch(() => alive && setHealth("down"));
-    return () => { alive = false; };
+    return () => {
+      alive = false;
+    };
   }, []);
-  const text = health === "ok" ? "Service healthy"
-    : health === "checking" ? "Checking…"
-      : health === "bad" ? "Service unavailable"
-        : "Cannot reach service";
-  const color = health === "ok" ? "var(--emerald)" : health === "checking" ? "var(--fg-faint)" : "var(--rose)";
+  const text =
+    health === "ok"
+      ? "Service healthy"
+      : health === "checking"
+        ? "Checking…"
+        : health === "bad"
+          ? "Service unavailable"
+          : "Cannot reach service";
+  const color =
+    health === "ok"
+      ? "var(--emerald)"
+      : health === "checking"
+        ? "var(--fg-faint)"
+        : "var(--rose)";
   return (
     <div className="login-foot">
       <div className="login-foot-row">
-        <span className="mono" style={{ fontSize: 11, color: "var(--fg-faint)" }}>
+        <span
+          className="mono"
+          style={{ fontSize: 11, color: "var(--fg-faint)" }}
+        >
           {typeof window !== "undefined" ? window.location.host : ""}
         </span>
-        <span className="dot" style={{ width: 6, height: 6, background: color }}/>
+        <span
+          className="dot"
+          style={{ width: 6, height: 6, background: color }}
+        />
       </div>
       <div className="login-foot-row">
-        <span className="mono" style={{ fontSize: 11, color }}>{text}</span>
-        <Icons.Server size={11}/>
+        <span className="mono" style={{ fontSize: 11, color }}>
+          {text}
+        </span>
+        <Icons.Server size={11} />
       </div>
     </div>
   );
@@ -321,23 +451,30 @@ function ServiceFoot() {
 function LoginPage({ onLogin }) {
   return (
     <div className="login-root">
-      <LoginBootGrid/>
-      <div className="login-vignette"/>
-      <div className="login-scanline"/>
+      <LoginBootGrid />
+      <div className="login-vignette" />
+      <div className="login-scanline" />
 
       <div className="login-stage">
-        <LoginAside/>
+        <LoginAside />
         <div className="login-form-wrap">
-          <LoginForm onLogin={onLogin}/>
+          <LoginForm onLogin={onLogin} />
         </div>
       </div>
 
       <div className="login-bottom">
-        <span className="mono" style={{ fontSize: 11, color: "var(--fg-faint)", letterSpacing: "0.12em" }}>
+        <span
+          className="mono"
+          style={{
+            fontSize: 11,
+            color: "var(--fg-faint)",
+            letterSpacing: "0.12em",
+          }}
+        >
           © NEXBOOT · DISKLESS ENDPOINT PLATFORM
           {secure ? " · TLS" : " · Deploy on a dedicated management/PXE subnet"}
         </span>
-        <span style={{ flex: 1 }}/>
+        <span style={{ flex: 1 }} />
         <span className="mono meta">English · Browser locale</span>
       </div>
     </div>

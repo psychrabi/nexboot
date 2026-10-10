@@ -1,9 +1,9 @@
 // Overlay system ──────────────────────────────────────────────────────────
 // Coordinate backdrops, stacking order, transitions, Escape/backdrop dismissal, and body scroll locking.
 // The placement option selects center (modal), drawer (right), or top (command palette).
-import React from 'react';
-import { createPortal } from 'react-dom';
-import { Icons } from './icons.jsx';
+import React from "react";
+import { createPortal } from "react-dom";
+import { Icons } from "./icons.jsx";
 
 const MODAL_SIZE = { sm: 440, md: 560, lg: 700, xl: 820 };
 // A shared stack ensures Escape closes only the topmost overlay; unlock scrolling after the final overlay closes.
@@ -11,7 +11,17 @@ const overlayStack = [];
 // Capture the original scroll style once, when the stack first becomes nonempty; otherwise nested overlays can leave scrolling locked.
 let bodyOverflowBeforeLock = "";
 
-function Overlay({ open, onClose, placement = "center", size = "md", width, closeOnBackdrop = true, className, panelStyle, children }) {
+function Overlay({
+  open,
+  onClose,
+  placement = "center",
+  size = "md",
+  width,
+  closeOnBackdrop = true,
+  className,
+  panelStyle,
+  children,
+}) {
   // Callers often pass inline onClose handlers; putting them in effect dependencies would reorder the stack every render.
   const onCloseRef = React.useRef(onClose);
   onCloseRef.current = onClose;
@@ -24,30 +34,46 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
     }
     overlayStack.push(token);
     const onKey = (e) => {
-      if (e.key === "Escape" && onCloseRef.current && overlayStack[overlayStack.length - 1] === token) onCloseRef.current();
+      if (
+        e.key === "Escape" &&
+        onCloseRef.current &&
+        overlayStack[overlayStack.length - 1] === token
+      )
+        onCloseRef.current();
     };
     document.addEventListener("keydown", onKey);
     return () => {
       document.removeEventListener("keydown", onKey);
       const i = overlayStack.indexOf(token);
       if (i >= 0) overlayStack.splice(i, 1);
-      if (overlayStack.length === 0) document.body.style.overflow = bodyOverflowBeforeLock;
+      if (overlayStack.length === 0)
+        document.body.style.overflow = bodyOverflowBeforeLock;
     };
   }, [open]);
   if (!open) return null;
 
   const w = width || MODAL_SIZE[size] || MODAL_SIZE.md;
   const scrim = {
-    position: "fixed", inset: 0, zIndex: "var(--z-overlay)",
-    background: "var(--overlay-scrim)", backdropFilter: "blur(4px)",
-    display: "grid", animation: "fadeIn 0.15s",
+    position: "fixed",
+    inset: 0,
+    zIndex: "var(--z-overlay)",
+    background: "var(--overlay-scrim)",
+    backdropFilter: "blur(4px)",
+    display: "grid",
+    animation: "fadeIn 0.15s",
   };
   let panel;
   if (placement === "drawer") {
     scrim.placeItems = "stretch end";
-    panel = { width: w, maxWidth: "100vw", height: "100%", animation: "slideIn 0.2s ease" };
+    panel = {
+      width: w,
+      maxWidth: "100vw",
+      height: "100%",
+      animation: "slideIn 0.2s ease",
+    };
   } else if (placement === "top") {
-    scrim.placeItems = "start center"; scrim.paddingTop = "12vh";
+    scrim.placeItems = "start center";
+    scrim.paddingTop = "12vh";
     panel = { width: w, maxWidth: "94vw", maxHeight: "60vh" };
   } else {
     scrim.placeItems = "center";
@@ -57,8 +83,17 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
   // which would otherwise shift centered dialogs.
   return createPortal(
     <div style={scrim} onClick={() => closeOnBackdrop && onClose && onClose()}>
-      <div onClick={e => e.stopPropagation()} className={className}
-        style={{ display: "flex", flexDirection: "column", overflow: "hidden", ...panel, ...panelStyle }}>
+      <div
+        onClick={(e) => e.stopPropagation()}
+        className={className}
+        style={{
+          display: "flex",
+          flexDirection: "column",
+          overflow: "hidden",
+          ...panel,
+          ...panelStyle,
+        }}
+      >
         {children}
       </div>
     </div>,
@@ -69,13 +104,36 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
 // Modal is the centered variant with a standard card, title, close control, and footer.
 function Modal({ open, onClose, title, children, footer, size = "md", width }) {
   return (
-    <Overlay open={open} onClose={onClose} placement="center" size={size} width={width} className="card">
+    <Overlay
+      open={open}
+      onClose={onClose}
+      placement="center"
+      size={size}
+      width={width}
+      className="card"
+    >
       <div className="card-h">
-        <div className="card-title-zh" style={{ fontSize: 14 }}>{title}</div>
-        <button className="btn ghost icon" onClick={onClose}><Icons.X size={14}/></button>
+        <div className="card-title-zh" style={{ fontSize: 14 }}>
+          {title}
+        </div>
+        <button className="btn ghost icon" onClick={onClose}>
+          <Icons.X size={14} />
+        </button>
       </div>
       <div style={{ padding: 18, overflowY: "auto", flex: 1 }}>{children}</div>
-      {footer && <div style={{ padding: "12px 18px", borderTop: "1px solid var(--line-soft)", display: "flex", justifyContent: "flex-end", gap: 8 }}>{footer}</div>}
+      {footer && (
+        <div
+          style={{
+            padding: "12px 18px",
+            borderTop: "1px solid var(--line-soft)",
+            display: "flex",
+            justifyContent: "flex-end",
+            gap: 8,
+          }}
+        >
+          {footer}
+        </div>
+      )}
     </Overlay>
   );
 }
@@ -88,28 +146,78 @@ function ConfirmProvider({ children }) {
   const [state, setState] = React.useState(null);
   const [typed, setTyped] = React.useState("");
   const ask = React.useCallback(
-    (opts) => new Promise(resolve => { setTyped(""); setState({ ...opts, resolve }); }),
+    (opts) =>
+      new Promise((resolve) => {
+        setTyped("");
+        setState({ ...opts, resolve });
+      }),
     [],
   );
-  const close = (answer) => { state?.resolve(answer); setState(null); };
+  const close = (answer) => {
+    state?.resolve(answer);
+    setState(null);
+  };
   const locked = !!state?.typeToConfirm && typed !== state.typeToConfirm;
   return (
     <ConfirmContext.Provider value={ask}>
       {children}
       {state && (
-        <Modal open size="sm" onClose={() => close(false)} title={state.title || "Confirm Action"}
-          footer={<>
-            <button className="btn" onClick={() => close(false)}>Cancel</button>
-            <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={locked} onClick={() => close(true)}>{state.confirmText || "Confirm"}</button>
-          </>}>
-          <div style={{ fontSize: 14, color: "var(--fg-mute)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{state.message}</div>
+        <Modal
+          open
+          size="sm"
+          onClose={() => close(false)}
+          title={state.title || "Confirm Action"}
+          footer={
+            <>
+              <button className="btn" onClick={() => close(false)}>
+                Cancel
+              </button>
+              <button
+                className={`btn ${state.danger ? "danger" : "primary"}`}
+                disabled={locked}
+                onClick={() => close(true)}
+              >
+                {state.confirmText || "Confirm"}
+              </button>
+            </>
+          }
+        >
+          <div
+            style={{
+              fontSize: 14,
+              color: "var(--fg-mute)",
+              lineHeight: 1.6,
+              whiteSpace: "pre-wrap",
+            }}
+          >
+            {state.message}
+          </div>
           {state.typeToConfirm && (
             <div style={{ marginTop: 12 }}>
-              <div style={{ fontSize: 12, color: "var(--fg-faint)", marginBottom: 6 }}>
-                Enter <span className="mono" style={{ color: "var(--rose)", fontWeight: 600 }}>{state.typeToConfirm}</span> to confirm:
+              <div
+                style={{
+                  fontSize: 12,
+                  color: "var(--fg-faint)",
+                  marginBottom: 6,
+                }}
+              >
+                Enter{" "}
+                <span
+                  className="mono"
+                  style={{ color: "var(--rose)", fontWeight: 600 }}
+                >
+                  {state.typeToConfirm}
+                </span>{" "}
+                to confirm:
               </div>
-              <input className="input mono" style={{ width: "100%" }} value={typed} autoFocus
-                onChange={e => setTyped(e.target.value)} placeholder={state.typeToConfirm}/>
+              <input
+                className="input mono"
+                style={{ width: "100%" }}
+                value={typed}
+                autoFocus
+                onChange={(e) => setTyped(e.target.value)}
+                placeholder={state.typeToConfirm}
+              />
             </div>
           )}
         </Modal>

@@ -1,19 +1,30 @@
 // Operation logs are recorded by audit middleware; login attempts are logged by the login handler.
-import React from 'react';
-import { Icons } from '../icons.jsx';
-import { Select, SearchBox, TableState, Pager } from '../primitives.jsx';
-import { api } from '../../lib/api.js';
-import { useResource, usePageState } from '../../lib/hooks.js';
-import { fmtDateTimeSec as fmtDateTime } from '../../lib/format.js';
+import React from "react";
+import { Icons } from "../icons.jsx";
+import { Select, SearchBox, TableState, Pager } from "../primitives.jsx";
+import { api } from "../../lib/api.js";
+import { useResource, usePageState } from "../../lib/hooks.js";
+import { fmtDateTimeSec as fmtDateTime } from "../../lib/format.js";
 const { useState } = React;
 
-const MODULES = [["镜像", "Images"], ["终端", "Clients"], ["分组", "Groups"], ["存储", "Storage"], ["用户", "Users"], ["服务器", "Servers"], ["备份", "Backups"], ["驱动", "Drivers"], ["适配", "Adaptation"], ["日志", "Logs"], ["系统", "System"]];
+const MODULES = [
+  ["镜像", "Images"],
+  ["终端", "Clients"],
+  ["分组", "Groups"],
+  ["存储", "Storage"],
+  ["用户", "Users"],
+  ["服务器", "Servers"],
+  ["备份", "Backups"],
+  ["驱动", "Drivers"],
+  ["适配", "Adaptation"],
+  ["日志", "Logs"],
+  ["系统", "System"],
+];
 const fmtCost = (ms) => {
   ms = Number(ms || 0);
   if (ms <= 0) return "—";
   return ms < 1000 ? `${ms}ms` : `${(ms / 1000).toFixed(1)}s`;
 };
-
 
 function PageLogs() {
   const [tab, setTab] = useState("operation");
@@ -23,71 +34,245 @@ function PageLogs() {
   const [statusF, setStatusF] = useState("");
   const { page, size, setPage, pager } = usePageState();
 
-  const { data, loading, error, reload: load } = useResource(() => api.listLogs({
-    type: tab,
-    q: appliedQ,
-    module: tab === "operation" ? moduleF : "",
-    status: statusF,
-    page, size,
-  }), [tab, appliedQ, moduleF, statusF, page, size]);
+  const {
+    data,
+    loading,
+    error,
+    reload: load,
+  } = useResource(
+    () =>
+      api.listLogs({
+        type: tab,
+        q: appliedQ,
+        module: tab === "operation" ? moduleF : "",
+        status: statusF,
+        page,
+        size,
+      }),
+    [tab, appliedQ, moduleF, statusF, page, size],
+  );
   const items = (data && data.items) || [];
   const total = (data && data.total) || 0;
 
-  const apply = () => { setPage(1); if (appliedQ === q) load(); else setAppliedQ(q); };
-  const switchTab = (t) => { setTab(t); setModuleF(""); setPage(1); };
+  const apply = () => {
+    setPage(1);
+    if (appliedQ === q) load();
+    else setAppliedQ(q);
+  };
+  const switchTab = (t) => {
+    setTab(t);
+    setModuleF("");
+    setPage(1);
+  };
   const isOp = tab === "operation";
 
   return (
-    <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
+    <div
+      className="fade-in"
+      style={{ display: "flex", flexDirection: "column", gap: 14 }}
+    >
       <div className="tabs">
-        <div className={`tab ${isOp ? "active" : ""}`} onClick={() => switchTab("operation")}>Operation Logs</div>
-        <div className={`tab ${!isOp ? "active" : ""}`} onClick={() => switchTab("login")}>Login Logs</div>
-        <div style={{ flex: 1 }}/>
+        <div
+          className={`tab ${isOp ? "active" : ""}`}
+          onClick={() => switchTab("operation")}
+        >
+          Operation Logs
+        </div>
+        <div
+          className={`tab ${!isOp ? "active" : ""}`}
+          onClick={() => switchTab("login")}
+        >
+          Login Logs
+        </div>
+        <div style={{ flex: 1 }} />
       </div>
 
-      <div className="card" style={{ padding: "10px 14px", display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
-        <SearchBox value={q} onChange={setQ} onSubmit={apply} placeholder={isOp ? "User / Action / Details" : "User / Message"}/>
-        {isOp && <Select value={moduleF} onChange={v => { setModuleF(v); setPage(1); }} options={[{ value: "", label: "All Modules" }, ...MODULES.map(([value, label]) => ({ value, label }))]} style={{ width: 130 }}/>}
-        <Select value={statusF} onChange={v => { setStatusF(v); setPage(1); }} options={[{ value: "", label: "All Statuses" }, { value: "ok", label: "Success" }, { value: "err", label: "Failed" }]} style={{ width: 110 }}/>
-        <button className="btn" onClick={() => apply()}><Icons.Search size={12}/> Search</button>
-        <div style={{ flex: 1 }}/>
+      <div
+        className="card"
+        style={{
+          padding: "10px 14px",
+          display: "flex",
+          alignItems: "center",
+          gap: 10,
+          flexWrap: "wrap",
+        }}
+      >
+        <SearchBox
+          value={q}
+          onChange={setQ}
+          onSubmit={apply}
+          placeholder={isOp ? "User / Action / Details" : "User / Message"}
+        />
+        {isOp && (
+          <Select
+            value={moduleF}
+            onChange={(v) => {
+              setModuleF(v);
+              setPage(1);
+            }}
+            options={[
+              { value: "", label: "All Modules" },
+              ...MODULES.map(([value, label]) => ({ value, label })),
+            ]}
+            style={{ width: 130 }}
+          />
+        )}
+        <Select
+          value={statusF}
+          onChange={(v) => {
+            setStatusF(v);
+            setPage(1);
+          }}
+          options={[
+            { value: "", label: "All Statuses" },
+            { value: "ok", label: "Success" },
+            { value: "err", label: "Failed" },
+          ]}
+          style={{ width: 110 }}
+        />
+        <button className="btn" onClick={() => apply()}>
+          <Icons.Search size={12} /> Search
+        </button>
+        <div style={{ flex: 1 }} />
         <span className="meta">Total {total} entries</span>
-        <button className="btn ghost icon" onClick={() => load()}><Icons.Refresh size={14}/></button>
+        <button className="btn ghost icon" onClick={() => load()}>
+          <Icons.Refresh size={14} />
+        </button>
       </div>
 
       <div className="card" style={{ padding: 0 }}>
         <table className="t">
           {isOp ? (
-            <thead><tr><th>Time</th><th>User</th><th>Module</th><th>Action</th><th>Details</th><th>IP</th><th>Duration</th><th>Status</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>Module</th>
+                <th>Action</th>
+                <th>Details</th>
+                <th>IP</th>
+                <th>Duration</th>
+                <th>Status</th>
+              </tr>
+            </thead>
           ) : (
-            <thead><tr><th>Time</th><th>User</th><th>IP</th><th>Client</th><th>Result</th><th>Status</th></tr></thead>
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>User</th>
+                <th>IP</th>
+                <th>Client</th>
+                <th>Result</th>
+                <th>Status</th>
+              </tr>
+            </thead>
           )}
           <tbody>
-            {items.map(l => isOp ? (
-              <tr key={l.ID}>
-                <td className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(l.CreatedAt)}</td>
-                <td><div className="row" style={{ gap: 6 }}><div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--bg-3)", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 600 }}>{(l.Username || "?").charAt(0).toUpperCase()}</div>{l.Username || "—"}</div></td>
-                <td><span className="chip">{l.Module || "—"}</span></td>
-                <td>{l.Action || "—"}</td>
-                <td className="mono muted ellip" style={{ fontSize: 12, maxWidth: 280 }} title={l.Detail || ""}>{l.Detail || "—"}</td>
-                <td className="mono muted" style={{ fontSize: 12 }}>{l.IP || "—"}</td>
-                <td className="mono muted" style={{ fontSize: 12 }}>{fmtCost(l.CostMs)}</td>
-                <td>{l.Status === "ok" ? <span className="chip emerald">Success</span> : <span className="chip rose">Failed{l.HTTPStatus ? ` · ${l.HTTPStatus}` : ""}</span>}</td>
-              </tr>
-            ) : (
-              <tr key={l.ID}>
-                <td className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(l.CreatedAt)}</td>
-                <td><div className="row" style={{ gap: 6 }}><div style={{ width: 22, height: 22, borderRadius: "50%", background: "var(--bg-3)", display: "grid", placeItems: "center", fontSize: 11, fontWeight: 600 }}>{(l.Username || "?").charAt(0).toUpperCase()}</div>{l.Username || "—"}</div></td>
-                <td className="mono">{l.IP || "—"}</td>
-                <td className="muted ellip" style={{ fontSize: 12, maxWidth: 320 }} title={l.UserAgent || ""}>{l.UserAgent || "—"}</td>
-                <td>{l.Action || "—"}</td>
-                <td>{l.Status === "ok" ? <span className="chip emerald">Success</span> : <span className="chip rose">Failed</span>}</td>
-              </tr>
-            ))}
-            <TableState colSpan={isOp ? 8 : 6} loading={loading} error={error} empty={!items.length} hint="No logs"/>
+            {items.map((l) =>
+              isOp ? (
+                <tr key={l.ID}>
+                  <td className="mono muted" style={{ fontSize: 12 }}>
+                    {fmtDateTime(l.CreatedAt)}
+                  </td>
+                  <td>
+                    <div className="row" style={{ gap: 6 }}>
+                      <div
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: "var(--bg-3)",
+                          display: "grid",
+                          placeItems: "center",
+                          fontSize: 11,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {(l.Username || "?").charAt(0).toUpperCase()}
+                      </div>
+                      {l.Username || "—"}
+                    </div>
+                  </td>
+                  <td>
+                    <span className="chip">{l.Module || "—"}</span>
+                  </td>
+                  <td>{l.Action || "—"}</td>
+                  <td
+                    className="mono muted ellip"
+                    style={{ fontSize: 12, maxWidth: 280 }}
+                    title={l.Detail || ""}
+                  >
+                    {l.Detail || "—"}
+                  </td>
+                  <td className="mono muted" style={{ fontSize: 12 }}>
+                    {l.IP || "—"}
+                  </td>
+                  <td className="mono muted" style={{ fontSize: 12 }}>
+                    {fmtCost(l.CostMs)}
+                  </td>
+                  <td>
+                    {l.Status === "ok" ? (
+                      <span className="chip emerald">Success</span>
+                    ) : (
+                      <span className="chip rose">
+                        Failed{l.HTTPStatus ? ` · ${l.HTTPStatus}` : ""}
+                      </span>
+                    )}
+                  </td>
+                </tr>
+              ) : (
+                <tr key={l.ID}>
+                  <td className="mono muted" style={{ fontSize: 12 }}>
+                    {fmtDateTime(l.CreatedAt)}
+                  </td>
+                  <td>
+                    <div className="row" style={{ gap: 6 }}>
+                      <div
+                        style={{
+                          width: 22,
+                          height: 22,
+                          borderRadius: "50%",
+                          background: "var(--bg-3)",
+                          display: "grid",
+                          placeItems: "center",
+                          fontSize: 11,
+                          fontWeight: 600,
+                        }}
+                      >
+                        {(l.Username || "?").charAt(0).toUpperCase()}
+                      </div>
+                      {l.Username || "—"}
+                    </div>
+                  </td>
+                  <td className="mono">{l.IP || "—"}</td>
+                  <td
+                    className="muted ellip"
+                    style={{ fontSize: 12, maxWidth: 320 }}
+                    title={l.UserAgent || ""}
+                  >
+                    {l.UserAgent || "—"}
+                  </td>
+                  <td>{l.Action || "—"}</td>
+                  <td>
+                    {l.Status === "ok" ? (
+                      <span className="chip emerald">Success</span>
+                    ) : (
+                      <span className="chip rose">Failed</span>
+                    )}
+                  </td>
+                </tr>
+              ),
+            )}
+            <TableState
+              colSpan={isOp ? 8 : 6}
+              loading={loading}
+              error={error}
+              empty={!items.length}
+              hint="No logs"
+            />
           </tbody>
         </table>
-        <Pager {...pager(total)}/>
+        <Pager {...pager(total)} />
       </div>
     </div>
   );
