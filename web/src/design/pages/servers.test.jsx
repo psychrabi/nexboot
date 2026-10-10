@@ -26,8 +26,8 @@ const renderPage = () => render(
 
 const rowOf = async (source) => (await screen.findByText(source)).closest('tr');
 
-// 防止没有失败记录就画成「正常」：只有真正存下副本的行才算正常。
-describe('数据备份的每行状态', () => {
+// Healthy backup state requires an actual stored copy, not simply the absence of recorded errors.
+describe('Per-node backup status', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function stubNodes(nodes) {
@@ -36,7 +36,7 @@ describe('数据备份的每行状态', () => {
     ], total: 1 });
     vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: [] });
     vi.spyOn(api, 'getBackupStatus').mockResolvedValue({
-      config: { enabled: true, schedule: 'daily@03:00', schedule_text: '每天 03:00' },
+      config: { enabled: true, schedule: 'daily@03:00', schedule_text: 'Daily 03:00' },
       node: {},
     });
     vi.spyOn(api, 'listClusterBackups').mockResolvedValue({
@@ -50,7 +50,7 @@ describe('数据备份的每行状态', () => {
     return (await within(panel).findByText(ip)).closest('tr');
   };
 
-  it('没有备份池时不说「正常」，并且点明没有池', async () => {
+  it('Indicates missing backup pool instead of Healthy', async () => {
     const nodes = [{ node_id: 'b', ip: '192.168.10.3', role: 'active', online: true, reachable: true, backup_pool: '' }];
     stubNodes(nodes);
     let resolveBackups;
@@ -62,11 +62,11 @@ describe('数据备份的每行状态', () => {
     const row = await rowPending;
     expect(within(row).queryByText('Healthy')).toBeNull();
     expect(within(row).getByText('No Backup Pool')).toBeTruthy();
-    // 空的池名会让整列没有内容，看着像坏了；缺值一律用 — 占位
+    // Use an em dash for missing pool names so rows remain legible.
     expect(row.cells[2].textContent).toBe('—');
   });
 
-  it('有池但一次都没存过，是「待备份」而不是「正常」', async () => {
+  it('Shows Pending Backup until the first copy exists', async () => {
     stubNodes([{ node_id: 'b', ip: '192.168.10.3', role: 'active', online: true, reachable: true, backup_pool: 'w' }]);
     renderPage();
     const row = await rowOfNode('192.168.10.3');
@@ -75,7 +75,7 @@ describe('数据备份的每行状态', () => {
     expect(within(row).getByText('w')).toBeTruthy();
   });
 
-  it('真的存下副本才是「正常」', async () => {
+  it('Reports Healthy only when a copy exists', async () => {
     stubNodes([{ node_id: 'b', ip: '192.168.10.3', role: 'active', online: true, reachable: true,
                  backup_pool: 'w', last_backup_at: '2026-08-23T03:00:00Z' }]);
     renderPage();
@@ -83,8 +83,8 @@ describe('数据备份的每行状态', () => {
     expect(within(row).getByText('Healthy')).toBeTruthy();
   });
 
-  it('读不到那台的状态就说读不到，不拿旧值充数', async () => {
-    stubNodes([{ node_id: 'c', ip: '192.168.10.5', role: 'standby', online: false, reachable: false, error: '节点失联' }]);
+  it('Reports unreachable nodes rather than stale backup state', async () => {
+    stubNodes([{ node_id: 'c', ip: '192.168.10.5', role: 'standby', online: false, reachable: false, error: 'Node unreachable' }]);
     renderPage();
     const row = await rowOfNode('192.168.10.5');
     expect(within(row).getByText('Node unreachable')).toBeTruthy();
@@ -92,7 +92,7 @@ describe('数据备份的每行状态', () => {
   });
 });
 
-describe('集群节点', () => {
+describe('Cluster Nodes', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const NODES = (items) => ({ items, total: items.length });
@@ -105,18 +105,18 @@ describe('集群节点', () => {
     vi.spyOn(api, 'listClusterNodes').mockResolvedValue(NODES(items));
   }
 
-  it('多节点时列出每一台，并标出谁是主机、谁掉线', async () => {
+  it('Lists every node and identifies active/offline status', async () => {
     stubCluster([
       { id: 'a', name: 'a', ip: '192.168.10.3', portal_ip: '192.168.10.3', ha_state: 'standby', online: true },
       { id: 'b', name: 'b', ip: '192.168.10.4', portal_ip: '192.168.10.250', ha_state: 'active', online: true },
       { id: 'c', name: 'c', ip: '192.168.10.5', portal_ip: '192.168.10.5', ha_state: 'standby', online: false },
     ]);
     renderPage();
-    // 规模写在徽章上，不再是写死的「单节点」
+    // Node count comes from the badge, never a hard-coded single-node label.
     const badge = await screen.findAllByText(/3\s*Node/);
     expect(badge.length).toBeGreaterThan(0);
     expect(screen.queryByText(/single node/)).toBeNull();
-    // 一行一台：节点多了也不会把服务名重复印 N 遍
+    // Show one row per node; avoid repeating service headings in every row.
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr'))
       .find(tr => tr.textContent.includes(ip));
@@ -126,8 +126,8 @@ describe('集群节点', () => {
     expect(within(rowFor('192.168.10.3')).getByText(/Standby/)).toBeTruthy();
   });
 
-  // 每个服务必须是真列，表头和格子由表格自己对齐。
-  it('每个服务是真正的一列，表头和内容对得上', async () => {
+  // Render each service as a real table column with aligned headers and cells.
+  it('Aligns service column headings and cells', async () => {
     stubCluster([
       { id: 'a', name: 'a', ip: '192.168.10.3', ha_state: 'active', online: true },
       { id: 'b', name: 'b', ip: '192.168.10.4', ha_state: 'standby', online: true },
@@ -136,11 +136,11 @@ describe('集群节点', () => {
       nodes: [
         { node_id: 'a', ip: '192.168.10.3', role: 'active', reachable: true, services: [
           { key: 'dnsmasq', label: 'dnsmasq', capability: 'DHCP', unit: 'dnsmasq.service', ok: true, state: 'running' },
-          { key: 'target', label: 'target', capability: '磁盘服务', unit: 'target.service', ok: true, state: 'running' },
+          { key: 'target', label: 'target', capability: 'Disk Service', unit: 'target.service', ok: true, state: 'running' },
         ] },
         { node_id: 'b', ip: '192.168.10.4', role: 'standby', reachable: true, services: [
-          { key: 'dnsmasq', label: 'dnsmasq', capability: 'DHCP', unit: 'dnsmasq.service', ok: true, state: 'inactive', provided: '由主机提供' },
-          { key: 'target', label: 'target', capability: '磁盘服务', unit: 'target.service', ok: true, state: 'running' },
+          { key: 'dnsmasq', label: 'dnsmasq', capability: 'DHCP', unit: 'dnsmasq.service', ok: true, state: 'inactive', provided: 'Provided by Active' },
+          { key: 'target', label: 'target', capability: 'Disk Service', unit: 'target.service', ok: true, state: 'running' },
         ] },
       ],
     });
@@ -149,7 +149,7 @@ describe('集群节点', () => {
     await waitFor(() => expect(within(list).getAllByText('DHCP').length).toBeGreaterThan(0));
     const headers = Array.from(list.querySelectorAll('thead th'));
     expect(headers.map(h => h.textContent)).toContain('DHCP');
-    // 表头列数 = 每行单元格数，才谈得上对齐
+    // Headers and rows must have matching column counts.
     for (const tr of list.querySelectorAll('tbody tr')) {
       const cells = Array.from(tr.querySelectorAll('td'));
       const span = cells.reduce((n, td) => n + (Number(td.getAttribute('colspan')) || 1), 0);
@@ -157,8 +157,8 @@ describe('集群节点', () => {
     }
   });
 
-  // 出故障的节点往往最难 SSH 上去，控制台要能直接重启它的服务。
-  it('可以重启别的节点的服务，并且指名道姓', async () => {
+  // Allow remote service restarts from the console when SSH is unavailable.
+  it('Restarts named services on remote nodes', async () => {
     stubCluster([
       { id: 'a', name: 'a', ip: '192.168.10.3', ha_state: 'active', online: true },
       { id: 'b', name: 'b', ip: '192.168.10.4', ha_state: 'standby', online: true },
@@ -169,7 +169,7 @@ describe('集群节点', () => {
           { key: 'dnsmasq', label: 'dnsmasq', capability: 'DHCP', unit: 'dnsmasq.service', ok: true, status: 'running', installed: true },
         ] },
         { node_id: 'b', ip: '192.168.10.4', role: 'standby', reachable: true, services: [
-          { key: 'target', label: 'target', capability: '磁盘服务', unit: 'target.service', ok: true, status: 'running', installed: true },
+          { key: 'target', label: 'target', capability: 'Disk Service', unit: 'target.service', ok: true, status: 'running', installed: true },
         ] },
       ],
     });
@@ -183,7 +183,7 @@ describe('集群节点', () => {
 
     const panel = await screen.findByTestId('node-services');
     await userEvent.click(within(panel).getByRole('button', { name: 'Restart' }));
-    // 危险动作先问一句，问的是哪台机器上的哪个服务
+    // Confirm the exact service and node before dangerous actions.
     const dialog = (await screen.findByText('Restart Service')).closest('.card');
     expect(dialog.textContent).toContain('192.168.10.4');
     await userEvent.click(within(dialog).getByRole('button', { name: 'Restart' }));
@@ -191,8 +191,8 @@ describe('集群节点', () => {
     await waitFor(() => expect(act).toHaveBeenCalledWith('b', 'target', 'restart'));
   });
 
-  // 报废机器要能移出花名册（否则一直计入多数派分母）；移除不可逆，只对离线节点提供且须核对地址。
-  it('可以把已经离线的节点移出集群，且要核对地址', async () => {
+  // Removing decommissioned nodes keeps quorum counts correct. Restrict the destructive action to offline nodes with address confirmation.
+  it('Removes offline nodes after address confirmation', async () => {
     stubCluster([
       { id: 'a', name: 'a', ip: '192.168.10.3', ha_state: 'active', online: true },
       { id: 'c', name: 'c', ip: '192.168.10.5', ha_state: 'standby', online: false },
@@ -204,7 +204,7 @@ describe('集群节点', () => {
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(ip));
 
-    // 在线的那台不给移除入口：移除在线节点几乎总是误操作
+    // Do not offer removal for online nodes.
     expect(within(rowFor('192.168.10.3')).queryByRole('button', { name: /Remove/ })).toBeNull();
 
     await userEvent.click(within(rowFor('192.168.10.5')).getByRole('button', { name: /Remove/ }));
@@ -215,8 +215,8 @@ describe('集群节点', () => {
     await waitFor(() => expect(forget).toHaveBeenCalledWith('c'));
   });
 
-  // 单机与集群同一条渲染路径，版本等主机信息照常显示。
-  it('单机部署走同一条路：表里一行，主机信息照常显示', async () => {
+  // Standalone and clustered nodes share rendering and version details.
+  it('Shows one full node row for standalone deployments', async () => {
     stubCluster([{ id: 'a', name: 'a', ip: '192.168.10.3', portal_ip: '192.168.10.3', ha_state: 'active', online: true }]);
     vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: [
       { node_id: 'a', ip: '192.168.10.3', role: 'active', online: true, reachable: true,
@@ -233,20 +233,20 @@ describe('集群节点', () => {
   });
 });
 
-// 按应然状态着色：备机的 dnsmasq 必须停（两个 authoritative DHCP 会互相 NAK），
-// target.service 是 oneshot、跑完即退，按「在不在跑」上色会让健康集群满屏告警。
-describe('集群服务矩阵', () => {
+// Assess expected service state: standby dnsmasq must be stopped to avoid conflicting DHCP servers.
+// target.service is a oneshot unit, so inactive status alone must not be flagged as unhealthy.
+describe('Cluster service matrix', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const MATRIX = {
     nodes: [
       { node_id: 'b', ip: '192.168.10.4', role: 'active', is_self: true, online: true, reachable: true, services: [
-        { key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'running', expected: 'running', ok: true, provided: true },
-        { key: 'iscsi', capability: '客户机磁盘', label: 'iSCSI', unit: 'target.service', status: 'stopped', expected: 'ready', ok: true, provided: true },
+        { key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'running', expected: 'running', ok: true, provided: true },
+        { key: 'iscsi', capability: 'Client Disks', label: 'iSCSI', unit: 'target.service', status: 'stopped', expected: 'ready', ok: true, provided: true },
       ]},
       { node_id: 'a', ip: '192.168.10.3', role: 'standby', is_self: false, online: true, reachable: true, services: [
-        { key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'stopped', expected: 'stopped', ok: true, provided: false },
-        { key: 'iscsi', capability: '客户机磁盘', label: 'iSCSI', unit: 'target.service', status: 'stopped', expected: 'ready', ok: false, provided: false },
+        { key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'stopped', expected: 'stopped', ok: true, provided: false },
+        { key: 'iscsi', capability: 'Client Disks', label: 'iSCSI', unit: 'target.service', status: 'stopped', expected: 'ready', ok: false, provided: false },
       ]},
     ],
   };
@@ -263,50 +263,50 @@ describe('集群服务矩阵', () => {
     vi.spyOn(api, 'listClusterServices').mockResolvedValue(matrix);
   }
 
-  it('按「应然状态」着色：备机停掉的 DHCP 不算故障，缺内核态的 iSCSI 才算', async () => {
+  it('Uses expected service states for standby DHCP and kernel iSCSI', async () => {
     stubMatrix(MATRIX);
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr'))
       .find(tr => tr.textContent.includes(ip));
 
-    // 每台的服务浓缩成一排状态点，逐个可悬停问「它是什么、现在怎样」
+    // Show a compact per-service status row with hover details.
     const standby = rowFor('192.168.10.3');
     expect(within(standby).getByTitle(/DHCP.*Provided by Active/s)).toBeTruthy();
     expect(within(standby).getByTitle(/磁盘.*Abnormal/s)).toBeTruthy();
-    // 主机那台的磁盘就是「运行中」
+    // Active-node disk service is Running.
     expect(within(rowFor('192.168.10.4')).getAllByText('Running').length).toBeGreaterThan(0);
-    // 有异常的那台在行上直接标出来
+    // Highlight the node with a service issue.
     expect(within(standby).getByText(/1 issues/)).toBeTruthy();
-    // 行末的总判定仍是「正常」，格子里是「运行中」
+    // Summary judgment is Healthy even though individual capability cells show Running.
     expect(within(rowFor('192.168.10.4')).getByText('Healthy')).toBeTruthy();
-    // 顶部汇总与出问题的那一行各标一次
+    // Show issue count in the header and on the affected row.
     expect(within(list).getAllByText(/1 issues/).length).toBe(2);
   });
 
-  it('全部符合预期时说「全部就绪」，不数「几个在跑」', async () => {
+  it('Shows All Ready when expected service states hold', async () => {
     const allOK = { nodes: MATRIX.nodes.map(n => ({ ...n, services: n.services.map(s => ({ ...s, ok: true })) })) };
     stubMatrix(allOK);
     renderPage();
     expect(await screen.findByText('All Ready')).toBeTruthy();
   });
 
-  it('节点不可达时该列标出来，不把它算成服务故障', async () => {
-    const off = { nodes: [MATRIX.nodes[0], { ...MATRIX.nodes[1], reachable: false, services: [], error: '节点无响应' }] };
+  it('Distinguishes unreachable nodes from service failures', async () => {
+    const off = { nodes: [MATRIX.nodes[0], { ...MATRIX.nodes[1], reachable: false, services: [], error: 'Node not responding' }] };
     stubMatrix(off);
     renderPage();
     const list2 = await screen.findByTestId('cluster-nodes');
     const row = Array.from(list2.querySelectorAll('tbody tr'))
       .find(tr => tr.textContent.includes('192.168.10.3'));
-    // 那台自己报了原因就显示原因，比笼统的「读取不到」更能指路
+    // Show the node's diagnostic error rather than a generic unavailable message.
     expect(within(row).getByText('Node not responding')).toBeTruthy();
-    // 读不到服务状态 ≠ 服务故障，不该计入异常数
+    // Unreachable service status is not proof of a service failure.
     expect(screen.queryByText(/ issues/)).toBeNull();
   });
 });
 
-// 钉住服务状态的结论：集群列表与服务区只有一个来源，不能一处绿一处灰。
-describe('服务状态的判定', () => {
+// Cluster list and service panel must agree on service health.
+describe('Service status evaluation', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function stubOne(services) {
@@ -320,9 +320,9 @@ describe('服务状态的判定', () => {
     ]});
   }
 
-  it('oneshot 单元说「运行中」，不造一个「就绪」让人琢磨差别', async () => {
+  it('Treats healthy oneshot units as Running rather than Ready', async () => {
     stubOne([{
-      key: 'iscsi', capability: '客户机磁盘', label: 'iSCSI Target · LIO', unit: 'target.service',
+      key: 'iscsi', capability: 'Client Disks', label: 'iSCSI Target · LIO', unit: 'target.service',
       status: 'stopped', expected: 'ready', ok: true, provided: true, installed: true, critical: true,
     }]);
     renderPage();
@@ -334,10 +334,10 @@ describe('服务状态的判定', () => {
     expect(await screen.findByText('target.service')).toBeTruthy();
   });
 
-  it('汇总不再数「几个在跑」，而是数几处不符合预期', async () => {
+  it('Summarizes exceptions instead of running-service count', async () => {
     stubOne([
-      { key: 'a', capability: 'A 能力', label: 'A', unit: 'a.service', status: 'running', expected: 'running', ok: true, provided: true, installed: true },
-      { key: 'b', capability: 'B 能力', label: 'B', unit: 'b.service', status: 'stopped', expected: 'ready', ok: true, provided: true, installed: true },
+      { key: 'a', capability: 'Capability A', label: 'A', unit: 'a.service', status: 'running', expected: 'running', ok: true, provided: true, installed: true },
+      { key: 'b', capability: 'Capability B', label: 'B', unit: 'b.service', status: 'stopped', expected: 'ready', ok: true, provided: true, installed: true },
     ]);
     renderPage();
     expect(await screen.findByText('All Running')).toBeTruthy();
@@ -345,7 +345,7 @@ describe('服务状态的判定', () => {
   });
 });
 
-describe('节点数变化时的密度', () => {
+describe('Multi-node table density', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const nodeAt = (i) => ({
@@ -356,12 +356,12 @@ describe('节点数变化时的密度', () => {
     node_id: `n${i}`, ip: `192.168.10.${10 + i}`, role: i === 0 ? 'active' : 'standby',
     is_self: i === 0, online: true, reachable: true,
     services: [
-      { key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ · DHCP/TFTP/PXE', unit: 'dnsmasq.service', status: i === 0 ? 'running' : 'stopped', expected: i === 0 ? 'running' : 'stopped', ok: true, provided: i === 0 },
-      { key: 'zfs', capability: '存储', label: 'ZFS · 存储', unit: 'zfs-zed.service', status: 'running', expected: 'running', ok: true, provided: true },
+      { key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ · DHCP/TFTP/PXE', unit: 'dnsmasq.service', status: i === 0 ? 'running' : 'stopped', expected: i === 0 ? 'running' : 'stopped', ok: true, provided: i === 0 },
+      { key: 'zfs', capability: 'Storage', label: 'ZFS · Storage', unit: 'zfs-zed.service', status: 'running', expected: 'running', ok: true, provided: true },
     ],
   });
 
-  it('十个节点也是十行，服务名只在表头出现一次', async () => {
+  it('Shows ten node rows with a single service header', async () => {
     const n = 10;
     const idx = Array.from({ length: n }, (_, i) => i);
     vi.spyOn(api, 'getServer').mockResolvedValue({ hostname: 'n1', ip: '192.168.10.10', os: 'Ubuntu' });
@@ -374,20 +374,20 @@ describe('节点数变化时的密度', () => {
 
     const list = await screen.findByTestId('cluster-nodes');
     expect(list.querySelectorAll('tbody tr').length).toBe(n);
-    // 服务名在表头列一次，不在每一行重复
-    expect(within(list).getAllByText('DHCP / PXE 引导').length).toBe(1);
+    // Display capability names once in the header.
+    expect(within(list).getAllByText('DHCP / PXE Boot').length).toBe(1);
   });
 });
 
-// 版面只展示能力和结论，systemd 实现细节展开才看。
-describe('能力视角', () => {
+// Surface capability and status; keep systemd implementation details behind expansion.
+describe('Service capability view', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const items = [
-    { key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ · DHCP/TFTP/PXE',
+    { key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ · DHCP/TFTP/PXE',
       unit: 'dnsmasq.service', status: 'running', expected: 'running', ok: true, provided: true,
       installed: true, enabled: false, critical: true },
-    { key: 'iscsi', capability: '客户机磁盘', label: 'iSCSI Target · LIO',
+    { key: 'iscsi', capability: 'Client Disks', label: 'iSCSI Target · LIO',
       unit: 'target.service', status: 'stopped', expected: 'ready', ok: true, provided: true,
       installed: true, enabled: false, critical: true },
   ];
@@ -404,20 +404,20 @@ describe('能力视角', () => {
     ]});
   }
 
-  it('台面上是服务名 + 能力和结论，不是单元名与「已禁用」', async () => {
+  it('Shows capability labels and verdict instead of systemd details', async () => {
     stub(items);
     renderPage();
-    // 服务名保留：运维认得的是「iSCSI Target · LIO」这个名字
+    // Preserve recognizable service labels such as iSCSI Target · LIO.
     expect(await screen.findByText('iSCSI Target · LIO')).toBeTruthy();
     const cap = screen.getByText('iSCSI Target · LIO').closest('.card');
-    // 常态下实现细节不出现在版面上；「已禁用」在备份卡片里另有含义，所以只在服务区里查。
+    // Hide implementation details by default; check Disabled only within the services panel.
     expect(within(cap).queryByText('target.service')).toBeNull();
     expect(within(cap).queryByText('Disabled')).toBeNull();
     expect(within(cap).queryByText('systemd Unit')).toBeNull();
     expect(within(cap).queryByText(/unit exits after boot/)).toBeNull();
   });
 
-  it('要排障时展开才看到单元、开机自启这些实现细节', async () => {
+  it('Expands technical unit and startup details for troubleshooting', async () => {
     stub(items);
     const user = userEvent.setup();
     renderPage();
@@ -426,28 +426,28 @@ describe('能力视角', () => {
     expect(screen.getByText(/Enable at boot/)).toBeTruthy();
   });
 
-  it('备机说「由主机提供」，而不是让人猜一个停掉的服务', async () => {
+  it('Shows Provided by Active for standby services', async () => {
     stub([{ ...items[0], status: 'stopped', expected: 'stopped', ok: true, provided: false }], 'standby');
     renderPage();
-    // 表格格子和服务区都会说这句：同一判定，两处呈现，都不该冒出「已停止」
+    // Both table and services panel must agree that standby capabilities are provided by active.
     const svc = await screen.findByTestId('node-services');
     expect(within(svc).getByText('Provided by Active')).toBeTruthy();
     expect(screen.queryByText('Stopped')).toBeNull();
   });
 });
 
-// 「本机」只是此刻持有虚 IP 的机器，页面改为在表里选一台、下面显示它。
-describe('服务器页以节点为中心', () => {
+// Select a node in the table to display its services; Local node is not a stable host identity.
+describe('Node-centric Server Management', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const HOSTS = {
     nodes: [
       { node_id: 'b', ip: '192.168.10.4', role: 'active', is_self: true, online: true, reachable: true,
         host: { hostname: 'nimblex2', os: 'Ubuntu 24.04.1 LTS', uptime_sec: 111600, version: 'dev' },
-        services: [{ key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'running', expected: 'running', ok: true, installed: true }] },
+        services: [{ key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'running', expected: 'running', ok: true, installed: true }] },
       { node_id: 'a', ip: '192.168.10.3', role: 'standby', is_self: false, online: true, reachable: true,
         host: { hostname: 'nimblex1', os: 'Debian 12', uptime_sec: 3600, version: '1.2.3' },
-        services: [{ key: 'dnsmasq', capability: 'DHCP / PXE 引导', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'stopped', expected: 'stopped', ok: true, installed: true }] },
+        services: [{ key: 'dnsmasq', capability: 'DHCP / PXE Boot', label: 'DNSMASQ', unit: 'dnsmasq.service', status: 'stopped', expected: 'stopped', ok: true, installed: true }] },
     ],
   };
 
@@ -461,20 +461,20 @@ describe('服务器页以节点为中心', () => {
     vi.spyOn(api, 'listClusterServices').mockResolvedValue(HOSTS);
   }
 
-  it('没有「本机」这个说法，默认选中主机并显示它的服务', async () => {
+  it('Selects active node by default without Local node labels', async () => {
     stubHosts();
     renderPage();
     await screen.findByTestId('cluster-nodes');
-    // 「本机信息」卡和「本机」标记都不该再出现
+    // Do not show obsolete Local node information cards or labels.
     expect(screen.queryByText('Local node information')).toBeNull();
     expect(screen.queryByText('Local node')).toBeNull();
-    // 服务区的标题写死是哪一台：重启按的是它，不能靠「当前高亮那行」意会
+    // Label the selected host explicitly in the service panel to avoid wrong-host operations.
     const svc = await screen.findByTestId('node-services');
     expect(within(svc).getAllByText(/192\.168\.10\.4/).length).toBeGreaterThan(0);
     expect(within(svc).getAllByText(/Active/).length).toBeGreaterThan(0);
   });
 
-  it('选另一台，服务区就跟过去——标题写死是哪台', async () => {
+  it('Updates selected server and its service header', async () => {
     stubHosts();
     renderPage();
     const svc = await screen.findByTestId('node-services');
@@ -485,38 +485,38 @@ describe('服务器页以节点为中心', () => {
     await userEvent.click(other);
     await waitFor(() => expect(
       within(screen.getByTestId('node-services')).getAllByText(/192\.168\.10\.3/).length).toBeGreaterThan(0));
-    // 换过去之后，操作打的就是这台：标题里的角色也跟着变
+    // On selection, target service actions and role label must follow the selected node.
     expect(within(screen.getByTestId('node-services')).getAllByText(/Standby/).length).toBeGreaterThan(0);
   });
 
-  it('版本和已运行在节点表里就能比，不必逐台点开', async () => {
+  it('Shows version and uptime in the node list', async () => {
     stubHosts();
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(ip));
     expect(within(rowFor('192.168.10.4')).getByText('dev')).toBeTruthy();
     expect(within(rowFor('192.168.10.3')).getByText('1.2.3')).toBeTruthy();
-    // 已运行要能横向比较：一台刚起来而别人没动过，说明它自己重启了。
+    // Compare uptime across nodes to identify recent restarts.
     expect(within(rowFor('192.168.10.4')).getByText(/1\s*d/)).toBeTruthy();
     expect(within(rowFor('192.168.10.3')).getByText(/1\s*h/)).toBeTruthy();
   });
 
-  // 主机名和系统只进悬停，不在服务区占一行。
-  it('服务区不再挂主机信息条', async () => {
+  // Keep hostname and OS in tooltip details rather than permanent rows.
+  it('Omits redundant host information from the service panel', async () => {
     stubHosts();
     renderPage();
     const svc = await screen.findByTestId('node-services');
     expect(within(svc).queryByText('Hostname')).toBeNull();
     expect(within(svc).queryByText('Operating System')).toBeNull();
     expect(within(svc).queryByText('ndiskless Version')).toBeNull();
-    // 但不是丢掉：挂在节点行的悬停里
+    // Keep these details in the node-row tooltip.
     const list = screen.getByTestId('cluster-nodes');
     const row = Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('192.168.10.4'));
     expect(row.getAttribute('title')).toMatch(/nimblex2/);
     expect(row.getAttribute('title')).toMatch(/Ubuntu/);
   });
 
-  it('节点行不再有「详情」按钮，也不再挂那段说明', async () => {
+  it('Omits redundant node Details button and explanation', async () => {
     stubHosts();
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
@@ -526,8 +526,8 @@ describe('服务器页以节点为中心', () => {
   });
 });
 
-// 备份按节点逐台列出副本；备份池不手填（另一个池就是备份池），计划不用 cron（后端只收时刻）。
-describe('数据备份以节点为单位', () => {
+// Show backup copies by node; infer backup pool and expose schedule times rather than raw cron.
+describe('Per-node Data Backup', () => {
   afterEach(() => vi.restoreAllMocks());
 
   const BACKUPS = {
@@ -549,14 +549,14 @@ describe('数据备份以节点为单位', () => {
     vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: [] });
     vi.spyOn(api, 'listClusterBackups').mockResolvedValue({ nodes: [], total: 0, protected: 0 });
     vi.spyOn(api, 'getBackupStatus').mockResolvedValue({
-      config: { enabled: true, schedule: 'daily@03:00', schedule_text: '每天 03:00',
+      config: { enabled: true, schedule: 'daily@03:00', schedule_text: 'Daily 03:00',
                 next_run_at: '2026-08-24T03:00:00Z', last_run_at: '2026-08-23T03:00:00Z' },
       node: { backup_pool: 'w', last_backup_at: '2026-08-23T03:00:00Z', pending: false },
     });
     vi.spyOn(api, 'listClusterBackups').mockResolvedValue(BACKUPS);
   }
 
-  it('正在送副本的节点显示「备份中」，不和没开始的混在一起', async () => {
+  it('Shows Backing Up for active replication', async () => {
     stubBackups();
     vi.spyOn(api, 'listClusterBackups').mockResolvedValue({ ...BACKUPS, nodes: [
       { ...BACKUPS.nodes[0] },
@@ -571,7 +571,7 @@ describe('数据备份以节点为单位', () => {
     expect(within(never).queryByText('Pending Backup')).toBeNull();
   });
 
-  it('不再让人手填备份目标池——那是机器已经知道的事', async () => {
+  it('Infers the backup pool instead of requiring manual entry', async () => {
     stubBackups();
     renderPage();
     await screen.findByText(/Data Backup/);
@@ -579,7 +579,7 @@ describe('数据备份以节点为单位', () => {
     expect(screen.queryByPlaceholderText('backup')).toBeNull();
   });
 
-  it('不再假装支持 cron，用「每天几点」说话', async () => {
+  it('Uses human-friendly daily time rather than raw cron', async () => {
     stubBackups();
     renderPage();
     await screen.findByText(/Data Backup/);
@@ -588,31 +588,31 @@ describe('数据备份以节点为单位', () => {
     expect(await screen.findByLabelText('Time')).toBeTruthy();
   });
 
-  it('一台一行：谁存着副本、存的什么时候、谁还没有地方存', async () => {
+  it('Shows each node's copy availability and timestamp', async () => {
     stubBackups();
     renderPage();
     const panel = await screen.findByTestId('backup-nodes');
     const rowFor = (ip) => Array.from(panel.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(ip));
 
     expect(within(rowFor('192.168.10.3')).getByText('w')).toBeTruthy();
-    // 欠着一轮的那台要说出来，而不是画成正常
+    // Clearly identify lagging nodes instead of marking them healthy.
     expect(within(rowFor('192.168.10.4')).getByText(/Pending Sync|lagging/)).toBeTruthy();
-    // 没有备份池的那台不能画成正常
+    // No backup pool is not a healthy backup state.
     expect(within(rowFor('192.168.10.5')).getByText(/No Backup Pool/)).toBeTruthy();
     expect(within(rowFor('192.168.10.5')).queryByText('Healthy')).toBeNull();
-    // 表里已逐台说明，上面不再挂只有一枚标签的横幅。
+    // Per-node rows replace a redundant backup summary banner.
     expect(within(panel).queryByText(/nodes have backup copies/)).toBeNull();
   });
 });
 
-describe('版面继续收敛', () => {
+describe('Layout simplification', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function stub(nodes, services) {
     vi.spyOn(api, 'listClusterNodes').mockResolvedValue({ items: nodes, total: nodes.length });
     vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: services });
     vi.spyOn(api, 'getBackupStatus').mockResolvedValue({
-      config: { enabled: true, schedule: 'daily@03:00', schedule_text: '每天 03:00',
+      config: { enabled: true, schedule: 'daily@03:00', schedule_text: 'Daily 03:00',
                 next_run_at: '2026-08-24T03:00:00Z', next_run_text: '2026-08-24 03:00' },
       node: {},
     });
@@ -620,7 +620,7 @@ describe('版面继续收敛', () => {
     vi.spyOn(api, 'getRuntime').mockResolvedValue({ portal_ip: '192.168.10.250' });
   }
 
-  it('虚 IP 写在集群卡的标题上，主机行下面不再重复', async () => {
+  it('Shows VIP in cluster header only', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true, portal_ip: '192.168.10.250' }], []);
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
@@ -628,15 +628,15 @@ describe('版面继续收敛', () => {
     expect(screen.queryByText('HoldingVirtual IP')).toBeNull();
   });
 
-  // 备机的 dnsmasq 必须停着（两个 authoritative 的 DHCP 会互相拒绝客户机），
-  // systemctl restart 会把它拉起来，所以不给重启按钮。
-  it('该停着的服务不给重启按钮', async () => {
+  // Standby dnsmasq should remain stopped so competing authoritative DHCP servers do not reject clients.
+  // Do not offer Restart for a service that must remain stopped.
+  it('Omits Restart for intentionally stopped services', async () => {
     stub(
       [{ id: 'b', ip: '192.168.10.5', ha_state: 'standby', online: true }],
       [{ node_id: 'b', ip: '192.168.10.5', role: 'standby', online: true, reachable: true, services: [
         { key: 'dnsmasq', capability: 'DHCP', label: 'DNSMASQ · DHCP/TFTP/PXE', unit: 'dnsmasq.service',
           status: 'stopped', expected: 'stopped', ok: true, provided: false, installed: true },
-        { key: 'zfs', capability: '存储', label: 'ZFS · 存储', unit: 'zfs-zed.service',
+        { key: 'zfs', capability: 'Storage', label: 'ZFS · Storage', unit: 'zfs-zed.service',
           status: 'running', expected: 'running', ok: true, provided: true, installed: true },
       ]}],
     );
@@ -644,12 +644,12 @@ describe('版面继续收敛', () => {
     const svc = await screen.findByTestId('node-services');
     const rowOf = (name) => Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(name));
     expect(within(rowOf('DNSMASQ')).queryByRole('button', { name: 'Restart' })).toBeNull();
-    // 该跑的服务照旧可以重启
+    // Services expected to run may still be restarted.
     expect(within(rowOf('ZFS')).getByRole('button', { name: 'Restart' })).toBeTruthy();
   });
 
-  // 备机的 dnsmasq 若真的在跑就是错的，要能停掉它。
-  it('该停着却在跑的服务，给的是「停止」不是「重启」', async () => {
+  // If standby dnsmasq unexpectedly runs, offer Stop.
+  it('Offers Stop for incorrectly running standby service', async () => {
     stub(
       [{ id: 'b', ip: '192.168.10.5', ha_state: 'standby', online: true }],
       [{ node_id: 'b', ip: '192.168.10.5', role: 'standby', online: true, reachable: true, services: [
@@ -664,8 +664,8 @@ describe('版面继续收敛', () => {
     expect(within(row).getByRole('button', { name: 'Stop' })).toBeTruthy();
   });
 
-  // 启用开关并进频率：未保存时亮着「已启用」会误导。
-  it('用一个选择表达计划，没有单独的启用开关', async () => {
+  // Integrate enablement into frequency selection so unsaved changes do not display as enabled.
+  it('Uses one backup frequency selector without an enable toggle', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
     await screen.findByText(/Data Backup/);
@@ -675,8 +675,8 @@ describe('版面继续收敛', () => {
     expect(Array.from(sel.options).map(o => o.textContent)).toEqual(['Disabled', 'Daily', 'Weekly']);
   });
 
-  // 改动按保存才生效；没有改动时保存按钮置灰。
-  it('改动要保存才生效，按钮自己说明有没有待保存的改动', async () => {
+  // Save is required for schedule changes and disabled when nothing changed.
+  it('Enables Save only when schedule changes', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     const save = vi.fn().mockResolvedValue({});
     vi.spyOn(api, 'saveBackupConfig').mockImplementation(save);
@@ -688,22 +688,22 @@ describe('版面继续收敛', () => {
     await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'off');
     expect(save).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.getByRole('button', { name: /Save/ }).disabled).toBe(false));
-    // 禁用就没有时刻可填——这一格跟着消失，而不是灰在那里让人猜
+    // Hide the schedule time when disabled.
     expect(screen.queryByLabelText('Time')).toBeNull();
 
-    // 改回去：又没什么可保存了
+    // Reverting to stored values disables Save again.
     await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'daily');
     await waitFor(() => expect(screen.getByRole('button', { name: /Save/ }).disabled).toBe(true));
     expect(save).not.toHaveBeenCalled();
 
-    // 真的要改，按保存才下发
+    // Submit changes only on Save.
     await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'weekly');
     await userEvent.click(screen.getByRole('button', { name: /Save/ }));
     await waitFor(() => expect(save).toHaveBeenCalledWith(
       expect.objectContaining({ enabled: true, schedule: expect.stringMatching(/^weekly@/) })));
   });
 
-  it('选「禁用」保存下去的是关闭，而不是一个空计划', async () => {
+  it('Saves disabled state rather than an empty schedule', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     const save = vi.fn().mockResolvedValue({});
     vi.spyOn(api, 'saveBackupConfig').mockImplementation(save);
@@ -711,12 +711,12 @@ describe('版面继续收敛', () => {
     await screen.findByText(/Data Backup/);
     await userEvent.selectOptions(screen.getByLabelText('Backup Schedule'), 'off');
     await userEvent.click(screen.getByRole('button', { name: /Save/ }));
-    // 时刻仍旧带上：下次再开的时候还是原来那个点，不必重填
+    // Retain selected time when disabling, for future re-enabling.
     await waitFor(() => expect(save).toHaveBeenCalledWith({ enabled: false, schedule: 'daily@03:00' }));
   });
 
-  // 下拉默认 width:100%，不限宽三个控件会被挤成三行。
-  it('这排控件占一行，下拉不撑满', async () => {
+  // Set width explicitly so select controls fit on one row.
+  it('Keeps backup schedule controls on one row', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
     await screen.findByText(/Data Backup/);
@@ -726,13 +726,13 @@ describe('版面继续收敛', () => {
     expect(row.style.flexWrap).not.toBe('wrap');
   });
 
-  it('备份的表单不再挂标签文字', async () => {
+  it('Removes redundant backup form labels', async () => {
     stub([{ id: 'a', ip: '192.168.10.3', ha_state: 'active', online: true }], []);
     renderPage();
     await screen.findByText(/Data Backup/);
     expect(screen.queryByText('Scheduled Backup')).toBeNull();
     expect(screen.queryByText('When to run')).toBeNull();
-    // 右边只补控件算不出来的「下次」，按服务器的钟显示：备份在那台机器上跑。
+    // Show next-run time using server clock because backups execute there.
     const line = screen.getByTestId('backup-controls');
     expect(line.textContent).toMatch(/Next 2026-08-24 03:00/);
     expect(line.textContent.match(/Daily/g).length).toBe(1);
@@ -740,7 +740,7 @@ describe('版面继续收敛', () => {
   });
 });
 
-describe('只读服务的说明挂在它自己身上', () => {
+describe('Contextual help on read-only services', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function stub() {
@@ -749,9 +749,9 @@ describe('只读服务的说明挂在它自己身上', () => {
     ], total: 1 });
     vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: [
       { node_id: 'a', ip: '192.168.10.3', role: 'active', online: true, reachable: true, services: [
-        { key: 'zfs', capability: '存储', label: 'ZFS · 存储', unit: 'zfs-zed.service',
+        { key: 'zfs', capability: 'Storage', label: 'ZFS · Storage', unit: 'zfs-zed.service',
           status: 'running', expected: 'running', ok: true, installed: true },
-        { key: 'ndiskless', capability: '控制服务', label: 'ndiskless · 控制/引导', unit: 'ndiskless.service',
+        { key: 'ndiskless', capability: 'Control Service', label: 'ndiskless · Control/Boot', unit: 'ndiskless.service',
           status: 'running', expected: 'running', ok: true, installed: true, read_only: true },
       ]},
     ]});
@@ -759,14 +759,14 @@ describe('只读服务的说明挂在它自己身上', () => {
     vi.spyOn(api, 'listClusterBackups').mockResolvedValue({ nodes: [], total: 0, protected: 0 });
   }
 
-  // 说明要点开：悬停没有可点的样子，原生 title 还要等一两秒才浮出来。
-  it('说明点开才出现，表格底下不再挂一行小字', async () => {
+  // Require clicking help instead of relying on delayed native title hovers.
+  it('Opens read-only help on click, not in a table footer', async () => {
     stub();
     renderPage();
     const svc = await screen.findByTestId('node-services');
     const rowOf = (name) => Array.from(svc.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(name));
 
-    // 没点之前，页面上任何地方都没有这句话
+    // Help text remains absent until opened.
     expect(screen.queryByText(/The control service is read-only here/)).toBeNull();
 
     const mark = within(rowOf('ndiskless')).getByRole('button', { name: /Help$/ });
@@ -774,15 +774,15 @@ describe('只读服务的说明挂在它自己身上', () => {
     const tip = await screen.findByText(/The control service is read-only here/);
     expect(tip.textContent).toMatch(/systemctl restart ndiskless/);
 
-    // 再点一次收起
+    // Clicking help again collapses it.
     await userEvent.click(mark);
     await waitFor(() => expect(screen.queryByText(/The control service is read-only here/)).toBeNull());
 
-    // 能重启的服务不挂这个问号
+    // Restartable services should not carry this help control.
     expect(within(rowOf('ZFS')).queryByRole('button', { name: /Help$/ })).toBeNull();
   });
 
-  it('点页面别处也收起，不用回去再点一次', async () => {
+  it('Closes help when clicking elsewhere', async () => {
     stub();
     renderPage();
     const svc = await screen.findByTestId('node-services');
@@ -793,8 +793,8 @@ describe('只读服务的说明挂在它自己身上', () => {
     await waitFor(() => expect(screen.queryByText(/The control service is read-only here/)).toBeNull());
   });
 
-  // 矩阵未返回时每个节点 reachable 都是 undefined，不能画成「读取不到」。
-  it('矩阵还没回来时说「读取中」，不说「读取不到」', async () => {
+  // An unloaded matrix has undefined reachability, not an unreachable-node status.
+  it('Shows Loading while service matrix is pending', async () => {
     let release;
     const held = new Promise(r => { release = r; });
     vi.spyOn(api, 'listClusterNodes').mockResolvedValue({ items: [
@@ -813,7 +813,7 @@ describe('只读服务的说明挂在它自己身上', () => {
 
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
-    // 矩阵还在路上：不能说「读取不到」
+    // While matrix loads, report Loading rather than Unavailable.
     expect(within(list).queryByText(/Unavailable/)).toBeNull();
     expect(within(list).getAllByText(/Loading/).length).toBeGreaterThan(0);
 
@@ -822,7 +822,7 @@ describe('只读服务的说明挂在它自己身上', () => {
   });
 });
 
-describe('集群节点 · 添加节点', () => {
+describe('Cluster Nodes · Add Node', () => {
   afterEach(() => vi.restoreAllMocks());
 
   function stubCluster(candidates, adopt) {
@@ -839,7 +839,7 @@ describe('集群节点 · 添加节点', () => {
     vi.spyOn(api, 'adoptNode').mockImplementation(adopt);
   }
 
-  it('发现出厂态节点并一键纳管，全程不填虚 IP 和令牌', async () => {
+  it('Adds discovered factory-state nodes without VIP or token input', async () => {
     const adopt = vi.fn(async () => ({ status: 'adopting' }));
     stubCluster([{ node_id: 'fresh-b', version: 'v1', address: '192.168.10.4:8080' }], adopt);
     const user = userEvent.setup();
@@ -849,15 +849,15 @@ describe('集群节点 · 添加节点', () => {
     expect(await screen.findByText(/192\.168\.10\.4:8080/)).toBeTruthy();
 
     const dialog = screen.getByTestId('adopt-nodes');
-    expect(dialog.querySelectorAll('input[type="text"]').length).toBe(0); // 没有任何要填的字段
-    expect(dialog.textContent).not.toContain('Pool names must match across the cluster'); // 各Node池名自己定
+    expect(dialog.querySelectorAll('input[type="text"]').length).toBe(0); // No input fields are needed
+    expect(dialog.textContent).not.toContain('Pool names must match across the cluster'); // Each node chooses its own pool names
     expect(dialog.textContent).toContain('Storage Pool Management');
     await user.click(within(dialog).getByRole('button', { name: /Join Cluster/ }));
 
     await waitFor(() => expect(adopt).toHaveBeenCalledWith({ address: '192.168.10.4:8080' }));
   });
 
-  it('没发现候选时说明原因，不留一个空白列表', async () => {
+  it('Explains why no eligible nodes were discovered', async () => {
     stubCluster([], vi.fn());
     const user = userEvent.setup();
     renderPage();
