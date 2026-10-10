@@ -485,7 +485,7 @@ describe('Image cards', () => {
     renderPage();
     await screen.findByText('New System Disk');
     const names = [...document.querySelectorAll('.card .ellip')].map(e => e.textContent).filter(n => /(?:System|Data) Disk$/.test(n));
-    expect(names).toEqual(['旧System Disk', 'New System Disk', '旧Data Disk', '新Data Disk']);
+    expect(names).toEqual(['Old System Disk', 'New System Disk', 'Old Data Disk', 'New Data Disk']);
   });
 
   it('Uses disk icon for data images and OS-specific icons for system images', async () => {
