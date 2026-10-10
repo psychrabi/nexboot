@@ -71,7 +71,7 @@ function poolPlan(layout, width, disks) {
     }
     let total = 0;
     for (let i = 0; i < n; i += width) total += min(sizes.slice(i, i + width));
-    return { ok: true, message: `镜像 ${n / width} groups ≈ ${fmtCap(total)} available · tolerates ${width - 1} disks` };
+    return { ok: true, message: `Mirror ${n / width} groups ≈ ${fmtCap(total)} available · tolerates ${width - 1} disk failures per group` };
   }
   const parity = RAIDZ_PARITY[layout] || 0;
   const need = parity + 2;
@@ -254,7 +254,7 @@ function PageStorage() {
     // Pool names can repeat across nodes. Confirm a remote operation using the node address.
     const ok = isMissing(pool) ? await conf.ask({
       title: "Delete Pool Record",
-      message: `${where || "Local node"}上已找不到 ${pool.Name}; delete its record only. No disks are modified. You may recreate a pool with that name afterward.`,
+      message: `${where || "Local node"} no longer has pool ${pool.Name}; delete its record only. No disks are modified. You may recreate a pool with that name afterward.`,
       confirmText: "Delete",
     }) : await conf.ask({
       title: "Destroy Storage Pool",
@@ -334,7 +334,7 @@ function PageStorage() {
       <div className="card" style={{ padding: 0 }}>
         <table className="t">
           <thead><tr>
-            <th>Pool Name</th><th>Server</th><th>Layout</th><th>容量</th><th>Storage Disks</th>
+            <th>Pool Name</th><th>Server</th><th>Layout</th><th>Capacity</th><th>Storage Disks</th>
             <th>Read / Write Cache</th><th>Status</th><th className="t-actions"></th>
           </tr></thead>
           <tbody>
@@ -369,7 +369,7 @@ function PageStorage() {
                     <span className={`chip ${hm.cls}`}>{hm.dot && <span className={`dot ${hm.dot}`}/>}{hm.text}</span>
                     {p.Operation && <span className="mono meta" style={{ marginLeft: 6 }}>{OP_LABEL[p.Operation] || p.Operation} {p.Progress}</span>}
                   </td>
-                  <td className="t-actions"><div><button className="btn ghost icon" title="查看池详情" aria-label={`查看 ${p.Name} 详情`}><Icons.Chevron size={12}/></button></div></td>
+                  <td className="t-actions"><div><button className="btn ghost icon" title="View Pool Details" aria-label={`View details for ${p.Name}`}><Icons.Chevron size={12}/></button></div></td>
                 </tr>
               );
             })}
@@ -391,7 +391,7 @@ function PageStorage() {
               onChange={v => setForm({ ...form, node: v, disks: [] })}
               options={nodes.map(n => ({
                 value: n.id,
-                label: `${n.ip}${n.ha_state === "active" ? " (主机)" : ""}${n.online ? "" : " · 离线"}`,
+                label: `${n.ip}${n.ha_state === "active" ? " (active)" : ""}${n.online ? "" : " · offline"}`,
               }))} style={{ width: "100%" }}/>
           </Field>
         )}
@@ -509,11 +509,11 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   const validateExpand = (picked) => {
     const n = picked.length;
     if (layout === "mirror") {
-      if (n < width || n % width !== 0) return { ok: false, message: `Mirrored pool requires ${width} disks一group加盘, Select ${width - (n % width)} more (selected ${n} disks)` };
+      if (n < width || n % width !== 0) return { ok: false, message: `Add full mirror groups of ${width} disks. Select ${width - (n % width)} more (selected ${n}).` };
       return { ok: true, message: `Add ${n / width} mirror groups` };
     }
     if (parity) {
-      if (n !== width) return { ok: false, message: n < width ? `${layout} 池按adding complete groups, Per group ${width} disks, Select ${width - n} more (selected ${n} disks)` : `${layout} 池按adding complete groups, Per group ${width} disks, Remove ${n - width} disks` };
+      if (n !== width) return { ok: false, message: n < width ? `${layout} requires full groups of ${width} disks. Select ${width - n} more (selected ${n}).` : `${layout} requires groups of ${width} disks. Remove ${n - width} disks.` };
       return { ok: true, message: `Add 1 groups of ${layout}` };
     }
     return { ok: true, message: `Add ${n} stripe members with no redundancy` };
@@ -537,9 +537,9 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
   const addFor = async (paths) => {
     const kind = picker;
     setPicker(null);
-    if (attaching) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.attach }), `给 ${kind.attach} RAID1 attachment task submitted`);
-    else if (expanding) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.expand }), `给 ${kind.expand} expansion task submitted`);
-    else if (replacing) await run(() => api.replacePoolDisk(pool.ID, { old_disk: kind.replace, new_disk: paths[0] }), `用 ${paths[0]} replace ${kind.replace} task submitted`);
+    if (attaching) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.attach }), `RAID1 attachment task submitted for ${kind.attach}`);
+    else if (expanding) await run(() => api.addPoolDisk(pool.ID, { disks: paths, mode: "attach", target: kind.expand }), `Expansion task submitted for ${kind.expand}`);
+    else if (replacing) await run(() => api.replacePoolDisk(pool.ID, { old_disk: kind.replace, new_disk: paths[0] }), `Disk replacement submitted: ${kind.replace} → ${paths[0]}`);
     else if (kind === "special") await run(() => api.addSpecial(pool.ID, { disks: paths }), "Metadata disk addition submitted");
     else if (kind === "spare") await run(() => api.addSpare(pool.ID, { disks: paths }), "Hot spare addition submitted");
     else if (kind === "data") await run(() => api.addPoolDisk(pool.ID, { disks: paths }), "Storage disk addition submitted");
@@ -561,7 +561,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
       if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "RAID1 detach task submitted");
       return;
     }
-    const ok = await conf.ask({ title: "Remove磁盘", message: `Remove ${pool.Name} from ${path}? Data will be migrated to surviving disks.`, danger: true });
+    const ok = await conf.ask({ title: "Remove Disk", message: `Remove ${path} from ${pool.Name}? Data will be migrated to surviving disks.`, danger: true });
     if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "Disk removal task submitted");
   };
   // Require a free disk for every data member before RAID1 upgrade; partial mirroring remains vulnerable.
@@ -584,11 +584,11 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
       message: `Remove metadata group ${group.Name} (${(group.Disks || []).map(d => d.Path).join(", ")})? Metadata will migrate back to data disks while online.`,
       danger: true, confirmText: "Remove",
     });
-    if (ok) await run(() => api.removeSpecial(pool.ID, { disk: group.Name }), `Remove ${group.Name} 任务已提交`);
+    if (ok) await run(() => api.removeSpecial(pool.ID, { disk: group.Name }), `Remove ${group.Name} task submitted`);
   };
   const removeSpareDisk = async (path) => {
     const ok = await conf.ask({ title: "Remove Hot Spare", message: `Remove ${path} Remove ${pool.Name} hot-spare list? Failed disks will no longer be replaced automatically.`, danger: true, confirmText: "Remove" });
-    if (ok) await run(() => api.removeSpare(pool.ID, { disk: path }), "Remove Hot Spare任务已提交");
+    if (ok) await run(() => api.removeSpare(pool.ID, { disk: path }), "Remove Hot Sparetask submitted");
   };
   const removeGroup = async (group) => {
     const ok = await conf.ask({
@@ -596,7 +596,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
       message: `Remove vdev group ${group.Name} (${(group.Disks || []).map(d => d.Path).join(", ")})? Data will migrate to other groups while online.`,
       danger: true, confirmText: "Remove Group",
     });
-    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: group.Name }), `Remove ${group.Name} 任务已提交`);
+    if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: group.Name }), `Remove ${group.Name} task submitted`);
   };
   const removeReadCache = async (path) => run(() => api.removeReadCache(pool.ID, { disk: path }), "Read cache removed");
   const removeWriteCache = async (path) => run(() => api.removeWriteCache(pool.ID, { disk: path }), "Write cache removed");
@@ -620,9 +620,9 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
           ]}/>
 
           {missing ? <div className="hint">
-            Pool no longer exists on this node; only its record remains{(pool.Disks || []).length ? ` (原成员 ${pool.Disks.join(", ")})` : ""}.Deleting the record changes no disks. You may recreate a pool with the same name.
+            Pool no longer exists on this node; only its record remains{(pool.Disks || []).length ? ` (former members: ${pool.Disks.join(", ")})` : ""}.Deleting the record changes no disks. You may recreate a pool with the same name.
           </div> : <>
-          <Section title="容量">
+          <Section title="Capacity">
             <div className="row" style={{ gap: 12, marginBottom: 8 }}>
               <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>{fmtCap(used)}</span>
               <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 13 }}>/ 共 {fmtCap(cap)} · Available {fmtCap(cap - used)} · Used {usePct}%</span>
@@ -641,16 +641,16 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
               : null}
             groupAction={parity
               ? (pool.RaidzExpandable ? (g) => (
-                <button className="btn ghost icon" disabled={busy} onClick={() => setPicker({ expand: g.Name })} title="Expand by One Disk" aria-label={`给 ${g.Name} Expand by One Disk`}><Icons.Plus size={12}/></button>
+                <button className="btn ghost icon" disabled={busy} onClick={() => setPicker({ expand: g.Name })} title="Expand by One Disk" aria-label={`Expand ${g.Name} by one disk`}><Icons.Plus size={12}/></button>
               ) : null)
               : dataGroups.filter(g => g.Kind === "mirror").length > 1 ? (g) => (
                 <button className="btn ghost icon danger" disabled={busy} onClick={() => removeGroup(g)} title="Remove Group" aria-label={`Remove vdev group ${g.Name}`}><Icons.Trash size={12}/></button>
               ) : null}
             rowAction={(d) => (<>
               {/* Stripe members may become mirrors and mirrors can gain a member; raidz cannot attach directly. Replace applies to any layout.
-                  按钮带文字, 只有图标时运维找不到「Replace Disk」. */}
-              {!parity && <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ attach: d.Path })} title="给这 disks盘配一 disks盘group成 RAID1" aria-label={`给 ${d.Path} Attach RAID1 Disk`}><Icons.Plus size={11}/> Attach RAID1 Disk</button>}
-              <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ replace: d.Path })} title="用一 disks空闲盘顶替这 disks盘" aria-label={`Replace ${d.Path}`}><Icons.Refresh size={11}/> Replace Disk</button>
+                  Use labeled buttons instead of icon-only actions for Replace Disk. */}
+              {!parity && <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ attach: d.Path })} title="Attach a free disk to form RAID1" aria-label={`Attach RAID1 disk to ${d.Path}`}><Icons.Plus size={11}/> Attach RAID1 Disk</button>}
+              <button className="btn ghost" disabled={busy} style={{ padding: "3px 8px" }} onClick={() => setPicker({ replace: d.Path })} title="Replace this disk with a free disk" aria-label={`Replace ${d.Path}`}><Icons.Refresh size={11}/> Replace Disk</button>
             </>)}/>
 
           <DiskSection title="Metadata Disks special" groups={specialGroups} disks={[]} busy={busy}
@@ -679,7 +679,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
           <div className="hint" style={{ marginBottom: 10 }}>Pair each data disk with an equally large or larger free disk to create RAID1 mirrors. Upgrade runs online; redundancy applies as each pair completes.</div>
           <div style={{ background: "var(--bg-0)", border: "1px solid var(--line-soft)", borderRadius: 6, overflow: "hidden" }}>
             <table className="t" style={{ margin: 0 }}>
-              <thead><tr><th>Storage Disks</th><th>RAID1 盘</th></tr></thead>
+              <thead><tr><th>Storage Disks</th><th>RAID1 Disk</th></tr></thead>
               <tbody>
                 {dataDisks.map(d => {
                   const takenElsewhere = Object.entries(upgrade || {}).filter(([k]) => k !== d.Path).map(([, v]) => v);
@@ -689,7 +689,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
                       <td className="mono" style={{ fontWeight: 600 }}>{d.Path}</td>
                       <td>
                         <Select value={(upgrade || {})[d.Path] || ""} onChange={v => setUpgrade(prev => ({ ...(prev || {}), [d.Path]: v }))}
-                          aria-label={`${d.Path} 的 RAID1 盘`}
+                          aria-label={`RAID1 partner for ${d.Path}`}
                           options={[{ value: "", label: "Select Free Disk…" }, ...options]}/>
                       </td>
                     </tr>
@@ -702,8 +702,8 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
         </Modal>
 
         <DiskPickModal open={!!picker} busy={busy} freeDisks={freeDisks}
-          title={attaching ? `给 ${picker.attach} Attach RAID1 Disk` : expanding ? `给 ${picker.expand} Expand by One Disk` : replacing ? `Replace ${picker.replace}` : picker === "data" ? "Add Storage Disk" : picker === "special" ? "Add Metadata Disk" : picker === "spare" ? "Add Hot Spare" : picker === "read" ? "Add Read Cache Disk" : "Add Write Cache Disk"}
-          hint={picker === "data" ? (layout === "mirror" ? `Mirrored pool requires ${width} disks一group加盘` : parity ? `${layout} 池按adding complete groups, Per group ${width} disks` : null) : replacing ? "Select a free disk at least as large as the original." : picker === "special" ? "Select 2 or 3 SSD/NVMe drives to form a mirror." : null}
+          title={attaching ? `Attach RAID1 Disk to ${picker.attach}` : expanding ? `Expand ${picker.expand} by one disk` : replacing ? `Replace ${picker.replace}` : picker === "data" ? "Add Storage Disk" : picker === "special" ? "Add Metadata Disk" : picker === "spare" ? "Add Hot Spare" : picker === "read" ? "Add Read Cache Disk" : "Add Write Cache Disk"}
+          hint={picker === "data" ? (layout === "mirror" ? `Mirrored pool requires full groups of ${width} disks` : parity ? `${layout} requires complete groups of ${width} disks` : null) : replacing ? "Select a free disk at least as large as the original." : picker === "special" ? "Select 2 or 3 SSD/NVMe drives to form a mirror." : null}
           validate={attaching ? validateAttach : expanding ? validateRaidzExpand : replacing ? validateReplace : picker === "data" ? validateExpand : picker === "special" ? validateSpecial : null}
           onClose={() => setPicker(null)} onConfirm={addFor}/>
         {conf.node}
