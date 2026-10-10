@@ -625,7 +625,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
           <Section title="Capacity">
             <div className="row" style={{ gap: 12, marginBottom: 8 }}>
               <span className="mono" style={{ fontSize: 18, fontWeight: 600 }}>{fmtCap(used)}</span>
-              <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 13 }}>/ 共 {fmtCap(cap)} · Available {fmtCap(cap - used)} · Used {usePct}%</span>
+              <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 13 }}>/ Total {fmtCap(cap)} · Available {fmtCap(cap - used)} · Used {usePct}%</span>
             </div>
             <div className={`bar ${usePct > 85 ? "rose" : usePct > 70 ? "amber" : ""}`}><span style={{ width: `${usePct}%` }}/></div>
           </Section>
