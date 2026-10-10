@@ -9,7 +9,7 @@ describe('Segment Filter', () => {
   const options = [
     { id: '', label: 'All', n: 12 },
     { id: 'active', label: 'Unprocessed', n: 3, color: 'rose' },
-    { id: 'acked', label: 'Acknowledged' }, // 无计数：不渲染，不能显示 "undefined"
+    { id: 'acked', label: 'Acknowledged' }, // Without count, do not render an undefined value
   ];
 
   it('Displays the count on each item', () => {

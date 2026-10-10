@@ -7,11 +7,11 @@ import { StoreProvider } from './store.jsx';
 import { ConfirmProvider } from './overlay.jsx';
 import { HACard, StandbyBanner } from './ha.jsx';
 
-// HA 卡片：本节点角色、对端是否跟随和计划切换。备机横幅给开错节点的操作者指路，
-// 在写入被后端 503 拒绝之前就告诉他去哪。
+// The HA card shows node role, peer replication and planned switchover; the standby banner guides users
+// to the active node before backend writes fail with 503.
 
 const HA_SINGLE = { node_id: 'b7ef', role: 'active', epoch: 0, peer_url: '', peer_reachable: false };
-// 主机上的 peer_url 是 VIP（即它自己），其余节点从节点表列出。
+// The active node's peer_url is its own VIP; list other nodes from the node roster.
 const HA_ACTIVE = {
   node_id: 'b7ef', role: 'active', epoch: 2,
   peer_url: 'http://192.168.50.250:8080', peer_reachable: true, peer_role: 'active', peer_epoch: 2,
@@ -52,162 +52,162 @@ describe('HACard', () => {
   beforeEach(() => stubApi());
   afterEach(() => vi.restoreAllMocks());
 
-  it('读不到节点列表时说读不到，而不是「暂无」备机', async () => {
-    stubApi({ getHA: async () => HA_ACTIVE, listClusterNodes: async () => { throw new Error('超时'); } });
+  it('Reports node-list failures rather than implying an empty standby list', async () => {
+    stubApi({ getHA: async () => HA_ACTIVE, listClusterNodes: async () => { throw new Error('Timeout'); } });
     wrap(<HACard/>);
     const others = await screen.findByTestId('ha-others');
-    await waitFor(() => expect(others.textContent).toContain('读不到节点列表'));
-    expect(others.textContent).not.toContain('暂无');
+    await waitFor(() => expect(others.textContent).toContain('Cannot retrieve node list'));
+    expect(others.textContent).not.toContain('None');
   });
 
-  it('其余节点全部离线时不标「备机」', async () => {
+  it('Does not label all-offline peers as healthy standby nodes', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, listClusterNodes: async () => ({ items: [NODES.items[0], { ...NODES.items[2] }] }) });
     wrap(<HACard/>);
     const others = await screen.findByTestId('ha-others');
-    await waitFor(() => expect(others.textContent).toContain('离线'));
-    expect(others.parentElement.textContent).not.toContain('备机');
+    await waitFor(() => expect(others.textContent).toContain('Offline'));
+    expect(others.parentElement.textContent).not.toContain('Standby');
   });
 
-  it('单机：说明是独立节点、给出创建集群入口，不给切换按钮', async () => {
+  it('Standalone: explains role, offers cluster creation and omits switchover', async () => {
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText(/未加入任何集群/)).toBeTruthy());
-    expect(screen.getByRole('button', { name: /创建集群/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /计划切换/ })).toBeNull();
+    await waitFor(() => expect(screen.getByText(/is not part of a cluster/)).toBeTruthy());
+    expect(screen.getByRole('button', { name: /Create Cluster/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Planned Switchover/ })).toBeNull();
   });
 
-  it('主机：显示角色、对端与复制滞后，计划切换需确认后调用', async () => {
+  it('Active: shows role, peers and replication lag; requires confirmation before switchover', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     const user = userEvent.setup();
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText('主机')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Active')).toBeTruthy());
     expect(screen.getByText(/192\.168\.50\.11/)).toBeTruthy();
-    expect(screen.getByText(/12 秒前/)).toBeTruthy();
+    expect(screen.getByText(/12 seconds ago/)).toBeTruthy();
 
-    await user.click(screen.getByRole('button', { name: '计划切换' }));
-    // 确认弹窗用操作者的话说明后果
-    expect(await screen.findByText(/运行中的普通客户机会重启一次/)).toBeTruthy();
-    await user.click(screen.getByRole('button', { name: '切换' }));
+    await user.click(screen.getByRole('button', { name: 'Planned Switchover' }));
+    // Explain consequences in operator-friendly language in the confirmation.
+    expect(await screen.findByText(/Running regular clients will restart once/)).toBeTruthy();
+    await user.click(screen.getByRole('button', { name: 'Switch' }));
     await waitFor(() => expect(api.plannedSwitch).toHaveBeenCalled());
   });
 
-  // 同步结果跟在「目录同步」标题后面，同步限速放在这一列下面。
-  it('主机：目录同步一列包含同步时间和同步限速', async () => {
+  // Replication status follows the section heading; rate controls appear beneath it.
+  it('Active: shows replication timestamp and rate limit together', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     wrap(<HACard/>);
-    const title = await screen.findByText('目录同步', { exact: false });
+    const title = await screen.findByText('Catalogue Replication', { exact: false });
     const col = title.closest('div').parentElement;
-    await waitFor(() => expect(title.textContent).toMatch(/12 秒前/));
-    expect(within(col).getByLabelText('同步限速')).toBeTruthy();
+    await waitFor(() => expect(title.textContent).toMatch(/12 seconds ago/));
+    expect(within(col).getByLabelText('Replication Rate Limit')).toBeTruthy();
   });
 
-  it('主机：同步限速可改，0 表示不限（运维窗口摘掉上限）', async () => {
+  it('Active: supports changing replication limit, zero means unlimited', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     const user = userEvent.setup();
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText('主机')).toBeTruthy());
-    const input = screen.getByLabelText('同步限速');
+    await waitFor(() => expect(screen.getByText('Active')).toBeTruthy());
+    const input = screen.getByLabelText('Replication Rate Limit');
     expect(input.value).toBe('100');
     await user.clear(input);
     await user.type(input, '0');
-    await user.click(screen.getByRole('button', { name: '保存限速' }));
+    await user.click(screen.getByRole('button', { name: 'Save Limit' }));
     await waitFor(() => expect(api.setHARate).toHaveBeenCalledWith(0));
   });
 
-  // 本机和其余节点一样显示 IP；任期号、节点 ID 用于排查，不放在正文里。
-  it('主机：本机显示 IP，不显示 epoch 和节点 ID，说明默认收起', async () => {
+  // Display local and peer IPs. Keep term number and node ID in diagnostic details.
+  it('Active: shows local IP, hides term and node ID, and collapses help by default', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     const user = userEvent.setup();
     wrap(<HACard/>);
     const self = await screen.findByTestId('ha-self');
     await waitFor(() => expect(self.textContent).toContain('192.168.50.10'));
     expect(self.textContent).not.toMatch(/epoch|b7ef/);
-    // 角色和计划切换紧跟本机 IP
-    expect(within(self).getByText('主机')).toBeTruthy();
-    expect(within(self).getByRole('button', { name: '计划切换' })).toBeTruthy();
-    expect(screen.queryByText(/维护本机前/)).toBeNull();
-    await user.click(screen.getByRole('button', { name: '计划切换说明' }));
-    expect(screen.getByText(/交给一台备机/)).toBeTruthy();
+    // Show role and planned switchover beside the local IP.
+    expect(within(self).getByText('Active')).toBeTruthy();
+    expect(within(self).getByRole('button', { name: 'Planned Switchover' })).toBeTruthy();
+    expect(screen.queryByText(/Before patching/)).toBeNull();
+    await user.click(screen.getByRole('button', { name: 'About Planned Switchover' }));
+    expect(screen.getByText(/transfer the active role to a standby/)).toBeTruthy();
   });
 
-  it('主机：列出其余节点及状态，不把虚 IP 当成对端', async () => {
+  it('Active: lists peer status without treating VIP as a peer', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     wrap(<HACard/>);
     await waitFor(() => expect(screen.getByText(/192\.168\.50\.11/)).toBeTruthy());
     const col = screen.getByTestId('ha-others');
     expect(col.textContent).toContain('192.168.50.11');
     expect(col.textContent).toContain('192.168.50.12');
-    expect(col.textContent).toContain('离线');
+    expect(col.textContent).toContain('Offline');
     expect(col.textContent).not.toContain('192.168.50.10');
     expect(screen.queryByText(/192\.168\.50\.250/)).toBeNull();
   });
 
-  // 集群令牌是节点间内部接口的密钥，界面上不展示，「添加节点」也不需要它。
-  it('主机：界面上不出现集群令牌', async () => {
+  // Cluster tokens secure internal node APIs and must not be displayed; Add Node needs no token.
+  it('Active: never displays cluster token', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     wrap(<HACard/>);
     await waitFor(() => expect(screen.getByText(/192\.168\.50\.11/)).toBeTruthy());
-    expect(screen.queryByText('集群令牌')).toBeNull();
+    expect(screen.queryByText('Cluster Token')).toBeNull();
     expect(screen.queryByText(/tok-abcdef123456/)).toBeNull();
   });
 
-  it('备机：点名主机地址，不给切换按钮', async () => {
+  it('Standby: identifies active node address and hides switchover', async () => {
     stubApi({ getHA: async () => HA_STANDBY });
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText('备机')).toBeTruthy());
+    await waitFor(() => expect(screen.getByText('Standby')).toBeTruthy());
     expect(screen.getAllByText(/192\.168\.50\.10/).length).toBeGreaterThan(0);
-    expect(screen.queryByRole('button', { name: /计划切换/ })).toBeNull();
+    expect(screen.queryByRole('button', { name: /Planned Switchover/ })).toBeNull();
   });
 });
 
-// 单机节点从这里建集群；已配对的节点不提供该入口。
-describe('HACard 加入集群', () => {
+// Only standalone nodes can create a cluster here.
+describe('HACard cluster creation', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  // 手动「加入集群」需要令牌，界面上不提供；其余机器一律走「添加节点」。
-  it('独立节点只给「创建集群」，没有手动加入', async () => {
+  // Manual cluster joining requires a token; the UI adds additional nodes through Add Node.
+  it('Standalone: offers Create Cluster but not manual Join', async () => {
     stubApi();
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText(/未加入任何集群/)).toBeTruthy());
-    expect(screen.getByRole('button', { name: /创建集群/ })).toBeTruthy();
-    expect(screen.queryByRole('button', { name: /加入集群/ })).toBeNull();
+    await waitFor(() => expect(screen.getByText(/is not part of a cluster/)).toBeTruthy());
+    expect(screen.getByRole('button', { name: /Create Cluster/ })).toBeTruthy();
+    expect(screen.queryByRole('button', { name: /Join Cluster/ })).toBeNull();
   });
 
-  // 建集群只问 VIP，令牌由产品生成，不让操作者编造或转抄。
-  it('创建集群只填虚 IP，表单里没有令牌', async () => {
+  // Creating a cluster only asks for VIP; tokens are generated automatically.
+  it('Cluster creation requests VIP only, not token', async () => {
     const create = vi.fn(async () => ({ status: 'creating' }));
     stubApi({ createCluster: create });
     const user = userEvent.setup();
     wrap(<HACard/>);
 
-    await user.click(await screen.findByRole('button', { name: /创建集群/ }));
-    // 要钉住的是「没有令牌输入框」，文案里说明「令牌由产品自动生成」是应该的。
+    await user.click(await screen.findByRole('button', { name: /Create Cluster/ }));
+    // Assert the absence of a token input even when the explanatory copy mentions generation.
     const form = screen.getByTestId('create-cluster-form');
     expect(form.querySelectorAll('input').length).toBe(1);
     expect(screen.queryByPlaceholderText(/cluster-token/)).toBeNull();
-    // 没有池也能建，但要告诉操作者池在哪建、建之前备机无法接管
-    expect(form.textContent).toContain('存储池管理');
-    expect(form.textContent).toContain('接管');
+    // A cluster can start before a pool exists; explain that takeover requires creating a pool.
+    expect(form.textContent).toContain('Storage Pool Management');
+    expect(form.textContent).toContain('take over');
     await user.type(screen.getByPlaceholderText(/192\.168/), '192.168.10.250');
-    await user.click(screen.getByRole('button', { name: /^创建$/ }));
+    await user.click(screen.getByRole('button', { name: /^Create$/ }));
 
     await waitFor(() => expect(create).toHaveBeenCalledWith({ vip: '192.168.10.250' }));
   });
 
-  it('已配对的主机不显示加入入口', async () => {
+  it('Already clustered active node shows no join control', async () => {
     stubApi({ getHA: async () => HA_ACTIVE, getReplication: async () => REPL });
     wrap(<HACard/>);
-    await waitFor(() => expect(screen.getByText('主机')).toBeTruthy());
-    expect(screen.queryByRole('button', { name: /加入集群/ })).toBeNull();
+    await waitFor(() => expect(screen.getByText('Active')).toBeTruthy());
+    expect(screen.queryByRole('button', { name: /Join Cluster/ })).toBeNull();
   });
 });
 
 describe('StandbyBanner', () => {
   afterEach(() => vi.restoreAllMocks());
 
-  it('备机渲染横幅并指向主机；主机与单机不渲染', async () => {
+  it('Shows standby banner only on standby nodes', async () => {
     stubApi({ getHA: async () => HA_STANDBY });
     const { unmount } = wrap(<StandbyBanner/>);
-    await waitFor(() => expect(screen.getByText(/当前是备机/)).toBeTruthy());
+    await waitFor(() => expect(screen.getByText(/This is a standby node/)).toBeTruthy());
     expect(screen.getByRole('link').getAttribute('href')).toBe('http://192.168.50.10:8080');
     unmount();
     vi.restoreAllMocks();
@@ -215,26 +215,26 @@ describe('StandbyBanner', () => {
     stubApi({ getHA: async () => HA_ACTIVE });
     wrap(<StandbyBanner/>);
     await new Promise(r => setTimeout(r, 50));
-    expect(screen.queryByText(/当前是备机/)).toBeNull();
+    expect(screen.queryByText(/This is a standby node/)).toBeNull();
   });
 
-  // 操作者经 VIP 进入一台持有 VIP 但尚未接任的备机，此时「请到主机操作」是错的，
-  // 要说明为何还没接任、接下来会怎样。
-  it('持有虚 IP 而未接任：说明原因，不再让运维去找主机', async () => {
+  // A standby holding the VIP may not yet have assumed the active role; avoid directing users elsewhere
+  // and explain the takeover state and next steps.
+  it('Standby holding VIP explains pending takeover instead of redirecting users', async () => {
     stubApi({ getHA: async () => ({ ...HA_STANDBY, holds_vip: true,
-      takeover: { phase: 'refused', reason: '节点 node-a 仍是健康的主机，本节点不接任，以免丢掉它刚确认的改动；虚 IP 已让出，由它接手' } }) });
+      takeover: { phase: 'refused', reason: 'Node node-a remains healthy and active. This node declines takeover to preserve acknowledged writes; VIP is released back to it' } }) });
     wrap(<StandbyBanner/>);
-    await waitFor(() => expect(screen.getByText(/还没有接任/)).toBeTruthy());
-    expect(screen.getByText(/node-a 仍是健康的主机/)).toBeTruthy();
-    expect(screen.getByText(/几分钟内/)).toBeTruthy();
-    expect(screen.queryByText(/管理操作请到主机/)).toBeNull();
+    await waitFor(() => expect(screen.getByText(/has not become active/)).toBeTruthy());
+    expect(screen.getByText(/node-a is still healthyActive/)).toBeTruthy();
+    expect(screen.getByText(/within a few minutes/)).toBeTruthy();
+    expect(screen.queryByText(/Perform administrative operations onActive/)).toBeNull();
   });
 
-  it('正在追平目录：说明正在接任', async () => {
+  it('Catalogue catch-up explains takeover in progress', async () => {
     stubApi({ getHA: async () => ({ ...HA_STANDBY, holds_vip: true,
-      takeover: { phase: 'catching-up', reason: '正在从节点 node-a追平目录，追平后接任（最多 3 分钟）' } }) });
+      takeover: { phase: 'catching-up', reason: 'Catching up catalogue from node-a before takeover (up to 3 minutes)' } }) });
     wrap(<StandbyBanner/>);
-    await waitFor(() => expect(screen.getByText(/正在接任/)).toBeTruthy());
-    expect(screen.getByText(/追平目录/)).toBeTruthy();
+    await waitFor(() => expect(screen.getByText(/is becoming active/)).toBeTruthy());
+    expect(screen.getByText(/catching up catalogue/)).toBeTruthy();
   });
 });
