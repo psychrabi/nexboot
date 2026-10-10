@@ -1,6 +1,6 @@
-// Go 后端 API 的轻量 fetch 封装。
-// 领域结构体没有 json tag，实体字段为 PascalCase（ID、Name、OSType、MAC、IP、State、IsSuper、Capacity…）。
-// 列表接口返回 { items, total }。
+// Lightweight fetch client for the Go backend API.
+// Domain structs use PascalCase (ID, Name, OSType, MAC, IP, State, IsSuper, Capacity) without JSON tags.
+// List endpoints return { items, total }.
 
 const TOKEN_KEY = 'nd_token';
 const USER_KEY = 'nd_user';
@@ -24,7 +24,7 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
-// 请求返回 401 时触发，外壳据此回到登录页。
+// A 401 session-expiration event causes the shell to return to login.
 export const onUnauthorized = (() => {
   const target = new EventTarget();
   return {
@@ -42,25 +42,25 @@ async function request(path, { method = 'GET', body, formData, raw } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   let payload;
   if (formData !== undefined) {
-    payload = formData; // multipart 边界由浏览器设置
+    payload = formData; // Browser supplies multipart boundary
   } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
   const res = await fetch(path, { method, headers, body: payload });
   if (res.status === 401) {
-    // 登录接口的 401 是密码不对而非会话过期，原样展示后端的说法。
+    // Login 401 means invalid credentials, not session expiry; show the backend message.
     if (path === '/api/login') {
       const text = (await res.text().catch(() => '')).trim();
-      throw new Error(text || '用户名或密码错误');
+      throw new Error(text || 'Invalid username or password');
     }
     clearSession();
     onUnauthorized.emit();
-    throw new Error('登录已失效，请重新登录');
+    throw new Error('Session expired. Please sign in again');
   }
   if (!res.ok) {
     const text = (await res.text().catch(() => '')).trim();
-    throw new Error(text || `请求失败 (${res.status})`);
+    throw new Error(text || `Request failed (${res.status})`);
   }
   if (raw) return res;
   if (res.status === 204) return null;
@@ -70,14 +70,14 @@ async function request(path, { method = 'GET', body, formData, raw } = {}) {
 }
 
 export const api = {
-  // --- 认证 ---
+  // --- Authentication ---
   async login(username, password) {
     const data = await request('/api/login', { method: 'POST', body: { username, password } });
     setSession(data.token, data.user);
     return data;
   },
 
-  // --- 镜像 / 配置 / 还原点 ---
+  // --- Images / configurations / restore points ---
   listImages: () => request('/api/images'),
   getImage: (id) => request(`/api/images/${encodeURIComponent(id)}`),
   importImage: (body) => request('/api/images/import', { method: 'POST', body }),
