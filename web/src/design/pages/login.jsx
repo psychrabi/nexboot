@@ -4,11 +4,11 @@ import { BRAND, Logo, Wordmark } from '../brand.jsx';
 import { api } from '../../lib/api.js';
 const { useState: useLS, useEffect: useLE, useRef: useLR } = React;
 
-// 页面不知道服务端有没有 TLS，但浏览器知道本次连接的协议，按实际情况显示。
+// Display transport security based on the browser connection, not assumptions about server TLS.
 const secure = typeof window !== "undefined" && window.location.protocol === "https:";
 
 function LoginBootGrid() {
-  // 纯装饰：一格格小终端模拟 PXE 开机。
+  // Decorative mini-client cells simulate PXE boot.
   const [tick, setTick] = useLS(0);
   useLE(() => {
     const id = setInterval(() => setTick(t => t + 1), 180);
@@ -18,7 +18,7 @@ function LoginBootGrid() {
   const cells = React.useMemo(() => {
     const arr = [];
     for (let i = 0; i < 96; i++) {
-      // 每格开机起点和速度各不相同
+      // Each client cell starts and progresses at a different time.
       arr.push({
         offset: (i * 37) % 220,
         speed: 0.5 + ((i * 13) % 15) / 10,
@@ -34,7 +34,7 @@ function LoginBootGrid() {
     <div className="login-grid">
       {cells.map((c, i) => {
         const phase = ((tick * c.speed - c.offset) % 220 + 220) % 220;
-        // 0–60 空闲，60–120 开机闪烁，120–200 在线，200–220 重新循环
+        // 0–60 idle, 60–120 boot animation, 120–200 online, 200–220 reset.
         let state = "idle";
         if (phase < 60) state = "idle";
         else if (phase < 110) state = "boot";
@@ -57,15 +57,15 @@ function LoginBootGrid() {
 }
 
 function LoginAside() {
-  // 只放能力标签不放数字：真实统计要登录后才有，编出来的数字只会误导。
+  // Show capabilities only; actual statistics are unavailable before login.
   const stats = [
-    { label: "网络启动", value: "PXE", unit: "iPXE 链载", color: "emerald" },
-    { label: "系统盘", value: "iSCSI", unit: "LIO 内核态", color: "cyan" },
-    { label: "还原点", value: "ZFS", unit: "秒级克隆", color: "violet" },
-    { label: "驱动适配", value: "离线", unit: "免进系统", color: "amber" },
+    { label: "Network Boot", value: "PXE", unit: "iPXE chainload", color: "emerald" },
+    { label: "System Disk", value: "iSCSI", unit: "Kernel LIO", color: "cyan" },
+    { label: "Restore Points", value: "ZFS", unit: "Instant clones", color: "violet" },
+    { label: "Driver Adaptation", value: "Offline", unit: "No OS boot required", color: "amber" },
   ];
 
-  // 滚动的开机日志
+  // Scrolling boot log
   const logs = React.useMemo(() => {
     const samples = [
       "[ OK ] iPXE 1.21.1+ loaded · ROM 0x9000",
@@ -106,8 +106,8 @@ function LoginAside() {
 
       <div className="login-headline">
         <div className="login-eyebrow mono">ONE PLATFORM · EVERY ENDPOINT</div>
-        <h1>一个平台，<br/>管好每一台无盘终端。</h1>
-        <p>从镜像导入到还原点，从分组网络到在线状态，<br/>所有运维操作一处可达。</p>
+        <h1>One platform.<br/>Manage every diskless endpoint.</h1>
+        <p>From image imports to restore points, group networks to online status,<br/>manage everything in one place.</p>
       </div>
 
       <div className="login-stats">
@@ -124,7 +124,7 @@ function LoginAside() {
           <span className="dot cyan"/>
           <span className="mono" style={{ fontSize: 11, color: "var(--fg-mute)", letterSpacing: "0.12em" }}>BOOT&nbsp;·&nbsp;FLOW</span>
           <span style={{ flex: 1 }}/>
-          <span className="mono meta">无盘启动流程示意</span>
+          <span className="mono meta">Diskless boot process</span>
         </div>
         <div className="login-log-body mono">
           {window6.map((l, i) => (
@@ -145,32 +145,32 @@ function LoginForm({ onLogin }) {
   const [user, setUser] = useLS("admin");
   const [pass, setPass] = useLS("");
   const [showPass, setShowPass] = useLS(false);
-  // 安全相关的文案必须属实：服务端不做 TLS（见 README 部署前提），可能挂在反代后面，
-  // 所以按浏览器实际协议显示。运维会据此判断能否放到共享网络里。
+  // Security copy must be accurate: the server may not terminate TLS (see deployment prerequisites),
+  // so use the browser's actual scheme when indicating whether a shared network is safe.
   const [busy, setBusy] = useLS(false);
-  const [step, setStep] = useLS(""); // 开机动画步骤
+  const [step, setStep] = useLS(""); // Boot animation stage
   const [err, setErr] = useLS("");
 
   const submit = async (e) => {
     e && e.preventDefault();
-    if (!user || !pass) { setErr("请输入用户名与密码"); return; }
+    if (!user || !pass) { setErr("Enter username and password"); return; }
     setErr("");
     setBusy(true);
-    setStep("AUTH · 校验凭据...");
+    setStep("AUTH · Verifying credentials...");
     let data;
     try {
       data = await api.login(user, pass);
     } catch (ex) {
       setBusy(false);
       setStep("");
-      setErr(ex.message || "登录失败");
+      setErr(ex.message || "Login failed");
       return;
     }
-    // 登录成功后先播开机过渡动画再进控制台
+    // Animate the boot transition after successful login before opening the console.
     const steps = [
-      "RBAC · 加载角色权限...",
-      "TOKEN · 签发会话密钥...",
-      "BOOT · 进入控制台",
+      "RBAC · Loading role permissions...",
+      "TOKEN · Issuing session token...",
+      "BOOT · Opening console",
     ];
     let i = -1;
     const tick = () => {
@@ -196,7 +196,7 @@ function LoginForm({ onLogin }) {
         <div className="row" style={{ gap: 10 }}>
           <span className={secure ? "dot cyan" : "dot amber"}/>
           <span className="mono" style={{ fontSize: 11, letterSpacing: "0.16em", color: "var(--fg-mute)" }}>
-            {secure ? <>SECURE&nbsp;·&nbsp;TLS</> : <>内网专用&nbsp;·&nbsp;明文&nbsp;HTTP</>}
+            {secure ? <>SECURE&nbsp;·&nbsp;TLS</> : <>PRIVATE LAN&nbsp;·&nbsp;UNENCRYPTED&nbsp;HTTP</>}
           </span>
         </div>
         <div className="mono" style={{ fontSize: 11, color: "var(--fg-faint)" }}>
@@ -205,14 +205,14 @@ function LoginForm({ onLogin }) {
       </div>
 
       <h2 className="login-title">
-        登录控制台
+        Console Login
         <span className="login-title-cursor"/>
       </h2>
-      <div className="login-sub">使用管理员账户进入 {BRAND.name} 控制台</div>
+      <div className="login-sub">Sign in with an administrator account to access {BRAND.name} 控制台</div>
 
       <label className="login-field">
         <span className="login-field-label">
-          <span>用户名</span>
+          <span>Username</span>
           <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 11 }}>USER</span>
         </span>
         <div className="login-input">
@@ -229,7 +229,7 @@ function LoginForm({ onLogin }) {
 
       <label className="login-field">
         <span className="login-field-label">
-          <span>密码</span>
+          <span>Password</span>
           <span className="mono" style={{ color: "var(--fg-faint)", fontSize: 11 }}>PASS</span>
         </span>
         <div className="login-input">
@@ -247,7 +247,7 @@ function LoginForm({ onLogin }) {
             className="login-eye"
             onClick={() => setShowPass(s => !s)}
             tabIndex={-1}
-            title={showPass ? "隐藏" : "显示"}
+            title={showPass ? "Hide" : "Show"}
           >
             <Icons.Eye size={14}/>
           </button>
@@ -273,7 +273,7 @@ function LoginForm({ onLogin }) {
           ) : (
             <>
               <Icons.Power size={14}/>
-              <span>进入控制台</span>
+              <span>Open Console</span>
               <span style={{ flex: 1 }}/>
               <span className="mono" style={{ fontSize: 11, opacity: 0.7 }}>↵</span>
             </>
@@ -281,8 +281,8 @@ function LoginForm({ onLogin }) {
         </span>
       </button>
 
-      {/* 页脚只写登录前能确知的事：运维输入的地址和服务是否健康（/healthz 公开）。
-          不写节点名或集群规模，登录前无从知道。 */}
+      {/* Only display verifiable pre-login details: the requested server address and public /healthz status.
+          Node identity and cluster size are unknown before login. */}
       <ServiceFoot/>
     </form>
   );
@@ -297,10 +297,10 @@ function ServiceFoot() {
       .catch(() => alive && setHealth("down"));
     return () => { alive = false; };
   }, []);
-  const text = health === "ok" ? "服务正常"
-    : health === "checking" ? "检查中…"
-      : health === "bad" ? "服务不可用"
-        : "连不上服务";
+  const text = health === "ok" ? "Service healthy"
+    : health === "checking" ? "Checking…"
+      : health === "bad" ? "Service unavailable"
+        : "Cannot reach service";
   const color = health === "ok" ? "var(--emerald)" : health === "checking" ? "var(--fg-faint)" : "var(--rose)";
   return (
     <div className="login-foot">
@@ -335,10 +335,10 @@ function LoginPage({ onLogin }) {
       <div className="login-bottom">
         <span className="mono" style={{ fontSize: 11, color: "var(--fg-faint)", letterSpacing: "0.12em" }}>
           © NEXBOOT · DISKLESS ENDPOINT PLATFORM
-          {secure ? " · TLS" : " · 请部署在专用管理/PXE 网段内"}
+          {secure ? " · TLS" : " · Deploy on a dedicated management/PXE subnet"}
         </span>
         <span style={{ flex: 1 }}/>
-        <span className="mono meta">简体中文 · 中国 / 上海</span>
+        <span className="mono meta">English · Browser locale</span>
       </div>
     </div>
   );
