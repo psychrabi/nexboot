@@ -46,7 +46,7 @@ describe('System Settings · Client Network', () => {
   beforeEach(() => stubApi());
   afterEach(() => vi.restoreAllMocks());
 
-  it('Shows client NIC, subnet and each group's network classification', async () => {
+  it("Shows client NIC, subnet and each group's network classification", async () => {
     renderPage();
     expect(await screen.findByText('Client Network')).toBeTruthy();
     const select = screen.getByLabelText('Client Interface');
@@ -84,7 +84,7 @@ describe('System Settings · Client Network', () => {
     await waitFor(() => expect(saveNetwork).toHaveBeenCalledWith({ client_iface: '', allow_cross_subnet: true }));
   });
 
-  it('Shows the backend's original rejection when disabling fails', async () => {
+  it("Shows the backend's original rejection when disabling fails", async () => {
     const saveNetwork = vi.fn(async () => { throw new Error('One cross-subnet group remains: vmdk. Move it to the server subnet before disabling cross-subnet groups.'); });
     stubApi({ getNetwork: async () => ({ ...NETWORK, allow_cross_subnet: true }), saveNetwork });
     renderPage();
