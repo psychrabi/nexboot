@@ -177,7 +177,7 @@ function PageGroups() {
     const n = termsOf(g.ID).length;
     const message = n > 0
       ? `Group ${g.Name} still has ${n} clients. Move or delete them before deleting the group.`
-      : `Delete group ${g.Name}？`;
+      : `Delete group ${g.Name}?`;
     const ok = await conf.ask({ title: "Delete Group", message, danger: true });
     if (!ok) return;
     await run(() => api.deleteGroup(g.ID), "Group deleted", { reload: load, errMsg: "Delete failed" });
@@ -490,7 +490,7 @@ function DataDisksEditor({ images, systemImageId, form, setForm, imageName, conf
       </div>
       {!dataImages.length && (
         <div className="hint" style={{ marginTop: 6 }}>
-          No {sysOS === "linux" ? " Linux" : " Windows"} data-disk images. <span style={{ color: "var(--cyan)", cursor: "pointer" }} onClick={onCreateImage}>Create one in Image Management</span>.
+          No {sysOS === "linux" ? "Linux" : "Windows"} data-disk images. <span style={{ color: "var(--cyan)", cursor: "pointer" }} onClick={onCreateImage}>Create one in Image Management</span>.
         </div>
       )}
     </div>
@@ -507,7 +507,7 @@ function NewDiskRow({ index, row, images, linux, onChange, onRemove }) {
         value={row.mount_target} onChange={e => onChange({ mount_target: e.target.value })}/></td>
       <td><Select aria-label={`${label} Image`} value={row.image_id || ""} onChange={v => onChange({ image_id: v, config_id: "" })} options={imageOptions(images)}/></td>
       <td><Select aria-label={`${label} Configuration`} value={row.config_id || ""} onChange={v => onChange({ config_id: v })} options={configOptions(configs)}/></td>
-      <td className="t-actions"><div><button className="btn ghost icon danger" onClick={onRemove} title="Remove" aria-label={`Remove${label}`}><Icons.Trash size={12}/></button></div></td>
+      <td className="t-actions"><div><button className="btn ghost icon danger" onClick={onRemove} title="Remove" aria-label={`Remove ${label}`}><Icons.Trash size={12}/></button></div></td>
     </tr>
   );
 }
@@ -553,7 +553,7 @@ function NetworkStatusLine({ status, form, network, onFill, toast }) {
     {probe && (probe.error
       ? <div>Probe failed: {probe.error}</div>
       : probe.reachable
-        ? <div>Ping from server to {probe.ip}：Reachable{probe.rtt_ms ? ` (${probe.rtt_ms} ms)` : ""} ✓</div>
+        ? <div>Ping from server to {probe.ip}: Reachable{probe.rtt_ms ? ` (${probe.rtt_ms} ms)` : ""} ✓</div>
         : <div>Cannot ping {probe.ip}.Clients may not get addresses. Check DHCP relay (helper-address {network.boot_host}) and routing to the server. Ignore ping failures if the switch blocks ICMP.</div>)}
     {showSnippet && <pre className="mono" style={{ marginTop: 6, whiteSpace: "pre-wrap", fontSize: 12, color: "var(--fg)" }}>{relaySnippet(network.boot_host || nets)}</pre>}
   </>);
