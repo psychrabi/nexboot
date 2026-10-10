@@ -298,13 +298,13 @@ function PageStorage() {
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))", gap: 12 }}>
         <StatCard label="Storage Pool" value={pools.length} unit=" pools" accent="cyan"
           sub={clustered
-            ? `${onlineN} online · ${nodes.length} nodesServer${missing ? ` · ${missing} nodesunreachable` : ""}`
+            ? `${onlineN} online · ${nodes.length} servers${missing ? ` · ${missing} unreachable` : ""}`
             : `${onlineN} online`}/>
         <StatCard label="Total Capacity" value={fmtCap(totalCap).split(" ")[0]} unit={fmtCap(totalCap).split(" ")[1] || ""} accent="violet"
-          sub={`${dataDiskN}  storage disks${partial}`}/>
+          sub={`${dataDiskN} storage disks${partial}`}/>
         <StatCard label="Used" value={fmtCap(totalUsed).split(" ")[0]} unit={fmtCap(totalUsed).split(" ")[1] || ""} accent="amber"
           sub={`Available ${fmtCap(totalCap - totalUsed)} · ${usePct}% Utilization${partial}`} pct={usePct}/>
-        <StatCard label="Cache Disks" value={rcN + wcN} unit=" disks" accent="emerald" sub={`Read ${rcN} · Write ${wcN}`}/>
+        <StatCard label="Cache Disks" value={rcN + wcN} unit="disks" accent="emerald" sub={`Read ${rcN} · Write ${wcN}`}/>
       </div>
 
       {/* Filter controls */}
@@ -655,7 +655,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
 
           <DiskSection title="Metadata Disks special" groups={specialGroups} disks={[]} busy={busy}
             onAdd={() => setPicker("special")}
-            groupAction={(g) => <button className="btn ghost icon danger" disabled={busy} onClick={() => removeSpecialGroup(g)} title="Remove Metadata Disksgroup" aria-label={`Remove metadata group ${g.Name}`}><Icons.Trash size={12}/></button>}
+            groupAction={(g) => <button className="btn ghost icon danger" disabled={busy} onClick={() => removeSpecialGroup(g)} title="Remove Metadata Disk Group" aria-label={`Remove metadata group ${g.Name}`}><Icons.Trash size={12}/></button>}
             note="Store metadata and small blocks on mirrored SSD/NVMe. HDD pools benefit most. Losing an unmirrored metadata device loses the pool."/>
           <DiskSection title="Hot Spares" disks={spareDisks} busy={busy}
             onAdd={() => setPicker("spare")} onRemove={removeSpareDisk} removable removeLabel="Remove Hot Spare"
