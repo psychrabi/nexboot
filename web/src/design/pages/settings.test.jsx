@@ -7,7 +7,7 @@ import { StoreProvider } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageSystemParams } from './settings.jsx';
 
-// 客户机网络卡片：打开跨网段要经确认；仍有分组依赖时关闭会被拒，显示服务端的信息。
+// Cross-subnet network settings require confirmation; disabling an in-use feature must show the backend rejection.
 
 const list = (items) => ({ items, total: items.length });
 const NETWORK = {
@@ -19,7 +19,7 @@ const NETWORK = {
   boot_host: '192.168.50.1', allow_cross_subnet: false, known: true,
   suggest: { start_ip: '192.168.50.10', client_max: 30, netmask: '255.255.255.0', gateway: '' },
   groups: [
-    { id: 'g-1', name: '一班', start_ip: '192.168.50.50', client_max: 30, status: 'same' },
+    { id: 'g-1', name: 'Class A', start_ip: '192.168.50.50', client_max: 30, status: 'same' },
     { id: 'g-2', name: 'vmdk', start_ip: '192.168.10.50', client_max: 30, status: 'blocked' },
   ],
 };
@@ -42,55 +42,55 @@ const renderPage = () => render(
   <StoreProvider><ConfirmProvider><PageSystemParams/></ConfirmProvider></StoreProvider>,
 );
 
-describe('系统参数 · 客户机网络', () => {
+describe('System Settings · Client Network', () => {
   beforeEach(() => stubApi());
   afterEach(() => vi.restoreAllMocks());
 
-  it('显示客户机网卡、网段与各分组的网段状态', async () => {
+  it('Shows client NIC, subnet and each group's network classification', async () => {
     renderPage();
-    expect(await screen.findByText('客户机网络')).toBeTruthy();
-    const select = screen.getByLabelText('客户机网卡');
-    // 未选择即自动探测，并当场显示探测到的网卡。
+    expect(await screen.findByText('Client Network')).toBeTruthy();
+    const select = screen.getByLabelText('Client Interface');
+    // Without a selection, auto-detect the network interface and show it.
     expect(select.value).toBe('');
     expect(select.selectedOptions[0].textContent).toContain('ndbr0');
     expect(screen.getAllByText(/192\.168\.50\.1\/24/).length).toBeGreaterThan(0);
     expect(screen.getByText('vmdk')).toBeTruthy();
-    expect(screen.getByText('不通')).toBeTruthy();
+    expect(screen.getByText('Unreachable')).toBeTruthy();
   });
 
-  // 三项的说明跟在标题后面，默认收起，点「?」才展开。
-  it('客户机网络的说明默认收起，点问号展开', async () => {
+  // Contextual help follows labels, collapsed until the operator clicks ?.
+  it('Keeps network help collapsed until opened', async () => {
     renderPage();
-    expect(await screen.findByText('客户机网络')).toBeTruthy();
-    expect(screen.queryByText(/dnsmasq 给客户机发地址/)).toBeNull();
-    const q = screen.getByRole('button', { name: '客户机网卡说明' });
+    expect(await screen.findByText('Client Network')).toBeTruthy();
+    expect(screen.queryByText(/The interface on which dnsmasq assigns client IPs/)).toBeNull();
+    const q = screen.getByRole('button', { name: 'Help for Client Interface' });
     await userEvent.click(q);
-    // 说明紧跟在标题和问号后面，不是掉到输入框下面
-    expect(q.parentElement.textContent).toMatch(/dnsmasq 给客户机发地址/);
-    expect(screen.getByRole('button', { name: '客户机网段说明' })).toBeTruthy();
-    expect(screen.getByRole('button', { name: '跨网段分组说明' })).toBeTruthy();
+    // Help appears beside the label and ? button, not below the input.
+    expect(q.parentElement.textContent).toMatch(/The interface on which dnsmasq assigns client IPs/);
+    expect(screen.getByRole('button', { name: 'Help for Client Subnet' })).toBeTruthy();
+    expect(screen.getByRole('button', { name: 'Help for Cross-subnet Groups' })).toBeTruthy();
   });
 
-  it('打开跨网段分组要先确认', async () => {
+  it('Requires confirmation before enabling cross-subnet groups', async () => {
     const saveNetwork = vi.fn(async (body) => ({ ...NETWORK, ...body }));
     stubApi({ saveNetwork });
     renderPage();
-    await screen.findByText('客户机网络');
-    await userEvent.click(screen.getByLabelText('允许跨网段分组（DHCP 中继）'));
-    // 还没保存：确认框里写着交换机需要的配置。
+    await screen.findByText('Client Network');
+    await userEvent.click(screen.getByLabelText('Allow cross-subnet groups (DHCP relay)'));
+    // Before saving, the confirmation explains the switch configuration requirements.
     expect(saveNetwork).not.toHaveBeenCalled();
-    expect(await screen.findByText(/分组网段可以和服务器不在一个网段/)).toBeTruthy();
-    await userEvent.click(screen.getByRole('button', { name: '打开' }));
+    expect(await screen.findByText(/groups may use a different subnet than the server/)).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Enable' }));
     await waitFor(() => expect(saveNetwork).toHaveBeenCalledWith({ client_iface: '', allow_cross_subnet: true }));
   });
 
-  it('关不掉时显示服务器的原话', async () => {
-    const saveNetwork = vi.fn(async () => { throw new Error('还有 1 个跨网段分组：vmdk。先把它们改到服务器网段，再关闭跨网段分组'); });
+  it('Shows the backend's original rejection when disabling fails', async () => {
+    const saveNetwork = vi.fn(async () => { throw new Error('One cross-subnet group remains: vmdk. Move it to the server subnet before disabling cross-subnet groups.'); });
     stubApi({ getNetwork: async () => ({ ...NETWORK, allow_cross_subnet: true }), saveNetwork });
     renderPage();
-    await screen.findByText('客户机网络');
-    await userEvent.click(screen.getByLabelText('允许跨网段分组（DHCP 中继）'));
+    await screen.findByText('Client Network');
+    await userEvent.click(screen.getByLabelText('Allow cross-subnet groups (DHCP relay)'));
     await waitFor(() => expect(saveNetwork).toHaveBeenCalledWith({ client_iface: '', allow_cross_subnet: false }));
-    expect((await screen.findAllByText(/还有 1 个跨网段分组：vmdk/)).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText(/One cross-subnet group remains: vmdk/)).length).toBeGreaterThan(0);
   });
 });
