@@ -555,7 +555,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
       const left = (group.Disks || []).length - 1;
       const ok = await conf.ask({
         title: "Detach RAID1 Disk",
-        message: `Detach ${path}？${group.Name} will have only ${left}-way${left === 1 ? " with no redundancy" : ""}. Detach is immediate, without copying data.`,
+        message: `Detach ${path}? ${group.Name} will have only ${left}-way${left === 1 ? " with no redundancy" : ""}. Detach is immediate, without copying data.`,
         danger: true, confirmText: "Detach",
       });
       if (ok) await run(() => api.removePoolDisk(pool.ID, { disk: path }), "RAID1 detach task submitted");
@@ -587,7 +587,7 @@ function PoolDetail({ pool, freeDisks, onClose, onChanged, onDestroy, remoteNode
     if (ok) await run(() => api.removeSpecial(pool.ID, { disk: group.Name }), `Remove ${group.Name} task submitted`);
   };
   const removeSpareDisk = async (path) => {
-    const ok = await conf.ask({ title: "Remove Hot Spare", message: `Remove ${path} Remove ${pool.Name} hot-spare list? Failed disks will no longer be replaced automatically.`, danger: true, confirmText: "Remove" });
+    const ok = await conf.ask({ title: "Remove Hot Spare", message: `Remove ${path} from ${pool.Name}'s hot-spare list? Failed disks will no longer be replaced automatically.`, danger: true, confirmText: "Remove" });
     if (ok) await run(() => api.removeSpare(pool.ID, { disk: path }), "Remove Hot Sparetask submitted");
   };
   const removeGroup = async (group) => {
