@@ -1,7 +1,7 @@
-// 公共格式化函数和标签表，各页面统一从这里取。
+// Shared formatting helpers and display labels used throughout the application.
 export const pad2 = (n) => String(n).padStart(2, "0");
 
-// null（new Date(null) 是 1970 年）和 Go 零值时间都表示「尚未」。
+// Null (new Date(null) yields 1970) and Go zero timestamps both mean unavailable.
 const toDate = (iso) => {
   if (!iso) return null;
   const d = new Date(iso);
@@ -36,19 +36,19 @@ export const fmtCap = (b) => {
   return `${(b / (1024 ** 2)).toFixed(0)} MiB`;
 };
 
-// 任务名用界面上按钮的说法而非内部动作名，否则操作者对不上自己点的是哪件事。
+// Match task labels to user-facing button text rather than internal action names.
 export const TASK_LABELS = {
-  import_image: "镜像导入", export_image: "镜像导出", create_blank_image: "新建数据盘", create_config: "创建配置", delete_config: "删除配置",
-  create_reduction: "创建还原点", delete_reduction: "删除还原点",
-  merge_config: "覆盖原镜像", merge_reduction: "合并还原点", copy_image: "另存为新镜像",
-  super_stop: "关机存还原点", publish_data_disk: "发布数据盘",
-  create_pool: "创建存储池", destroy_pool: "销毁存储池", add_disk: "添加存储盘",
-  migrate_disk: "移除磁盘", replace_disk: "替换磁盘", detach_disk: "摘除镜像盘", mirror_upgrade: "升级为镜像",
-  add_special: "添加元数据盘", remove_special: "移除元数据盘", add_spare: "添加热备盘", remove_spare: "移除热备盘",
-  add_read_cache: "添加读缓存", remove_read_cache: "移除读缓存",
-  add_write_cache: "添加写缓存", remove_write_cache: "移除写缓存",
-  flush_cache: "刷新写缓存", backup_dataset: "数据备份", image_health_check: "镜像体检",
+  import_image: "Import image", export_image: "Export image", create_blank_image: "Create data disk", create_config: "Create configuration", delete_config: "Delete configuration",
+  create_reduction: "Create restore point", delete_reduction: "Delete restore point",
+  merge_config: "Overwrite original image", merge_reduction: "Merge restore point", copy_image: "Save as new image",
+  super_stop: "Shut down and save restore point", publish_data_disk: "Publish data disk",
+  create_pool: "Create storage pool", destroy_pool: "Destroy storage pool", add_disk: "Add storage disk",
+  migrate_disk: "Remove disk", replace_disk: "Replace disk", detach_disk: "Detach image disk", mirror_upgrade: "Upgrade to mirror",
+  add_special: "Add metadata disk", remove_special: "Remove metadata disk", add_spare: "Add hot spare", remove_spare: "Remove hot spare",
+  add_read_cache: "Add read cache", remove_read_cache: "Remove read cache",
+  add_write_cache: "Add write cache", remove_write_cache: "Remove write cache",
+  flush_cache: "Flush write cache", backup_dataset: "Data backup", image_health_check: "Image health check",
 };
 
-// redName 返回还原点的显示名：优先用操作者输入的名称，没有显示名的旧记录退回 ASCII 快照名。
+// Prefer the user-provided restore-point name; fall back to the ASCII snapshot name for older records.
 export const redName = (r) => (r && (r.DisplayName || r.Name)) || "";
