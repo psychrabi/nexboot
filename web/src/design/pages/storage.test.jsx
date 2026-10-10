@@ -179,8 +179,8 @@ describe('Storage management cluster aggregation', () => {
     await userEvent.click(await within(dlg).findByText('/dev/sdx'));
     await userEvent.click(screen.getByRole('button', { name: 'Create' }));
     const msg = await screen.findByText(/Create anyway/);
-    expect(msg.textContent).toBe('将在 192.168.10.4 上Create Storage Pool data，使用Disk：/dev/sdx。\n'
-      + '条带布局无冗余：任一磁盘故障，data 中的全部镜像、配置、还原点及客户机克隆将丢失且无法恢复。确认以条带布局Create？');
+    expect(msg.textContent).toBe('Create pool on 192.168.10.4 with name data; disks: /dev/sdx.\n'
+      + 'Stripe has no redundancy. Failure of any disk loses all data in data (images, configurations, restore points and client clones). Create anyway?');
     await userEvent.click(screen.getByRole('button', { name: 'Create Anyway' }));
     await waitFor(() => expect(create).toHaveBeenCalledTimes(1));
     expect(screen.queryByText(/Create on Another Server/)).toBeNull();
@@ -399,7 +399,7 @@ describe('Storage Pool Management', () => {
     await userEvent.click(submit);
     expect(createPool).not.toHaveBeenCalled(); // No selected disks
 
-    // 只能选还没有加入池的盘。
+    // Only free disks that are not in another pool can be selected.
     await userEvent.click(screen.getByText(/sdc/));
     await userEvent.clear(nameBox);
     await userEvent.click(submit);
@@ -519,7 +519,7 @@ describe('Storage Pool Management', () => {
     await userEvent.click(await screen.findByText('backup'));
     await screen.findByText('raidz2-0');
     expect(screen.queryByRole('button', { name: /^Remove \/dev/ })).toBeNull();
-    expect(screen.getByText(/raidz 不能移盘/)).toBeTruthy();
+    expect(screen.getByText(/raidz devices cannot be removed/)).toBeTruthy();
 
     await userEvent.click(screen.getByRole('button', { name: 'Replace /dev/sdj' }));
     const confirm = await screen.findByRole('button', { name: 'Confirm' });
