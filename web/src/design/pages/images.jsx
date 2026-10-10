@@ -44,7 +44,7 @@ const OS_META = { windows: { t: "Windows" }, linux: { t: "Linux" } };
 // System images boot clients; data images are formatted volumes mounted alongside the system disk.
 const PURPOSE_META = { system: { t: "System Disk Image", c: "cyan" }, data: { t: "Data Disk Image", c: "violet" } };
 const purposeOf = (img) => (img.Purpose === "data" ? "data" : "system");
-const FS_META = { ntfs: { t: "NTFS（Windows）" }, ext4: { t: "ext4（Linux）" } };
+const FS_META = { ntfs: { t: "NTFS (Windows)" }, ext4: { t: "ext4 (Linux)" } };
 
 function PageImages() {
   const store = useStore();
