@@ -53,7 +53,7 @@ jobs:
       - name: vitest / vite build
         run: make verify-web
 
-  # 交付物是静态二进制（内嵌前端）和装它的 .deb（README 快速开始用的就是 apt install .deb）。
+  # 交付物是 .deb（内嵌静态二进制与前端；README 快速开始用的就是 apt install .deb）。
   # 标签指向的那个提交就是可回滚的基线。
   release:
     if: startsWith(github.ref, 'refs/tags/v')
@@ -76,8 +76,6 @@ jobs:
       - run: make deb
       - uses: softprops/action-gh-release@v2
         with:
-          files: |
-            bin/ndiskless-linux-amd64
-            dist/ndiskless_*.deb
+          files: dist/ndiskless_*.deb
           fail_on_unmatched_files: true
           generate_release_notes: true
