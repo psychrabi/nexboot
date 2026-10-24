@@ -163,3 +163,14 @@ func TestAdaptCheckCloneIsATransientRunCarrier(t *testing.T) {
 		t.Fatalf("container = %q, want %q", ContainerFor(name), RunRoot)
 	}
 }
+
+// 提取 WinRE 用的临时克隆归体检类：只活几秒、只在本节点，崩溃残留由同一套清扫收走。
+func TestWinRECloneIsRecognisable(t *testing.T) {
+	name := WinRECloneName("win11")
+	if c := Classify(name); c.Kind != CarrierInspect {
+		t.Fatalf("Classify(%q) = %s, want inspect", name, c.Kind)
+	}
+	if name == InspectCloneName("win11") {
+		t.Fatal("要和体检克隆名区分开，两者可能同时存在")
+	}
+}

@@ -1,11 +1,12 @@
 // 镜像管理的「配置」「还原点」两个标签页，以及它们的弹窗。只给 images.jsx 用。
 import React from 'react';
+import { createPortal } from 'react-dom';
 import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
 import { Modal, useConfirm } from '../overlay.jsx';
 import { Field, Select, TableState, SearchBox, Pager } from '../primitives.jsx';
 import { api } from '../../lib/api.js';
-import { redName, fmtDateTime } from '../../lib/format.js';
+import { redName, fmtDateTime, MODEL_RECORD_SOURCES } from '../../lib/format.js';
 import { useResource, useMutation, usePaged } from '../../lib/hooks.js';
 const { useState, useEffect } = React;
 
@@ -82,10 +83,13 @@ export function ConfigsTab({ images, onShowReductions }) {
   const paged = usePaged(rows);
 
   const doDelete = async (cfg) => {
-    const message = cfg.groups.length
-      ? `配置 ${cfg.Name} 正被分组 ${namesClause(cfg.groups)} 用作启动配置，删除会失败。\n请先在分组中改绑其他配置。`
-      : `删除配置 ${cfg.Name}？它的 ${cfg.reductions.length} 个还原点将一并删除。`;
-    if (!(await conf.ask({ title: "删除配置", message, danger: true }))) return;
+    if (cfg.groups.length) {
+      await conf.ask({ title: "无法删除配置", notice: true,
+        message: `配置 ${cfg.Name} 正被分组 ${namesClause(cfg.groups)} 用作启动配置。\n请先在分组中改绑其他配置，再删除。` });
+      return;
+    }
+    if (!(await conf.ask({ title: "删除配置", danger: true,
+      message: `删除配置 ${cfg.Name}？它的 ${cfg.reductions.length} 个还原点将一并删除。` }))) return;
     await run(() => api.deleteConfig(cfg.ID), "配置删除任务已提交", { reload, errMsg: "删除失败" });
   };
 
@@ -230,10 +234,12 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
 
   const confirmDelete = async (rp) => {
     const refs = (await listGroups()).filter(g => g.SystemReductionID === rp.ID).map(g => g.Name);
-    const warnings = [];
-    if (refs.length) warnings.push(`正被分组 ${namesClause(refs)} 用作还原点，删除会失败`);
-    const message = warnings.length ? `还原点 ${redName(rp)}：${warnings.join("；")}。确定删除？` : `删除还原点 ${redName(rp)}？`;
-    if (!(await conf.ask({ title: "删除还原点", message, danger: true, confirmText: "删除" }))) return;
+    if (refs.length) {
+      await conf.ask({ title: "无法删除还原点", notice: true,
+        message: `还原点 ${redName(rp)} 正被分组 ${namesClause(refs)} 使用。\n请先在配置上应用其他还原点，再删除。` });
+      return;
+    }
+    if (!(await conf.ask({ title: "删除还原点", message: `删除还原点 ${redName(rp)}？`, danger: true, confirmText: "删除" }))) return;
     await run(() => api.deleteReduction(rp.ID), "还原点删除任务已提交", { reload, errMsg: "删除失败" });
   };
 
@@ -309,6 +315,7 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
                   <td className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(rp.CreatedAt)}</td>
                   <td className="t-actions"><div>
                     {!current && ready && <button className="btn" style={{ padding: "3px 8px" }} disabled={busy} onClick={() => apply(rp)} aria-label={`应用 ${name}`}>应用</button>}
+                    <button className="btn" style={{ padding: "3px 8px" }} onClick={() => setModal({ kind: "detail", rp })}>详情</button>
                     <button className="btn" style={{ padding: "3px 8px" }} disabled={!ready} onClick={() => setModal({ kind: "saveAs", rp })} aria-label={`另存为新镜像 ${name}`}>另存为新镜像</button>
                     <button className="btn" style={{ padding: "3px 8px" }} disabled={!ready} onClick={() => setModal({ kind: "export", rp })} aria-label={`导出为镜像文件 ${name}`}>导出为镜像文件</button>
                     <MoreMenu label={`更多操作 ${name}`} items={[
@@ -324,6 +331,7 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
         </table></div>
         <Pager {...paged.pager}/>
       </div>
+      {modal?.kind === "detail" && <ReductionDetail rp={modal.rp} onClose={() => setModal(null)}/>}
       {modal?.kind === "saveAs" && <SaveAsImageModal rp={modal.rp} image={imageOf(modal.rp.cfg.ImageID)} busy={busy} run={run} onClose={() => setModal(null)}/>}
       {modal?.kind === "export" && <ExportModal busy={busy} run={run} onClose={() => setModal(null)}
         title={`导出还原点 · ${imageOf(modal.rp.cfg.ImageID)?.Name || modal.rp.cfg.ImageID} / ${redName(modal.rp)}`}
@@ -335,23 +343,44 @@ export function RestorePointsTab({ images, imageId, configId, onPick }) {
   );
 }
 
-// 页内的「更多」下拉，与 servers.jsx 的 Tip 同一种浮层写法。
+// 页内的「更多」下拉，与 primitives.jsx 的 Tip 同一种浮层写法：挂在 body 上按视口坐标放，表格的滚动框裁不到它。
 function MoreMenu({ label, items: entries }) {
-  const [open, setOpen] = useState(false);
+  const [box, setBox] = useState(null); // 展开时的视口坐标
+  useEffect(() => {
+    if (!box) return undefined;
+    const close = () => setBox(null);
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    window.addEventListener("keydown", onKey, true);
+    window.addEventListener("scroll", close, true); // fixed 弹层滚动时会偏离按钮
+    return () => {
+      window.removeEventListener("keydown", onKey, true);
+      window.removeEventListener("scroll", close, true);
+    };
+  }, [box]);
+  const toggle = (e) => {
+    if (box) { setBox(null); return; }
+    // 右边与按钮对齐；按钮下方放不下（约 40px 一项）就向上展开。
+    const r = e.currentTarget.getBoundingClientRect();
+    const vw = document.documentElement.clientWidth || window.innerWidth;
+    const right = Math.max(16, vw - r.right);
+    const up = window.innerHeight - r.bottom < entries.length * 40 + 16;
+    setBox(up ? { right, bottom: window.innerHeight - r.top + 4 } : { right, top: r.bottom + 4 });
+  };
   return (
-    <span style={{ position: "relative", display: "inline-flex" }}>
-      <button className="btn ghost" style={{ padding: "3px 8px" }} aria-label={label} onClick={() => setOpen(v => !v)}>更多 ▾</button>
-      {open && (
+    <span style={{ display: "inline-flex" }}>
+      <button className="btn ghost" style={{ padding: "3px 8px" }} aria-label={label} aria-expanded={!!box} onClick={toggle}>更多 ▾</button>
+      {box && createPortal(
         <>
-          <span onClick={() => setOpen(false)} style={{ position: "fixed", inset: 0, zIndex: "var(--z-popover)" }}/>
-          <span className="card" style={{ position: "absolute", top: 28, right: 0, zIndex: "var(--z-popover)", padding: 4, minWidth: 120,
+          <span onClick={() => setBox(null)} style={{ position: "fixed", inset: 0, zIndex: "var(--z-popover)" }}/>
+          <span className="card" style={{ position: "fixed", ...box, zIndex: "var(--z-popover)", padding: 4, minWidth: 120,
             display: "flex", flexDirection: "column", boxShadow: "0 8px 24px oklch(0 0 0 / 0.45)" }}>
             {entries.map(e => (
               <button key={e.label} className={`btn ghost${e.danger ? " danger" : ""}`} disabled={e.disabled} title={e.title || undefined} style={{ justifyContent: "flex-start" }}
-                onClick={() => { setOpen(false); e.onClick(); }}>{e.label}</button>
+                onClick={() => { setBox(null); e.onClick(); }}>{e.label}</button>
             ))}
           </span>
-        </>
+        </>,
+        document.body,
       )}
     </span>
   );
@@ -432,4 +461,15 @@ export function ExportModal({ title, source, ticket, toDir, busy, run, onClose }
       </div>
     </Modal>
   );
+}
+
+function ReductionDetail({ rp, onClose }) {
+  const store = useStore();
+  const { data, loading, error } = useResource(() => api.reductionModels(rp.ID), [rp.ID]);
+  return <Modal open onClose={onClose} title={`还原点 · ${redName(rp)}`}>
+    <p className="card-title">机型记录</p>
+    <p className="hint">开机成功表示这个机型在此还原点上开过机；完整适配和沿用只说明写过网卡配置，要等机器开机成功才算数。</p>
+    {loading ? <div className="hint">加载中…</div> : error ? <div role="alert" className="hint">{error}</div> : !data?.length ? <div className="hint">暂无记录</div> : data.map(m =>
+      <p key={m.id}><button className="btn" onClick={() => store.goto('models', { profileId: m.id })}>{m.name}</button> <span className="mono">{m.nic_label}</span> <span className="meta">{MODEL_RECORD_SOURCES[m.source] || ''}</span></p>)}
+  </Modal>;
 }

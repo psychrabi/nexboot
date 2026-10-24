@@ -43,6 +43,7 @@ func (h ControlHandler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if h.Controller.Healthy != nil {
 			st.Healthy = h.Controller.Healthy(r.Context())
 		}
+		st.Lacks = h.Controller.Lacks(r.Context())
 		_ = json.NewEncoder(w).Encode(st)
 	case r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/activate"):
 		// 不提供 force：唯一的栅栏（对端仍在服务）本就不允许跳过，真要抢应去那台上停服务。

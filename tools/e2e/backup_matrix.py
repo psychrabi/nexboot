@@ -11,6 +11,7 @@
 64M 假 raw 过不了体检闸门）。本脚本会清空备份池上的 ndiskless/ 子树、删除并重建
 名为 probe-bk 的镜像。
 """
+import atexit
 import os
 import shlex
 import sys
@@ -31,7 +32,18 @@ SRC_ROOT = f"{POOL}/nd"
 DST_ROOT = f"{BACKUP_POOL}/ndiskless/nd"
 
 
+# 开跑前的备份计划，收尾时放回去：留着「开启、每 24 小时」，测完之后备份池会一直收全量。
+ORIGINAL_CFG = None
+
+
+def restore_cfg():
+    if isinstance(ORIGINAL_CFG, dict):
+        call("PUT", "/api/backup/config", {"enabled": bool(ORIGINAL_CFG.get("enabled")),
+                                           "schedule": ORIGINAL_CFG.get("schedule") or ""})
+
+
 def cleanup():
+    restore_cfg()
     call("DELETE", f"/api/terminals/{TERMINAL}")
     for g in call("GET", "/api/groups")[1]["items"]:
         if g["Name"].startswith("e2e-bk"):
@@ -143,6 +155,10 @@ call("POST", "/api/images/import", {"name": IMG, "source_path": SOURCE, "os_type
 t = task_of("task-import_image", timeout=900)
 check("0a", "测试镜像导入完成", t.get("Status") == "success", (t.get("Error") or "")[:120])
 time.sleep(12)  # 体检的 INSPECT 克隆要先释放
+st, prev = call("GET", "/api/backup/config")
+if st == 200 and isinstance(prev, dict):
+    ORIGINAL_CFG = prev
+    atexit.register(restore_cfg)  # 中途异常退出也放回去
 st, _ = call("PUT", "/api/backup/config", {"backup_pool": BACKUP_POOL, "enabled": True, "schedule": "24h"})
 check("0b", "备份池配置写入", st == 200)
 

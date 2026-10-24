@@ -604,7 +604,7 @@ func TestMergeConfigPromotesConfigIntoImageAndRebuildsIt(t *testing.T) {
 		t.Fatalf("state = %#v, want %#v", got, wantMerged)
 	}
 	red := result.Reduction
-	if red.ID != "cfg-keep_0" || red.ConfigID != "cfg-keep" || red.Name != "@0" || red.Status != domain.ReductionStatusReady {
+	if red.ID != "img_0" || red.ConfigID != "cfg-keep" || red.Name != "@0" || red.Status != domain.ReductionStatusReady {
 		t.Fatalf("reduction = %#v", red)
 	}
 }

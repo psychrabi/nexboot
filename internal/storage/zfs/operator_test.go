@@ -17,7 +17,7 @@ func TestOperatorMessageSaysWhatToDo(t *testing.T) {
 		err  error
 		want string
 	}{
-		{"忙", cmd("cannot destroy 'tank/x': dataset is busy"), "请稍后重试"},
+		{"忙", cmd("cannot destroy 'tank/x': dataset is busy"), "或正在向备机复制"},
 		{"挂载目录不空", cmd("mountpoint '/ndiskless/data' exists and is not empty\nuse '-m' option to provide a different default"),
 			"挂载目录 /ndiskless/data 已存在且不为空，请换一个池名，或先清空该目录"},
 		{"不存在", cmd("cannot open 'tank/x': dataset does not exist"), "没有完成"},

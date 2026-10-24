@@ -387,3 +387,29 @@ func TestRegisterRefusesANodeInsideAGroupRange(t *testing.T) {
 		t.Fatalf("区间外的节点也被拦了：%v", err)
 	}
 }
+
+// 名册要标出本机：别台的行可能是过期的「active」（已关机的节点），界面不能拿第一个 active 当本机。
+func TestClusterRegistryNodesMarksSelf(t *testing.T) {
+	st := newImageTestStore(t)
+	ctx := context.Background()
+	for _, s := range []domain.Server{
+		{ID: "node-old", Name: "node-old", IP: "10.0.0.3", Role: domain.ServerRoleAll, Status: domain.ServerStatusUp, HAState: "active"},
+		{ID: "node-self", Name: "node-self", IP: "10.0.0.5", Role: domain.ServerRoleAll, Status: domain.ServerStatusUp, HAState: "active"},
+	} {
+		if err := st.Servers().Create(ctx, s); err != nil {
+			t.Fatal(err)
+		}
+	}
+	reg := ClusterRegistry{Store: st, Now: time.Now, SelfNodeID: "node-self"}
+	res, err := reg.Nodes(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	self := map[string]bool{}
+	for _, n := range res.Items {
+		self[n.ID] = n.IsSelf
+	}
+	if !self["node-self"] || self["node-old"] {
+		t.Fatalf("is_self = %v", self)
+	}
+}

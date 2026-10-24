@@ -99,7 +99,7 @@ type takeoverPlan struct {
 
 // settleTakeover 根据已应答的对端做成为写入者前的最后决定：本节点让位时返回错误，继续时返回计划。
 func (c *Controller) settleTakeover(ctx context.Context, answered []answeredPeer) (takeoverPlan, error) {
-	missing := c.incomplete(ctx)
+	missing := c.incomplete(ctx, answered)
 	mine := c.mark(ctx)
 	// 仍在应答的写入者（无论健康与否）持有尚未进入任何轮次的改动；轮次更新的对端比本节点持有更多。
 	var better []answeredPeer
@@ -146,7 +146,7 @@ func (c *Controller) settleTakeover(ctx context.Context, answered []answeredPeer
 			c.callOff(ctx, plan.writer)
 			return takeoverPlan{}, errors.New("追平目录期间虚 IP 已移到别的节点，本节点不接任")
 		}
-		missing, mine = c.incomplete(ctx), c.mark(ctx)
+		missing, mine = c.incomplete(ctx, answered), c.mark(ctx)
 	}
 	if cause == nil && len(missing) == 0 && !markNewer(theirs, mine) {
 		c.logf("caught up before taking over", "from", src.who(), "round", mine)
@@ -265,11 +265,70 @@ func (c *Controller) callOff(ctx context.Context, writer HandoverPeer) {
 	}
 }
 
-func (c *Controller) incomplete(ctx context.Context) []string {
+// incomplete 返回本节点缺、且可能有别的节点持有的对象（给人看的名字）。每个应答的对端都报告
+// 自己也缺的那些剔除：那是写入者库里留下、谁的池里都没有的记录，让给谁都补不齐。不剔除的话
+// 每台备机都觉得自己不完整、互相让位，结果谁也不接任。这与复制的跟随判据（heldLocally）一致：
+// 只有确实有节点持有的数据才值得为它让路。没有对端应答、或对端（旧版本）不报 Lacks 时不剔除。
+func (c *Controller) incomplete(ctx context.Context, answered []answeredPeer) []string {
 	if c.CatalogueIncomplete == nil {
 		return nil
 	}
-	return c.CatalogueIncomplete(ctx)
+	var out, nobody []string
+	for _, m := range c.CatalogueIncomplete(ctx) {
+		if heldByNobody(m.Ref, answered) {
+			nobody = append(nobody, m.Label)
+			continue
+		}
+		out = append(out, m.Label)
+	}
+	if len(nobody) > 0 {
+		c.logf("the catalogue lists datasets no answering node holds; not waiting for them",
+			"missing", strings.Join(nobody, "、"))
+	}
+	return out
+}
+
+// heldByNobody 判断 ref 在每个应答的对端上都缺（对端自己报告的 Lacks）。
+func heldByNobody(ref string, answered []answeredPeer) bool {
+	if ref == "" || len(answered) == 0 {
+		return false
+	}
+	for _, p := range answered {
+		found := false
+		for _, l := range p.status.Lacks {
+			if l == ref {
+				found = true
+				break
+			}
+		}
+		if !found {
+			return false
+		}
+	}
+	return true
+}
+
+// lacksTTL 是本节点 Lacks 清单的缓存时长。
+const lacksTTL = 20 * time.Second
+
+// Lacks 返回本节点库里记着、池里没有的数据集名，供 status 上报给对端；短时缓存。
+func (c *Controller) Lacks(ctx context.Context) []string {
+	if c.CatalogueIncomplete == nil {
+		return nil
+	}
+	c.lacksMu.Lock()
+	defer c.lacksMu.Unlock()
+	if !c.lacksAt.IsZero() && c.now().Sub(c.lacksAt) < lacksTTL {
+		return c.lacks
+	}
+	var refs []string
+	for _, m := range c.CatalogueIncomplete(ctx) {
+		if m.Ref != "" {
+			refs = append(refs, m.Ref)
+		}
+	}
+	c.lacks, c.lacksAt = refs, c.now()
+	return refs
 }
 
 func (c *Controller) mark(ctx context.Context) string {

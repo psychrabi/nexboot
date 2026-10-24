@@ -12,6 +12,7 @@ import { Field } from './design/primitives.jsx';
 import { GlobalSearch, NotifPopover } from './design/global-search.jsx';
 import { LoginPage } from './design/pages/login.jsx';
 import { api } from './lib/api.js';
+import { fmtVersion } from './lib/format.js';
 import { PageOverview } from './design/pages/overview.jsx';
 import { PageServers } from './design/pages/servers.jsx';
 import { PageTerminals } from './design/pages/terminals.jsx';
@@ -20,7 +21,7 @@ import { PageGroups } from './design/pages/groups.jsx';
 import { PageAlarms } from './design/pages/alarms.jsx';
 import { PageStorage } from './design/pages/storage.jsx';
 import { PageTasks } from './design/pages/tasks.jsx';
-import { PageDrivers } from './design/pages/drivers.jsx';
+import { PageModels } from './design/pages/models.jsx';
 import { PageLogs } from './design/pages/logs.jsx';
 import { PageSettings, PageSystemParams } from './design/pages/settings.jsx';
 import { clearSession, getStoredUser, getToken, onUnauthorized } from './lib/api.js';
@@ -57,8 +58,8 @@ const PAGES = [
     count: (store) => store.terminals.length,
     // 数量已在侧栏徽标和页面筛选里，副标题不再重复。
     header: { h: "客户机管理", s: "在线状态、分组与系统镜像" } },
-  { id: "drivers",   label: "驱动管理",     icon: Icons.Cpu, component: PageDrivers,
-    header: { h: "驱动管理", s: "驱动包资产化管理 · INF 解析、启动驱动集组合与风险标记" } },
+  { id: "models",   label: "机型",     icon: Icons.Cpu, component: PageModels,
+    header: { h: "机型" } },
 
   { section: "系统管理" },
   { id: "logs",      label: "操作日志",     icon: Icons.Log, component: PageLogs,
@@ -156,8 +157,8 @@ function Sidebar({ onLogout, account }) {
                 <Icons.Chevron size={11}/>
               </button>
             </div>
-            <div className="user-menu-foot mono">
-              ndiskless {version || "—"}
+            <div className="user-menu-foot mono" title={version || undefined}>
+              ndiskless {fmtVersion(version)}
             </div>
           </div>
         )}
@@ -285,7 +286,7 @@ function AppInner({ onLogout, account }) {
           <div className="page-head">
             <div className="page-title">
               <h1>{head.h}</h1>
-              <div className="sub">{head.s}</div>
+              {head.s && <div className="sub">{head.s}</div>}
             </div>
           </div>
         )}

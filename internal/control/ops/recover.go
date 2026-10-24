@@ -42,6 +42,11 @@ func (s ReconcileService) RecoverCatalogue(ctx context.Context) (RecoveryReport,
 		return report, err
 	}
 
+	pending, err := s.unverifiedInstallations(ctx)
+	if err != nil {
+		return report, err
+	}
+
 	// 先处理根：非克隆且已有基线 @0 的数据集是镜像。导入最后一步才打 @0，没有 @0
 	// 的是未完成的导入（复制也会带过来），收养了就是一块开不了机的盘。
 	snapshots := make(map[string]bool, len(inv.Snapshots))
@@ -52,7 +57,7 @@ func (s ReconcileService) RecoverCatalogue(ctx context.Context) (RecoveryReport,
 	sort.Strings(datasets)
 	imageOf := map[string]string{} // 数据集 -> 它最终所属的镜像
 	for _, dataset := range datasets {
-		if _, cloned := inv.Origins[dataset]; cloned || ignoredDataset(dataset) {
+		if _, cloned := inv.Origins[dataset]; cloned || !adoptable(dataset) || pending[dataset] {
 			continue
 		}
 		if !known[dataset] && !snapshots[dataset+"@"+storage.BaselineReduction] {
@@ -74,7 +79,7 @@ func (s ReconcileService) RecoverCatalogue(ctx context.Context) (RecoveryReport,
 		progress = false
 		for _, dataset := range datasets {
 			origin, cloned := inv.Origins[dataset]
-			if !cloned || ignoredDataset(dataset) {
+			if !cloned || !adoptable(dataset) || pending[dataset] {
 				continue
 			}
 			if _, done := imageOf[dataset]; done {
@@ -109,6 +114,11 @@ func (s ReconcileService) RecoverCatalogue(ctx context.Context) (RecoveryReport,
 			"recovered", report.String())
 	}
 	return report, nil
+}
+
+// adoptable 判断数据集能否收养为镜像或配置；超管保存的暂存数据集不算，由一致性检查报无主。
+func adoptable(dataset string) bool {
+	return !ignoredDataset(dataset) && storage.Classify(dataset).Kind != storage.CarrierSuperseded
 }
 
 // knownDatasets 返回库里已登记的数据集（镜像和配置），按池内相对名。

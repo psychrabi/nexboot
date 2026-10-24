@@ -587,3 +587,45 @@ func TestGroupStorageServerPin(t *testing.T) {
 	}
 	_ = g3
 }
+
+// 组内有机器运行时不能换系统镜像/配置：运行中的机器仍在用开机时的系统盘，控制台会与实际不符。
+func TestGroupUpdateRefusesSystemChangeWhileATerminalRuns(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	seedGroupTriple(t, ctx, st, "img-1", "cfg-1", "red-1")
+	seedGroupTriple(t, ctx, st, "img-2", "cfg-2", "red-2")
+	service := newGroupService(st)
+	group, err := service.Create(ctx, validGroupRequest("g"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	term := domain.Terminal{ID: "term-1", Name: "01号机", MAC: "AABBCCDDEE01", IP: "192.168.1.10", GroupID: group.ID, State: domain.TerminalStateOnline}
+	if err := st.Terminals().Create(ctx, term); err != nil {
+		t.Fatal(err)
+	}
+
+	other := validGroupRequest("g")
+	other.IsDefault = true // 唯一的分组即默认分组
+	other.SystemImageID, other.SystemConfigID = "img-2", "cfg-2"
+	if _, err := service.Update(ctx, group.ID, other); !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "01号机") {
+		t.Fatalf("system change with a running terminal: err = %v, want conflict naming 01号机", err)
+	}
+	if got, _ := st.Groups().Get(ctx, group.ID); got.SystemImageID != "img-1" {
+		t.Fatalf("refused update still changed the image: %q", got.SystemImageID)
+	}
+
+	dns := validGroupRequest("g")
+	dns.IsDefault = true
+	dns.DNS2 = "1.1.1.1"
+	if _, err := service.Update(ctx, group.ID, dns); err != nil {
+		t.Fatalf("non-system edit with a running terminal: %v", err)
+	}
+
+	term.State = domain.TerminalStateOffline
+	if err := st.Terminals().Update(ctx, term); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Update(ctx, group.ID, other); err != nil {
+		t.Fatalf("system change with all terminals off: %v", err)
+	}
+}

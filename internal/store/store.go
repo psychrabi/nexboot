@@ -34,8 +34,25 @@ type ReductionRepo interface {
 type GroupRepo interface{ Repository[domain.Group] }
 type GroupDiskRepo interface{ Repository[domain.GroupDisk] }
 type TerminalRepo interface {
+	UpdatePresence(context.Context, domain.Terminal) error
+	UpdateHardwareProfile(context.Context, domain.Terminal) error
+	UpdatePlacement(context.Context, domain.Terminal) error
+	UpdateBootIfUnchanged(context.Context, domain.Terminal, domain.Terminal) (bool, error)
 	Repository[domain.Terminal]
 	GetByMAC(context.Context, string) (domain.Terminal, error)
+	ByHardwareProfile(context.Context, string) ([]domain.Terminal, error)
+}
+type HardwareProfileRepo interface {
+	Repository[domain.HardwareProfile]
+	ByFingerprint(context.Context, string) (domain.HardwareProfile, error)
+}
+type ModelAdaptationRepo interface {
+	Repository[domain.ModelAdaptation]
+	ForProfileReduction(ctx context.Context, profileID, reductionID string) (domain.ModelAdaptation, error)
+	ByReduction(context.Context, string) ([]domain.ModelAdaptation, error)
+	ByProfile(context.Context, string) ([]domain.ModelAdaptation, error)
+	DeleteByReduction(context.Context, string) error
+	DeleteByConfig(context.Context, string) error
 }
 type ServerRepo interface{ Repository[domain.Server] }
 type PoolRepo interface{ Repository[domain.Pool] }
@@ -54,13 +71,19 @@ type ImageHealthReportRepo interface {
 	Repository[domain.ImageHealthReport]
 	GetByImage(context.Context, string) (domain.ImageHealthReport, error)
 }
+type WinPEEnvRepo interface {
+	Repository[domain.WinPEEnv]
+	ByImage(context.Context, string) (domain.WinPEEnv, error)
+	ByKind(context.Context, domain.WinPEEnvKind) ([]domain.WinPEEnv, error)
+}
+type PESessionRepo interface {
+	Repository[domain.PESession]
+	ActiveByTerminal(context.Context, string) (domain.PESession, error)
+	ByToken(context.Context, string) (domain.PESession, error)
+	ByTask(context.Context, string) (domain.PESession, error)
+	ListActive(context.Context) ([]domain.PESession, error)
+}
 type DriverPackRepo interface{ Repository[domain.DriverPack] }
-type DriverBundleRepo interface {
-	Repository[domain.DriverBundle]
-}
-type DriverBundlePackRepo interface {
-	Repository[domain.DriverBundlePack]
-}
 type BackupConfigRepo interface {
 	Repository[domain.BackupConfig]
 	Upsert(context.Context, domain.BackupConfig) error
@@ -76,6 +99,7 @@ type BackupStateRepo interface {
 type BootFailureRepo interface {
 	List(context.Context) ([]domain.BootFailure, error)
 	Upsert(context.Context, domain.BootFailure) error
+	DeleteIfUnchanged(context.Context, domain.BootFailure) (bool, error)
 }
 type ReplicationStateRepo interface {
 	List(context.Context) ([]domain.ReplicationState, error)
@@ -106,9 +130,13 @@ type Store interface {
 	Tasks() TaskRepo
 	Users() UserRepo
 	DriverPacks() DriverPackRepo
-	DriverBundles() DriverBundleRepo
-	DriverBundlePacks() DriverBundlePackRepo
 	ImageHealthReports() ImageHealthReportRepo
+	WinPEEnvs() WinPEEnvRepo
+	PESessions() PESessionRepo
+	InstallSessions() InstallSessionRepo
+	HardwareProfiles() HardwareProfileRepo
+	ModelAdaptations() ModelAdaptationRepo
+	TerminalIdentities() TerminalIdentityRepo
 	BackupConfigs() BackupConfigRepo
 	SystemSettings() SystemSettingsRepo
 	BackupStates() BackupStateRepo
@@ -285,15 +313,22 @@ func (s *SQLStore) ClientClones() ClientCloneRepo {
 func (s *SQLStore) ImageHealthReports() ImageHealthReportRepo {
 	return imageHealthReportRepository{repository: newRepository(s.q, s.dialect, imageHealthReportCodec)}
 }
+func (s *SQLStore) WinPEEnvs() WinPEEnvRepo {
+	return winpeEnvRepository{repository: newRepository(s.q, s.dialect, winpeEnvCodec)}
+}
+func (s *SQLStore) PESessions() PESessionRepo {
+	return peSessionRepository{repository: newRepository(s.q, s.dialect, peSessionCodec)}
+}
+func (s *SQLStore) HardwareProfiles() HardwareProfileRepo {
+	return hardwareProfileRepository{repository: newRepository(s.q, s.dialect, hardwareProfileCodec)}
+}
+func (s *SQLStore) ModelAdaptations() ModelAdaptationRepo {
+	return modelAdaptationRepository{repository: newRepository(s.q, s.dialect, modelAdaptationCodec)}
+}
 func (s *SQLStore) DriverPacks() DriverPackRepo {
 	return newRepository(s.q, s.dialect, driverPackCodec)
 }
-func (s *SQLStore) DriverBundles() DriverBundleRepo {
-	return newRepository(s.q, s.dialect, driverBundleCodec)
-}
-func (s *SQLStore) DriverBundlePacks() DriverBundlePackRepo {
-	return newRepository(s.q, s.dialect, driverBundlePackCodec)
-}
+
 func (s *SQLStore) BackupConfigs() BackupConfigRepo {
 	return backupConfigRepository{repository: newRepository(s.q, s.dialect, backupConfigCodec)}
 }
@@ -323,4 +358,12 @@ func (s *SQLStore) Tasks() TaskRepo {
 }
 func (s *SQLStore) Users() UserRepo {
 	return userRepository{repository: newRepository(s.q, s.dialect, userCodec)}
+}
+
+type TerminalIdentityRepo interface {
+	Repository[domain.TerminalIdentity]
+}
+
+func (s *SQLStore) TerminalIdentities() TerminalIdentityRepo {
+	return newRepository(s.q, s.dialect, terminalIdentityCodec)
 }

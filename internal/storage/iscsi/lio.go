@@ -47,6 +47,8 @@ type ExportRequest struct {
 	// CHAP 非空时 target 要求登录认证；为 nil 时走 demo mode（无认证），未配置密钥的部署行为不变。
 	// 同一次导出的所有请求携带相同凭据（一个 MAC 一个 target）。
 	CHAP *CHAPCreds
+	// ReadOnly 以 iblock readonly 打开（如 ISO 安装介质），客户机写入会被拒绝。
+	ReadOnly bool
 }
 
 // Available 报告 LIO 能否创建 target。iscsi fabric 目录要首次 mkdir 才注册，
@@ -108,7 +110,11 @@ func (l *LIO) ExportBlocks(ctx context.Context, reqs []ExportRequest) ([]storage
 	}
 	luns := make([]storage.LUN, 0, len(reqs))
 	for _, req := range reqs {
-		so, err := l.ensureBackstore(ctx, backstoreName(target, req.LUN), req.VolPath, unitSerial(target, req.LUN))
+		name := backstoreName(target, req.LUN)
+		if req.ReadOnly {
+			name += readOnlySuffix
+		}
+		so, err := l.ensureBackstore(ctx, name, req.VolPath, unitSerial(target, req.LUN), req.ReadOnly)
 		if err != nil {
 			return nil, err
 		}
@@ -141,7 +147,7 @@ func (l *LIO) ExportBlocks(ctx context.Context, reqs []ExportRequest) ([]storage
 }
 
 // ensureBackstore 返回指定 iblock 存储对象的 configfs 目录，不存在时创建；已存在的原样复用。
-func (l *LIO) ensureBackstore(ctx context.Context, name, dev, serial string) (string, error) {
+func (l *LIO) ensureBackstore(ctx context.Context, name, dev, serial string, readOnly bool) (string, error) {
 	if matches, err := filepath.Glob(filepath.Join(l.corePath(), "iblock_*", name)); err == nil && len(matches) > 0 {
 		return matches[0], nil
 	}
@@ -155,7 +161,7 @@ func (l *LIO) ensureBackstore(ctx context.Context, name, dev, serial string) (st
 		if err != nil {
 			return "", err
 		}
-		if err := configureBackstore(so, dev, node, serial); err != nil {
+		if err := configureBackstore(so, dev, node, serial, readOnly); err != nil {
 			// 清掉半配置的对象，免得重试或下次开机复用它。
 			_ = removeTree(so)
 			_ = os.Remove(filepath.Dir(so))
@@ -196,8 +202,12 @@ func (l *LIO) allocBackstore(name string) (string, error) {
 // configureBackstore 用解析出的 /dev/zdN 节点（而非 udev 符号链接）打开盘并启用对象。
 // 顺序是内核约束：udev_path 经 control 写入后才能 enable；映射到 LUN 后序列号和 emulate_tpu 不可再改，
 // 所以必须在 ExportBlocks 建链接之前全部写完。
-func configureBackstore(so, volPath, node, serial string) error {
-	if err := writeAttr(filepath.Join(so, "control"), "udev_path="+node); err != nil {
+func configureBackstore(so, volPath, node, serial string, readOnly bool) error {
+	control := "udev_path=" + node
+	if readOnly {
+		control += ",readonly=1"
+	}
+	if err := writeAttr(filepath.Join(so, "control"), control); err != nil {
 		return err
 	}
 	// 顶层 udev_path 只用于展示（targetcli ls），写稳定的 /dev/zvol 路径方便运维查看。
@@ -279,6 +289,9 @@ func unitSerial(target string, lun int) string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
+// UnitSerial is the exact disk identity installers must match before partitioning.
+func UnitSerial(target string, lun int) string { return unitSerial(target, lun) }
+
 // TeardownTarget 删除客户机的整个 target 及给定 LUN 的 backstore，与 ExportBlocks 配对。
 // 不存在视为成功：/boot 每次请求都会重跑拆除。
 func (l *LIO) TeardownTarget(_ context.Context, target string, luns []int) error {
@@ -288,11 +301,13 @@ func (l *LIO) TeardownTarget(_ context.Context, target string, luns []int) error
 	}
 	nodes := make([]string, 0, len(luns))
 	for _, lun := range luns {
-		n, err := l.removeBackstoreTree(backstoreName(target, lun))
-		if err != nil {
-			return err
+		for _, name := range lunBackstoreNames(target, lun) {
+			n, err := l.removeBackstoreTree(name)
+			if err != nil {
+				return err
+			}
+			nodes = append(nodes, n...)
 		}
-		nodes = append(nodes, n...)
 	}
 	if err := waitNodesReleased(nodes); err != nil {
 		return err
@@ -316,11 +331,13 @@ func (l *LIO) DeleteLUNs(_ context.Context, target string, luns []int) error {
 		if err := removeTree(lunDir); err != nil {
 			return err
 		}
-		n, err := l.removeBackstoreTree(backstoreName(target, lun))
-		if err != nil {
-			return err
+		for _, name := range lunBackstoreNames(target, lun) {
+			n, err := l.removeBackstoreTree(name)
+			if err != nil {
+				return err
+			}
+			nodes = append(nodes, n...)
 		}
-		nodes = append(nodes, n...)
 	}
 	return waitNodesReleased(nodes)
 }
@@ -531,6 +548,15 @@ func (l *LIO) ActiveSessions(_ context.Context) ([]string, error) {
 		}
 	}
 	return macs, nil
+}
+
+// readOnlySuffix 区分只读盘的 backstore：同号 LUN 换成普通数据盘时不会复用到只读介质。
+const readOnlySuffix = "-ro"
+
+// lunBackstoreNames 是一个 LUN 号可能对应的全部 backstore，拆除时都要清。
+func lunBackstoreNames(target string, lun int) []string {
+	name := backstoreName(target, lun)
+	return []string{name, name + readOnlySuffix}
 }
 
 func backstoreName(target string, lun int) string {

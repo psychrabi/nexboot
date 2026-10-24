@@ -6,8 +6,10 @@ import (
 	"io"
 	"log/slog"
 	"strings"
+	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/store"
@@ -83,6 +85,15 @@ func (s ImageService) SaveReductionAsImage(ctx context.Context, reductionID stri
 		return ImportImageResult{}, err
 	}
 	defer claim.Drop()
+	sourceClaim, err := claimImages(ctx, s.Store, domain.TaskTypeCopyImage, src.ID)
+	if err != nil {
+		return ImportImageResult{}, err
+	}
+	releaseTarget := claim.release
+	claim.release = func() {
+		sourceClaim.Drop()
+		releaseTarget()
+	}
 	if _, err := s.Store.Images().GetByName(ctx, name); err == nil {
 		return ImportImageResult{}, ErrImageExists
 	} else if !errs.IsNotFound(err) {
@@ -121,7 +132,7 @@ func (s ImageService) executeSaveAsImage(ctx context.Context, task domain.Task, 
 				return err
 			}
 		}
-		return nil
+		return hwprofile.InheritFrom(ctx, tx, red.ID, copied.Reduction, time.Now().UTC())
 	}); err != nil {
 		if rbErr := s.Storage.DeleteImage(context.Background(), copied.Image.ID, []string{copied.Config.ID}); rbErr != nil {
 			slog.Warn("copied image not rolled back", "image", copied.Image.ID, "error", rbErr)

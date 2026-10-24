@@ -189,7 +189,6 @@ func TestSuperStopReachesTheSameEndStateWhenResumed(t *testing.T) {
 		"promote tank/run/SCLIENT-AABBCCDDEEFF",
 		"rename tank/nd/cfg",
 		"rename tank/run/SCLIENT-AABBCCDDEEFF",
-		"destroy tank/nd/cfg_before_super",
 		"snapshot tank/nd/cfg@v1",
 	} {
 		t.Run(stopAt, func(t *testing.T) {
@@ -214,6 +213,25 @@ func TestSuperStopReachesTheSameEndStateWhenResumed(t *testing.T) {
 				t.Fatalf("after resume state = %#v, want %#v", got, want)
 			}
 		})
+	}
+}
+
+// 还原点打好后保存即成立，删旧配置失败不推翻结果。
+func TestSuperStopSucceedsWhenTheSupersededConfigCannotBeDestroyed(t *testing.T) {
+	ctx := context.Background()
+	z := seedSuperPool()
+	z.failOn = "destroy tank/nd/cfg_before_super"
+	agent := New("server-a", z)
+
+	res, err := agent.SuperStop(ctx, superStopReq())
+	if err != nil {
+		t.Fatalf("还原点已打好，收尾失败不该推翻保存：%v", err)
+	}
+	if red := res.System; red.Name != "@v1" || red.ConfigID != "cfg" {
+		t.Fatalf("reduction = %#v", red)
+	}
+	if !z.present("tank/nd/cfg") || !z.snaps["tank/nd/cfg@v1"] {
+		t.Fatalf("配置或新还原点不在：%#v", z.state())
 	}
 }
 
@@ -358,7 +376,6 @@ func TestSuperStopWithDataDiskReachesTheSameEndStateWhenResumed(t *testing.T) {
 		"promote tank/run/SCLIENT-AABBCCDDEEFF-DATA-1",
 		"rename tank/nd/dcfg",
 		"rename tank/run/SCLIENT-AABBCCDDEEFF-DATA-1",
-		"destroy tank/nd/dcfg_before_super",
 		"snapshot tank/nd/dcfg@games",
 	} {
 		t.Run(stopAt, func(t *testing.T) {

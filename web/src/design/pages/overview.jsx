@@ -232,7 +232,7 @@ function PageOverview() {
 function SetupGuide({ pools, images, groups, goto }) {
   const steps = [
     { label: "创建存储池", desc: "把服务器磁盘组成 ZFS 池，镜像与客户机克隆都放在池里", done: pools.length > 0, page: "storage", action: "去创建" },
-    { label: "导入系统镜像", desc: "把 Windows/Linux 镜像文件（vmdk / vhd / zfs 流等）导入为可启动镜像", done: images.length > 0, page: "images", action: "去导入" },
+    { label: "创建系统镜像", desc: "从 ISO 安装系统，或导入 Windows/Linux 镜像文件", done: images.length > 0, page: "images", action: "去创建" },
     { label: "新建终端分组", desc: "配置网段、网关与系统镜像，组内终端共享这套启动配置", done: groups.length > 0, page: "groups", action: "去新建" },
     { label: "添加客户机终端", desc: "登记终端 MAC 地址，之后 PXE 开机即可进入系统", done: false, page: "terminals", action: "去添加" },
   ];

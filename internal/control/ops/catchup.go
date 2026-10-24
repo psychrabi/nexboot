@@ -133,11 +133,23 @@ func writtenHereIn(local, sender *catalogueDataset, baseMade int64) []string {
 	return out
 }
 
-// planCatchUp 逐数据集列出把本机追到 target 的步骤；baseMade 是双方共有的根标记的创建时间。
-func planCatchUp(sender zfs.GUIDInventory, senderRoot string, local zfs.GUIDInventory, localRoot, target string, baseMade int64) ([]catchUpStep, error) {
+// planCatchUp 逐数据集列出把本机追到 target 的步骤；base 是双方共有的根标记，baseMade 是它的创建时间。
+func planCatchUp(sender zfs.GUIDInventory, senderRoot string, local zfs.GUIDInventory, localRoot, base, target string, baseMade int64) ([]catchUpStep, error) {
 	sOrder, s := catalogueDatasets(sender, senderRoot)
 	lOrder, l := catalogueDatasets(local, localRoot)
 	var plan []catchUpStep
+
+	// 写入者删掉又建了同名的镜像/配置：本机那份与对端没有共同快照，却是这一轮唯一过不去的地方。
+	// 只要它带着共同的根标记（那一轮它就是写入者的数据集）、之后本机没有自己写过，它就只是
+	// 写入者已经丢弃的旧数据集：删掉它（连同依赖它的克隆和子数据集）按新数据集重收，而不是整份重建。
+	replaced, err := planReplacements(s, l, lOrder, base, target, baseMade)
+	if err != nil {
+		return nil, err
+	}
+	for _, rel := range replaced {
+		plan = append(plan, catchUpStep{Kind: "destroy", Rel: rel})
+		delete(l, rel)
+	}
 
 	// 执行完已列步骤后本机会存在的数据集。
 	present := map[string]bool{}
@@ -203,7 +215,7 @@ func planCatchUp(sender zfs.GUIDInventory, senderRoot string, local zfs.GUIDInve
 
 	var gone []string
 	for _, rel := range lOrder {
-		if rel == "" || s[rel] != nil {
+		if rel == "" || s[rel] != nil || l[rel] == nil {
 			continue
 		}
 		if own := writtenHereIn(l[rel], nil, baseMade); len(own) > 0 {
@@ -229,6 +241,95 @@ func planCatchUp(sender zfs.GUIDInventory, senderRoot string, local zfs.GUIDInve
 		plan = append(plan, catchUpStep{Kind: "incremental", Rel: "", From: common.name, To: target})
 	}
 	return plan, nil
+}
+
+// recreatedUnderSameName 判断本轮是否有要按 planReplacements 删掉重收的数据集（写入者删了又建的同名数据集）。
+func recreatedUnderSameName(peerInv ha.ReplicationInventory, local zfs.GUIDInventory, localRoot, base, target string) bool {
+	var baseMade int64
+	for _, e := range local.Entries {
+		if e.Name == localRoot+"@"+base {
+			baseMade = e.Created
+		}
+	}
+	_, s := catalogueDatasets(zfs.GUIDInventory{Entries: peerInv.Entries}, peerInv.Root)
+	lOrder, l := catalogueDatasets(local, localRoot)
+	replaced, err := planReplacements(s, l, lOrder, base, target, baseMade)
+	return err == nil && len(replaced) > 0
+}
+
+// planReplacements 返回要先删掉、再按新数据集重收的本机数据集，依赖者在前（克隆先于源、子先于父）。
+// 只认 planCatchUp 说明的那一种：没有共同快照、带着共同根标记 base、base 之后本机没写过；
+// 依赖它的本机数据集一并重收，其中本机写过的照样按分叉处理。不满足的留给原来的报错（整份重建）。
+func planReplacements(s, l map[string]*catalogueDataset, lOrder []string, base, target string, baseMade int64) ([]string, error) {
+	if base == "" || baseMade <= 0 {
+		return nil, nil
+	}
+	set := map[string]bool{}
+	for _, rel := range lOrder {
+		d, ld := s[rel], l[rel]
+		if rel == "" || d == nil || ld == nil || len(ld.snaps) == 0 || d.snap(target) == nil || latestCommon(d, ld) != nil {
+			continue
+		}
+		if ld.snap(base) == nil {
+			continue
+		}
+		if own := writtenHereIn(ld, d, baseMade); len(own) > 0 {
+			return nil, catchUpDivergedError{own: own}
+		}
+		set[rel] = true
+	}
+	if len(set) == 0 {
+		return nil, nil
+	}
+	dependsOn := func(rel, on string) bool {
+		if strings.HasPrefix(rel, on+"/") {
+			return true
+		}
+		originRel, _, _ := strings.Cut(l[rel].origin, "@")
+		return originRel == on
+	}
+	for grown := true; grown; {
+		grown = false
+		for _, rel := range lOrder {
+			if rel == "" || set[rel] {
+				continue
+			}
+			for on := range set {
+				if dependsOn(rel, on) {
+					if own := writtenHereIn(l[rel], s[rel], baseMade); len(own) > 0 {
+						return nil, catchUpDivergedError{own: own}
+					}
+					set[rel], grown = true, true
+					break
+				}
+			}
+		}
+	}
+	var out []string
+	for len(set) > 0 {
+		var ready []string
+		for rel := range set {
+			blocked := false
+			for other := range set {
+				if other != rel && dependsOn(other, rel) {
+					blocked = true
+					break
+				}
+			}
+			if !blocked {
+				ready = append(ready, rel)
+			}
+		}
+		if len(ready) == 0 {
+			return nil, fmt.Errorf("要重收的数据集互相依赖，无法排出删除顺序")
+		}
+		sort.Strings(ready)
+		for _, rel := range ready {
+			out = append(out, rel)
+			delete(set, rel)
+		}
+	}
+	return out, nil
 }
 
 // originHeld 判断克隆源（含发送方的那个快照）本机已有，或会由前面的步骤建出。
@@ -272,13 +373,14 @@ func (r *Replicator) catchUp(ctx context.Context, peerInv ha.ReplicationInventor
 			baseMade = e.Created
 		}
 	}
-	plan, err := planCatchUp(zfs.GUIDInventory{Entries: peerInv.Entries}, peerInv.Root, local, r.Root, target, baseMade)
+	plan, err := planCatchUp(zfs.GUIDInventory{Entries: peerInv.Entries}, peerInv.Root, local, r.Root, base, target, baseMade)
 	if err != nil {
 		return err
 	}
 	for _, step := range plan {
 		if step.Kind == "destroy" {
-			if err := r.ZFS.Destroy(ctx, r.Root+step.Rel); err != nil && !zfs.IsNotExist(err) {
+			// 本机客户机的盘还克隆自它时挪到目录外暂存，不让一台客户机挡住整轮（见 destroyOrHold）。
+			if _, err := r.destroyOrHold(ctx, r.Root+step.Rel); err != nil {
 				return fmt.Errorf("%s: %w", step, err)
 			}
 			continue

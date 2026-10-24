@@ -89,11 +89,21 @@ const (
 	TaskTypeMirrorUpgrade    TaskType = "mirror_upgrade"
 	TaskTypeCreateBlankImage TaskType = "create_blank_image"
 	// TaskTypeExportImage 把镜像流式导出为导入目录下可重新导入的 .zfs 文件。
-	TaskTypeExportImage   TaskType = "export_image"
-	TaskTypeAddSpecial    TaskType = "add_special"
-	TaskTypeRemoveSpecial TaskType = "remove_special"
-	TaskTypeAddSpare      TaskType = "add_spare"
-	TaskTypeRemoveSpare   TaskType = "remove_spare"
+	TaskTypeExportImage TaskType = "export_image"
+	// TaskTypeWinPEExtract 从镜像恢复分区提取 WinRE 作为适配环境。
+	TaskTypeWinPEExtract TaskType = "winpe_extract"
+	// TaskTypePEProbe 让一台客户机进 WinPE 回报一次，验证适配环境本身能用。
+	TaskTypePEProbe TaskType = "pe_probe"
+	// TaskTypeModelAdapt 在一台该机型的客户机上生成网卡模板并存为新还原点（067）。
+	TaskTypeModelAdapt TaskType = "model_adapt"
+	// TaskTypeIdentityCapture 让一台客户机进 WinPE 取启动网卡的设备实例 ID（068）。
+	TaskTypeIdentityCapture TaskType = "identity_capture"
+	// TaskTypeIdentityLayerRebuild 还原点变更后重建终端身份层（068）。
+	TaskTypeIdentityLayerRebuild TaskType = "identity_layer_rebuild"
+	TaskTypeAddSpecial           TaskType = "add_special"
+	TaskTypeRemoveSpecial        TaskType = "remove_special"
+	TaskTypeAddSpare             TaskType = "add_spare"
+	TaskTypeRemoveSpare          TaskType = "remove_spare"
 )
 
 type TaskStatus string
@@ -241,12 +251,83 @@ type Terminal struct {
 	OnlineSince     *time.Time
 	OfflineAt       *time.Time
 	LastHeartbeatAt *time.Time
-	// PendingBundleID/At 记录 InjectDriver 放进本超管机克隆、但还没固化成还原点的驱动包。
-	// 任何退出超管的路径（DisableSuper 或 StopSuper）都会清掉，见 adaptation_inject.go。
-	PendingBundleID *string
-	PendingBundleAt *time.Time
-	// StorageServerID 记录上次是哪个节点服务了这台客户机的启动，清理时据此找到克隆。nil 表示本节点。
+	// StorageServerID 记录上次供盘的节点，清理时据此找到客户机克隆。
 	StorageServerID *string
+	// HardwareProfileID 是开机上报的硬件归并出的机型，每次 /boot 更新；空表示还没开过机。
+	HardwareProfileID string
+	// LastBootAt/LastBootReductionID 记最近一次 /boot 及其系统盘还原点；LastBootOKAt 是开机脚本回调的时间。
+	// 回调晚于 /boot 说明系统起来了；再次 /boot 时回调仍早于上次 /boot，就是上次没进系统。
+	LastBootAt          *time.Time
+	LastBootReductionID string
+	LastBootProfileID   string
+	LastBootOKAt        *time.Time
+}
+
+// TerminalIdentity 记录该终端的设备实例和身份层所在还原点、节点。
+type TerminalIdentity struct {
+	ID                string
+	TerminalID        string
+	ProfileID         string
+	InstanceID        string
+	Source            string
+	LayerReductionRef string
+	LayerServerID     string
+	// 模板启动记录（不进适配表，机型不会因此被当成已适配）：
+	// TemplateBootRef 是最近一次套模板开机用的还原点；TemplateOKRef 是开机回调成功的还原点；
+	// TemplateFailedRef 是已判定模板失败的还原点，此后这台机器在该点上不再自动套模板。
+	TemplateBootRef   string
+	TemplateBootAt    time.Time
+	TemplateOKRef     string
+	TemplateFailedRef string
+	TemplateStrikes   int
+	// TemplateGen 是记下以上成败时的生成规则版本；规则改了，旧记录作废。
+	TemplateGen string
+	UpdatedAt   time.Time
+}
+
+// HardwareProfile 是机型：按客户机开机上报的启动网卡 VEN/DEV、PCI 位置与固件归并，运维不录入。
+type HardwareProfile struct {
+	ID string
+	// Name 默认「厂商 型号 · 网卡 VEN:DEV」，运维可改。
+	Name string
+	// Fingerprint 是归并键 "ven:dev/busloc/platform"，busloc 为空时退化为 "ven:dev//platform"。
+	Fingerprint string
+	NICVendor   string // PCI 厂商 ID，小写 4 位十六进制
+	NICDevice   string
+	// NICSubsys 由 WinPE 回报后补写（iPXE 拿不到），不参与归并。
+	NICSubsys    string
+	BusLoc       string // iPXE ${net0/busloc} 原值
+	Platform     string // efi | pcbios
+	Manufacturer string
+	Product      string
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// ModelAdaptationSource 说明「这个还原点能在这个机型上开机」的依据。
+type ModelAdaptationSource string
+
+const (
+	AdaptationAdapted   ModelAdaptationSource = "adapted"   // 机型适配任务在该机型的机器上生成了模板
+	AdaptationObserved  ModelAdaptationSource = "observed"  // 该机型的机器用这个还原点开机并回调成功
+	AdaptationInherited ModelAdaptationSource = "inherited" // 从派生出它的还原点继承
+)
+
+// ModelAdaptation 记录还原点 × 机型 = 可开机，以及模板在注册表里的位置（身份层复制设备实例要用）。
+type ModelAdaptation struct {
+	ID          string
+	ProfileID   string
+	ReductionID string
+	ConfigID    string
+	Source      ModelAdaptationSource
+	// TemplateInstanceID 是模板里网卡的设备实例路径；ClassKey 是网卡类实例编号（00NN）；NetCfgInstanceID 是接口 GUID。
+	TemplateInstanceID string
+	ClassKey           string
+	NetCfgInstanceID   string
+	TaskID             string
+	TerminalID         string
+	DriverPackIDs      []string
+	CreatedAt          time.Time
 }
 
 type HealthLevel string
@@ -291,26 +372,97 @@ type ImageHealthReport struct {
 	CreatedAt time.Time
 }
 
+// PEMode 是客户机进 WinPE 要做的事。
+type PEMode string
+
+const (
+	PEModeProbe    PEMode = "probe"    // 只回报环境信息，验证引导链路
+	PEModeIdentity PEMode = "identity" // 取启动网卡的设备实例 ID（068）
+	PEModeAdapt    PEMode = "adapt"    // 生成机型模板（067）
+)
+
+// PESessionState 是 PE 会话的进度：等开机、已进 WinPE、完成、失败（含超时）。
+type PESessionState string
+
+const (
+	PEStatePreparing  PESessionState = "preparing"
+	PEStatePending    PESessionState = "pending"
+	PEStateBooted     PESessionState = "booted"
+	PEStateFinalizing PESessionState = "finalizing"
+	PEStateDone       PESessionState = "done"
+	PEStateFailed     PESessionState = "failed"
+)
+
+// PESession 是一台客户机的一次 WinPE 行程：下次开机 /boot 据此下发 WinPE 而不是系统盘，WinPE 用 Token 取文件并回报。
+type PESession struct {
+	ID                   string
+	TerminalID           string
+	MAC                  string
+	Mode                 PEMode
+	TaskID               string
+	Token                string
+	EnvID                string // 提供 boot.wim/boot.sdi 的环境（镜像 WinRE 或 ADK 包）
+	BCDID                string
+	ConfigID             string
+	ReductionID          string
+	ReductionName        string
+	ReductionDisplayName string
+	TargetPortal         string
+	DriverPackIDs        []string
+	TargetIQN            string // adapt 模式挂的盘
+	LUN                  int
+	State                PESessionState
+	Result               string // WinPE 回报的 JSON
+	CreatedAt            time.Time
+	UpdatedAt            time.Time
+	ExpiresAt            time.Time
+}
+
+// WinPEEnvKind 区分适配环境的来源。
+type WinPEEnvKind string
+
+const (
+	WinPEEnvImageWinRE WinPEEnvKind = "image_winre" // 从镜像恢复分区提取，一个镜像一份
+	WinPEEnvADK        WinPEEnvKind = "adk"         // 运维用 ADK 生成后上传
+	WinPEEnvBCD        WinPEEnvKind = "bcd"         // 启动配置数据，全局一份
+)
+
+// WinPEEnv 是一份放在文件库里的适配环境文件：WinRE/WinPE 的 boot.wim 与 boot.sdi，或 BCD。
+type WinPEEnv struct {
+	ID        string
+	Kind      WinPEEnvKind
+	ImageID   string // 仅 image_winre
+	Version   string // WinPE 的 Windows 版本，BCD 为空
+	Build     int
+	Dir       string            // 文件所在目录（文件库下）
+	Files     map[string]string // 文件名 → sha256
+	CreatedAt time.Time
+}
+
 const (
 	BootModeBIOS = "bios"
 	BootModeUEFI = "uefi"
 )
 
-// 启动失败的阶段。sanhook/sanboot 来自客户机的 iPXE 脚本；boot_mode 由服务端在下发脚本前判定。
+// 启动失败的阶段。sanhook/sanboot 来自客户机的 iPXE 脚本；boot_mode 由服务端在下发脚本前判定；
+// windows 是盘引导了但开机脚本没回调、客户机又来 /boot 了（蓝屏或半途关机）。
 const (
 	BootStageSanhook  = "sanhook"
 	BootStageSanboot  = "sanboot"
 	BootStageBootMode = "boot_mode"
+	BootStageWindows  = "windows"
 )
 
 // BootFailure 是一台机器最近一次失败的启动。
 type BootFailure struct {
-	MAC      string
-	Stage    string
-	Code     string // iPXE 上报的 errno
-	Platform string // iPXE ${platform}: efi | pcbios
-	ImageID  string
-	At       time.Time
+	ReductionID string
+	ProfileID   string
+	MAC         string
+	Stage       string
+	Code        string // iPXE 上报的 errno
+	Platform    string // iPXE ${platform}: efi | pcbios
+	ImageID     string
+	At          time.Time
 }
 
 type Server struct {
@@ -472,22 +624,8 @@ type DriverPack struct {
 	Signed      bool
 	HWIDs       []string
 	Status      DriverPackStatus
-	Recommended bool
 	StoragePath string
 	CreatedAt   time.Time
-}
-
-type DriverBundle struct {
-	ID        string
-	Name      string
-	OSType    OSType
-	CreatedAt time.Time
-}
-
-type DriverBundlePack struct {
-	ID       string
-	BundleID string
-	PackID   string
 }
 
 const BackupConfigDefaultID = "default"
@@ -514,6 +652,9 @@ type SystemSettings struct {
 	ReplicationRateMBPS *int
 	// DataPool 是本节点存放镜像/克隆的 ZFS 池。建池前为空：节点可以无池安装，再从界面建池命名并记在这里。
 	DataPool string
+	// KeepWindowsDefaults 为真时，Windows 客户机的开机脚本不再关闭自动更新、自动重启、睡眠和休眠。
+	// 默认要管：无盘客户机每次开机都还原，自动更新会反复下载并在重启时断开 iSCSI 系统盘。
+	KeepWindowsDefaults bool
 }
 
 // ReplicationState 是一个复制目标的记账行：最后落地的快照、时间和上次的错误。运维和滞后告警读它；

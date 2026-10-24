@@ -16,8 +16,10 @@
 本脚本创建 cluster-e2e-* 分组与终端并在结束时清理；不动其它资产。
 故障注入经各节点自身地址 SSH（VIP 会漂，不能拿它做管道）。
 """
+import hashlib
 import json
 import os
+import re
 import shlex
 import subprocess
 import sys
@@ -159,6 +161,41 @@ def ssh(host, cmd, timeout=60):
         ["sshpass", "-p", SSH_PASSWORD, "ssh", "-o", "StrictHostKeyChecking=no",
          "-o", "ConnectTimeout=8", f"{SSH_USER}@{host}", cmd],
         capture_output=True, text=True, timeout=timeout)
+
+
+def redact(script):
+    """脚本里的 CHAP 口令不进日志。"""
+    return re.sub(r"(set password )\S+", r"\1***", script or "")
+
+
+def chap_fingerprint(host):
+    """那台机器 NDISKLESS_CHAP_SECRET 的 sha256（"off" = 演示模式，"" = 没读到）。只回哈希，不把密钥读出来。"""
+    r = ssh(host, "f=/etc/ndiskless/ndiskless.env; [ -r $f ] || exit 3; "
+                  "v=$(sed -n 's/^NDISKLESS_CHAP_SECRET=//p' $f | head -1 | tr -d '\"[:space:]'); "
+                  "if [ -n \"$v\" ]; then printf %s \"$v\" | sha256sum | cut -c1-64; else echo off; fi")
+    out = r.stdout.strip() if r.returncode == 0 else ""
+    return out if out == "off" or re.fullmatch(r"[0-9a-f]{64}", out) else ""
+
+
+def iscsi_login_rcs(host, portal, target, initiator, username, password):
+    """在 host 上用 open-iscsi 依次试：正确凭据 / 不带凭据 / 错口令，各自登录后立刻登出，返回三个退出码。
+
+    用临时 iface 冒充该客户机的 initiator IQN（CHAP 的 ACL 按它命名），结束时删掉 node 与 iface 记录。"""
+    q = shlex.quote
+    cmd = (f"command -v iscsiadm >/dev/null || exit 3; I=nde2e; T={q(target)}; P={q(portal)}:3260; "
+           "iscsiadm -m iface -I $I -o new >/dev/null 2>&1; "
+           f"iscsiadm -m iface -I $I -o update -n iface.initiatorname -v {q(initiator)} >/dev/null || exit 4; "
+           "try() { iscsiadm -m node -T $T -p $P -I $I -o new >/dev/null 2>&1; "
+           "u() { iscsiadm -m node -T $T -p $P -I $I -o update -n $1 -v $2 >/dev/null 2>&1; }; "
+           "u node.session.initial_login_retry_max 1; u node.session.auth.authmethod $1; "
+           "[ $1 = CHAP ] && { u node.session.auth.username $2; u node.session.auth.password $3; }; "
+           "timeout 40 iscsiadm -m node -T $T -p $P -I $I --login >/dev/null 2>&1; rc=$?; "
+           "iscsiadm -m node -T $T -p $P -I $I --logout >/dev/null 2>&1; "
+           "iscsiadm -m node -T $T -p $P -I $I -o delete >/dev/null 2>&1; echo $rc; }; "
+           f"try CHAP {q(username)} {q(password)}; try None; try CHAP {q(username)} {q('wrong-' + password[:6])}; "
+           "iscsiadm -m iface -I $I -o delete >/dev/null 2>&1; true")
+    r = ssh(host, cmd, timeout=200)
+    return [int(x) for x in r.stdout.split() if x.lstrip("-").isdigit()], r.returncode
 
 
 _pools = {}
@@ -344,7 +381,7 @@ def main():
     tid = t.get("ID")
 
     st, script = http_get(VIP_BASE, f"/boot?mac={urllib.parse.quote(TEST_MAC)}", timeout=60)
-    check("1d", "/boot 落到 C（sanhook 指 C 地址）", st == 200 and f"iscsi:{C_IP}" in script, f"{st} {script[:120]}")
+    check("1d", "/boot 落到 C（sanhook 指 C 地址）", st == 200 and f"iscsi:{C_IP}" in script, f"{st} {redact(script)[:120]}")
     r = ssh(C_IP, f"zfs list -H -o name -r {pool_of(C_IP)}/run 2>/dev/null | grep -c 'CLIENT-{NORM_MAC}' || true")
     check("1e", "C 上出现该客户机克隆", r.returncode == 0 and int(r.stdout.strip() or 0) >= 1, r.stdout.strip())
     a_host = urllib.parse.urlparse(A).hostname
@@ -376,19 +413,55 @@ def main():
         check("1i", "CHAP target 的 ACL 带着凭据（空凭据 = 客户机永远登录不上）",
               int(nums[1]) > 1, f"authentication={nums[0]} userid 字节数={nums[1]}")
 
+    # 写入者按它自己的 NDISKLESS_CHAP_SECRET 往脚本里写凭据，承载节点按它自己的密钥建 target。
+    # 两边不一致时 iPXE 照样起得来，Windows 内核拿 iBFT 里的凭据登录被拒 → INACCESSIBLE_BOOT_DEVICE。
+    fps = {urllib.parse.urlparse(b).hostname: chap_fingerprint(urllib.parse.urlparse(b).hostname) for b in ALL_NODES}
+    states = " ".join(f"{h}={'?' if not v else 'off' if v == 'off' else 'on'}" for h, v in fps.items())
+    check("1j", "各节点 CHAP 开关与密钥一致（只比 sha256）", all(fps.values()) and len(set(fps.values())) == 1,
+          f"{states}；{len(set(fps.values()))} 种指纹")
+    m = re.search(r"iscsi:[^:]+:::\d+:(\S+)", script or "")
+    tgt = m.group(1) if m else ""
+    user = (re.search(r"^set username (\S+)", script or "", re.M) or [None, ""])[1]
+    pw = (re.search(r"^set password (\S+)", script or "", re.M) or [None, ""])[1]
+    ini = (re.search(r"^set initiator-iqn (\S+)", script or "", re.M) or [None, ""])[1]
+    t = f"/sys/kernel/config/target/iscsi/{tgt}/tpgt_1"
+    r = ssh(C_IP, f"cat {t}/attrib/authentication; for a in {t}/acls/*/auth; do [ -f $a/userid ] && "
+                  "echo \"$(cat $a/userid) $(tr -d '\\n' < $a/password | sha256sum | cut -c1-64)\"; done; true")
+    lines = r.stdout.split("\n") if r.returncode == 0 else []
+    auth = lines[0].strip() if lines else ""
+    acls = [l.split() for l in lines[1:] if len(l.split()) == 2]
+    if not tgt or auth not in ("0", "1"):
+        skip("1k", "脚本凭据与承载节点 target 认证一致", f"读不到 target（{tgt or '脚本里没有 sanhook'}，auth={auth!r}）")
+    else:
+        check("1k", "写入者脚本带凭据 ⇔ 承载节点 target authentication=1", bool(user and pw) == (auth == "1"),
+              f"脚本凭据={'有' if user and pw else '无'} authentication={auth}")
+        if auth == "1" and user and pw:
+            pwh = hashlib.sha256(pw.encode()).hexdigest()
+            check("1l", "脚本的 username/口令与 ACL 的 userid/口令一致（口令比 sha256）",
+                  any(u == user and h == pwh for u, h in acls),
+                  f"username={user} ACL userid={[u for u, _ in acls]} 口令一致={any(h == pwh for _, h in acls)}")
+            rcs, rc = iscsi_login_rcs(a_host, C_IP, tgt, ini, user, pw)
+            if rc == 3:
+                skip("1m", "iscsiadm 实登", f"{a_host} 上没有 iscsiadm")
+            else:
+                check("1m", "用脚本凭据 iscsiadm 登录成功、不带凭据与错口令都被拒（随即登出）",
+                      len(rcs) == 3 and rcs[0] == 0 and rcs[1] != 0 and rcs[2] != 0, f"退出码 正确/无/错={rcs} rc={rc}")
+        else:
+            skip("1l", "脚本凭据与 ACL 一致", "本环境 CHAP 未开启（demo 模式）")
+
     section("2 C 故障：回退本机")
     ssh(C_IP, "systemctl stop ndiskless")
     down = wait(lambda: not nodes(VIP_BASE).get(c_id, {}).get("online"), 150)
     check("2a", "C 失联后 roster 标离线（≤150s）", bool(down))
     st, script = http_get(VIP_BASE, f"/boot?mac={urllib.parse.quote(TEST_MAC)}", timeout=60)
-    check("2b", "/boot 回退主机（sanhook 指 VIP）", st == 200 and f"iscsi:{VIP}" in script, f"{st} {script[:120]}")
+    check("2b", "/boot 回退主机（sanhook 指 VIP）", st == 200 and f"iscsi:{VIP}" in script, f"{st} {redact(script)[:120]}")
 
     section("3 C 恢复：放置回去")
     ssh(C_IP, "systemctl start ndiskless")
     up = wait(lambda: nodes(VIP_BASE).get(c_id, {}).get("online"), 150)
     check("3a", "C 回归 roster 在线", bool(up))
     st, script = http_get(VIP_BASE, f"/boot?mac={urllib.parse.quote(TEST_MAC)}", timeout=60)
-    check("3b", "/boot 再次落到 C", st == 200 and f"iscsi:{C_IP}" in script, f"{st} {script[:120]}")
+    check("3b", "/boot 再次落到 C", st == 200 and f"iscsi:{C_IP}" in script, f"{st} {redact(script)[:120]}")
 
     section("3.5 超管保存必须落在写入者上")
     # 目录容器 <池>/nd/ 从写入者单向复制、收流用 recv -F，非写入者上对它的写入会被下一轮整体回滚。
@@ -409,7 +482,7 @@ def main():
     st, script = http_get(VIP_BASE, f"/boot?mac={urllib.parse.quote(SUP_MAC)}", timeout=60)
     # 写入者的对外地址就是 VIP：分组虽 pin 在 C 上，超管机也必须挪到写入者。
     check("3.5b", "超管机的盘落在写入者上（sanhook 指 VIP，而非 pin 的 C）",
-          st == 200 and f"iscsi:{VIP}" in script, f"{st} {script[:100]}")
+          st == 200 and f"iscsi:{VIP}" in script, f"{st} {redact(script)[:100]}")
 
     if st == 200:
         # 保存要求终端已离线，这里手工置为 offline；留着 unknown 会等满两分钟再以「需要先关机」失败。

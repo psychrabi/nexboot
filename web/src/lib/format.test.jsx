@@ -1,5 +1,25 @@
 import { describe, expect, it } from 'vitest';
-import { redName, fmtDateTime, fmtDateTimeSec } from './format.js';
+import { redName, fmtDateTime, fmtDateTimeSec, fmtVersion } from './format.js';
+
+describe('程序版本显示', () => {
+  it('显示构建日期与轮次，完整构建串由调用方保留', () => {
+    expect(fmtVersion('831f355-dirty-inf-service-repfix-20261019-r2')).toBe('测试版 2026.10.19-r2');
+    expect(fmtVersion('831f355-inf-service-20261019-r3')).toBe('2026.10.19-r3');
+  });
+
+  it('保留正式版本和无法识别的版本', () => {
+    expect(fmtVersion('1.0.2')).toBe('1.0.2');
+    expect(fmtVersion('v1.0.3-rc.1')).toBe('v1.0.3-rc.1');
+    expect(fmtVersion('custom-build')).toBe('custom-build');
+  });
+
+  it('标明开发构建，缺失版本显示占位', () => {
+    expect(fmtVersion('dev')).toBe('开发版');
+    expect(fmtVersion('831f355-dirty')).toBe('开发版 831f355');
+    expect(fmtVersion('')).toBe('—');
+    expect(fmtVersion(null)).toBe('—');
+  });
+});
 
 // 还原点显示操作者输入的名称；没有显示名的旧记录显示 ASCII 快照名。
 describe('还原点显示名', () => {

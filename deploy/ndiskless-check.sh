@@ -8,8 +8,8 @@ URL=http://127.0.0.1:@API_PORT@/healthz
 SWITCH=/run/ndiskless.switching
 WINDOW=15
 
-# keepalived 超时会杀脚本并判失败，最坏路径须在预算内：1 + 0.5 + 1 = 2.5s < timeout 5s。
-code=$(curl -s -o /dev/null -w '%{http_code}' -m 1 "$URL" 2>/dev/null)
+# 忙时健康节点也要一两秒才回，等 3 秒；keepalived 超时会杀脚本并判失败，最坏路径 3 + 0.5 + 3 = 6.5s < timeout 8s。
+code=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$URL" 2>/dev/null)
 case "$code" in
   200) exit 0 ;;
   000) ;;        # 连不上，下面判断是不是切换窗口
@@ -22,7 +22,7 @@ if [ -f "$SWITCH" ]; then
   if [ $((now - stamped)) -lt "$WINDOW" ]; then
     # 多数切换一两秒内就重新监听，再探一次。
     sleep 0.5
-    [ "$(curl -s -o /dev/null -w '%{http_code}' -m 1 "$URL" 2>/dev/null)" = "200" ] && exit 0
+    [ "$(curl -s -o /dev/null -w '%{http_code}' -m 3 "$URL" 2>/dev/null)" = "200" ] && exit 0
     exit 0   # 仍在窗口内：等下一轮探测，别为一次重启搬走 VIP
   fi
 fi

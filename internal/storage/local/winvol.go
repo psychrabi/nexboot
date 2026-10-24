@@ -13,7 +13,6 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
-	"path/filepath"
 	"strings"
 	"time"
 
@@ -46,7 +45,7 @@ func withWindowsPartition(ctx context.Context, r runner, dev string, mode mountM
 			continue
 		}
 		mounted++
-		if _, err := os.Stat(filepath.Join(mnt, "Windows", "System32")); err != nil {
+		if _, ok := lookupPath(mnt, "Windows/System32"); !ok {
 			unmount(ctx, r, mnt)
 			continue
 		}

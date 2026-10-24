@@ -2,6 +2,7 @@ package platform
 
 import (
 	"context"
+	"errors"
 	"strconv"
 	"strings"
 	"testing"
@@ -21,7 +22,7 @@ func nanos(t time.Time) string { return strconv.FormatInt(t.UnixNano(), 10) }
 func TestTakeoverAlarmSaysWhatWasLeftBehind(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 30, 0, 0, time.UTC)
 	report := takeoverAt(now.Add(-time.Hour), now.Add(-70*time.Minute), now.Add(-64*time.Minute))
-	rule := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return report, true }, func() time.Time { return now })
+	rule := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return report, true }, func() time.Time { return now }, func(context.Context) ([]string, error) { return nil, nil })
 
 	conds, err := rule.Eval(context.Background())
 	if err != nil || len(conds) != 1 {
@@ -42,7 +43,7 @@ func TestTakeoverAlarmSaysWhatWasLeftBehind(t *testing.T) {
 func TestTakeoverAlarmListsWhatIsMissing(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 30, 0, 0, time.UTC)
 	report := ha.TakeoverReport{At: now.Add(-time.Minute), Missing: []string{"配置「办公」", "镜像「win11」"}}
-	rule := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return report, true }, func() time.Time { return now })
+	rule := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return report, true }, func() time.Time { return now }, func(context.Context) ([]string, error) { return report.Missing, nil })
 
 	conds, _ := rule.Eval(context.Background())
 	if len(conds) != 1 || !strings.Contains(conds[0].Message, "配置「办公」") ||
@@ -55,13 +56,61 @@ func TestTakeoverAlarmListsWhatIsMissing(t *testing.T) {
 // 没有记录就没有告警；记录超过一周也不再告警。
 func TestTakeoverAlarmIsQuietWithoutARecentReport(t *testing.T) {
 	now := time.Date(2026, 9, 29, 10, 30, 0, 0, time.UTC)
-	none := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return ha.TakeoverReport{}, false }, func() time.Time { return now })
+	none := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return ha.TakeoverReport{}, false }, func() time.Time { return now }, func(context.Context) ([]string, error) { return nil, nil })
 	if conds, _ := none.Eval(context.Background()); len(conds) != 0 {
 		t.Fatalf("conds=%+v", conds)
 	}
 	old := takeoverAt(now.Add(-8*24*time.Hour), now.Add(-9*24*time.Hour), now.Add(-9*24*time.Hour+time.Minute))
-	stale := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return old, true }, func() time.Time { return now })
+	stale := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return old, true }, func() time.Time { return now }, func(context.Context) ([]string, error) { return nil, nil })
 	if conds, _ := stale.Eval(context.Background()); len(conds) != 0 {
 		t.Fatalf("conds=%+v", conds)
+	}
+}
+
+// 接管时缺少的对象已恢复后，不再每次启动重报；未知丢改动风险仍保留。
+func TestTakeoverAlarmRechecksMissingDatasets(t *testing.T) {
+	now := time.Date(2026, 9, 29, 10, 30, 0, 0, time.UTC)
+	report := ha.TakeoverReport{At: now.Add(-time.Minute), Mine: "rep-" + nanos(now), Missing: []string{"配置「办公」", "镜像「win11」"}}
+	var current []string
+	var readErr error
+	rule := TakeoverAlarmRule(func() (ha.TakeoverReport, bool) { return report, true }, func() time.Time { return now }, func(context.Context) ([]string, error) { return current, readErr })
+	if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 0 {
+		t.Fatalf("restored inventory: %+v %v", conds, err)
+	}
+	current = []string{"配置「新故障」"}
+	if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 0 {
+		t.Fatalf("unrelated new missing dataset must not revive old takeover: %+v %v", conds, err)
+	}
+	current = []string{"镜像「win11」", "配置「新故障」"}
+	if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 1 || strings.Contains(conds[0].Message, "办公") || !strings.Contains(conds[0].Message, "win11") {
+		t.Fatalf("partially restored: %+v %v", conds, err)
+	}
+	readErr = errors.New("inventory unavailable")
+	if _, err := rule.Eval(context.Background()); !errors.Is(err, readErr) {
+		t.Fatalf("inventory error must hold existing alarm: %v", err)
+	}
+	readErr, current = nil, nil
+	for _, tc := range []struct{ name, mine, theirs, peer, cause string }{
+		{"behind", "rep-" + nanos(now.Add(-time.Hour)), "rep-" + nanos(now), "node-a", ""},
+		{"unreadable peer marker", "rep-" + nanos(now), "invalid", "", ""},
+		{"missing own marker", "", "rep-" + nanos(now), "", ""},
+		{"invalid own marker", "invalid", "rep-" + nanos(now), "", ""},
+		{"unverified peer", "rep-" + nanos(now), "", "node-a", ""},
+		{"other cause", "rep-" + nanos(now), "", "", "期限内没有追平"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			report.Mine, report.Theirs, report.Peer, report.Cause = tc.mine, tc.theirs, tc.peer, tc.cause
+			if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 1 {
+				t.Fatalf("data loss risk must remain: %+v %v", conds, err)
+			}
+		})
+	}
+	report.Mine, report.Theirs, report.Peer, report.Cause = "rep-"+nanos(now), "rep-"+nanos(now), "node-a", ""
+	if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 0 {
+		t.Fatalf("known caught-up markers and restored inventory: %+v %v", conds, err)
+	}
+	report.Missing = nil
+	if conds, err := rule.Eval(context.Background()); err != nil || len(conds) != 1 {
+		t.Fatalf("unknown takeover without missing inventory must remain: %+v %v", conds, err)
 	}
 }

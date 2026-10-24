@@ -19,25 +19,19 @@ import (
 )
 
 var (
-	ErrDriverPackInvalid          = errs.Invalid("驱动包必须是包含至少一个 .inf 的 zip")
-	ErrDriverPackInUse            = errs.Conflict("驱动包已被驱动集引用")
-	ErrDriverBundleInvalid        = errs.Invalid("驱动集名称与启动关键网卡驱动包必填")
-	ErrDriverBundleExists         = errs.Conflict("驱动集已存在")
-	ErrDriverPackCategory         = errs.Invalid("驱动集只能包含启动关键网卡类驱动包")
-	ErrDriverPackDisabled         = errs.Invalid("驱动包已禁用，请先启用后再加入驱动集")
-	ErrDriverInjectionUnavailable = errs.Conflict("驱动注入未配置，无法固化驱动")
-	ErrDriverStatusInvalid        = errs.Invalid("驱动包状态无效")
-	ErrDriverBundleMixedOS        = errs.Invalid("驱动集内驱动包的操作系统类型必须一致")
-	ErrDriverCategoryInvalid      = errs.Invalid("驱动包类别无效")
+	ErrDriverPackInvalid     = errs.Invalid("驱动包必须是包含至少一个 .inf 的 zip")
+	ErrDriverStatusInvalid   = errs.Invalid("驱动包状态无效")
+	ErrDriverCategoryInvalid = errs.Invalid("驱动包类别无效")
 )
 
 // staleDriverAge 之前的驱动包在列表中标为有风险。
 const staleDriverAge = 5 * 365 * 24 * time.Hour
 
 type DriverService struct {
-	Store store.Store
-	Dir   string
-	Now   func() time.Time
+	Store    store.Store
+	Dir      string
+	FilesDir func(context.Context) (string, error)
+	Now      func() time.Time
 }
 
 type UploadDriverPackRequest struct {
@@ -57,21 +51,6 @@ type DriverPackItem struct {
 type DriverPackListResult struct {
 	Items []DriverPackItem `json:"items"`
 	Total int              `json:"total"`
-}
-
-type DriverBundleRequest struct {
-	Name    string   `json:"name"`
-	PackIDs []string `json:"pack_ids"`
-}
-
-type DriverBundleItem struct {
-	Bundle domain.DriverBundle `json:"bundle"`
-	Packs  []domain.DriverPack `json:"packs"`
-}
-
-type DriverBundleListResult struct {
-	Items []DriverBundleItem `json:"items"`
-	Total int                `json:"total"`
 }
 
 func (s DriverService) UploadPack(ctx context.Context, req UploadDriverPackRequest) (DriverPackItem, error) {
@@ -146,7 +125,11 @@ func (s DriverService) UploadPack(ctx context.Context, req UploadDriverPackReque
 		return DriverPackItem{}, ErrDriverCategoryInvalid
 	}
 
-	dir := filepath.Join(s.driverDir(), "packs")
+	driverDir, err := s.driverDir(ctx)
+	if err != nil {
+		return DriverPackItem{}, err
+	}
+	dir := filepath.Join(driverDir, "packs")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return DriverPackItem{}, err
 	}
@@ -188,244 +171,19 @@ func (s DriverService) SetPackStatus(ctx context.Context, id string, status doma
 	return pack, nil
 }
 
-// SetRecommended 把一个驱动包设为推荐版本，并清掉同类别、HWID 覆盖有重叠的其它包的推荐标记。
-func (s DriverService) SetRecommended(ctx context.Context, id string) (domain.DriverPack, error) {
-	pack, err := s.Store.DriverPacks().Get(ctx, id)
-	if err != nil {
-		return domain.DriverPack{}, err
-	}
-	packs, err := s.Store.DriverPacks().List(ctx)
-	if err != nil {
-		return domain.DriverPack{}, err
-	}
-	hwids := map[string]bool{}
-	for _, hw := range pack.HWIDs {
-		hwids[hw] = true
-	}
-	if err := s.Store.Tx(ctx, func(tx store.Store) error {
-		for _, other := range packs {
-			if other.ID == pack.ID || other.Category != pack.Category || !other.Recommended {
-				continue
-			}
-			if !hwidsOverlap(hwids, other.HWIDs) {
-				continue
-			}
-			other.Recommended = false
-			if err := tx.DriverPacks().Update(ctx, other); err != nil {
-				return err
-			}
-		}
-		pack.Recommended = true
-		return tx.DriverPacks().Update(ctx, pack)
-	}); err != nil {
-		return domain.DriverPack{}, err
-	}
-	return pack, nil
-}
-
 func (s DriverService) DeletePack(ctx context.Context, id string) error {
 	pack, err := s.Store.DriverPacks().Get(ctx, id)
 	if err != nil {
 		return err
 	}
-	links, err := s.Store.DriverBundlePacks().List(ctx)
+	file, err := s.PackPath(ctx, pack)
 	if err != nil {
 		return err
-	}
-	for _, link := range links {
-		if link.PackID == id {
-			return ErrDriverPackInUse
-		}
 	}
 	if err := s.Store.DriverPacks().Delete(ctx, id); err != nil {
 		return err
 	}
-	if pack.StoragePath != "" {
-		_ = os.Remove(s.packPath(pack))
-	}
-	return nil
-}
-
-func (s DriverService) CreateBundle(ctx context.Context, req DriverBundleRequest) (DriverBundleItem, error) {
-	name := strings.TrimSpace(req.Name)
-	packIDs := uniqueStrings(req.PackIDs)
-	if name == "" || len(packIDs) == 0 {
-		return DriverBundleItem{}, ErrDriverBundleInvalid
-	}
-	bundles, err := s.Store.DriverBundles().List(ctx)
-	if err != nil {
-		return DriverBundleItem{}, err
-	}
-	for _, b := range bundles {
-		if b.Name == name {
-			return DriverBundleItem{}, ErrDriverBundleExists
-		}
-	}
-	packs := make([]domain.DriverPack, 0, len(packIDs))
-	osType := domain.OSType("")
-	for _, id := range packIDs {
-		pack, err := s.Store.DriverPacks().Get(ctx, id)
-		if err != nil {
-			return DriverBundleItem{}, err
-		}
-		if pack.Category != domain.DriverCategoryBootCriticalNIC {
-			return DriverBundleItem{}, ErrDriverPackCategory
-		}
-		// 禁用由服务端把关：即使调用方直接指定，已禁用的包也不能进入超管机。
-		if pack.Status == domain.DriverPackDisabled {
-			return DriverBundleItem{}, ErrDriverPackDisabled
-		}
-		if osType == "" {
-			osType = pack.OSType
-		} else if osType != pack.OSType {
-			return DriverBundleItem{}, ErrDriverBundleMixedOS
-		}
-		packs = append(packs, pack)
-	}
-	now := s.now()
-	bundle := domain.DriverBundle{
-		ID:        fmt.Sprintf("drvbundle-%d", now.UnixNano()),
-		Name:      name,
-		OSType:    osType,
-		CreatedAt: now,
-	}
-	if err := s.Store.Tx(ctx, func(tx store.Store) error {
-		if err := tx.DriverBundles().Create(ctx, bundle); err != nil {
-			return err
-		}
-		for i, pack := range packs {
-			link := domain.DriverBundlePack{
-				ID:       fmt.Sprintf("%s-%d", bundle.ID, i),
-				BundleID: bundle.ID,
-				PackID:   pack.ID,
-			}
-			if err := tx.DriverBundlePacks().Create(ctx, link); err != nil {
-				return err
-			}
-		}
-		return nil
-	}); err != nil {
-		return DriverBundleItem{}, err
-	}
-	return DriverBundleItem{Bundle: bundle, Packs: packs}, nil
-}
-
-func (s DriverService) ListBundles(ctx context.Context) (DriverBundleListResult, error) {
-	bundles, err := s.Store.DriverBundles().List(ctx)
-	if err != nil {
-		return DriverBundleListResult{}, err
-	}
-	links, err := s.Store.DriverBundlePacks().List(ctx)
-	if err != nil {
-		return DriverBundleListResult{}, err
-	}
-	packs, err := s.Store.DriverPacks().List(ctx)
-	if err != nil {
-		return DriverBundleListResult{}, err
-	}
-	packByID := make(map[string]domain.DriverPack, len(packs))
-	for _, pack := range packs {
-		packByID[pack.ID] = pack
-	}
-	items := make([]DriverBundleItem, 0, len(bundles))
-	for _, bundle := range bundles {
-		item := DriverBundleItem{Bundle: bundle, Packs: []domain.DriverPack{}}
-		for _, link := range links {
-			if link.BundleID != bundle.ID {
-				continue
-			}
-			if pack, ok := packByID[link.PackID]; ok {
-				item.Packs = append(item.Packs, pack)
-			}
-		}
-		items = append(items, item)
-	}
-	return DriverBundleListResult{Items: items, Total: len(items)}, nil
-}
-
-func (s DriverService) DeleteBundle(ctx context.Context, id string) error {
-	if _, err := s.Store.DriverBundles().Get(ctx, id); err != nil {
-		return err
-	}
-	links, err := s.Store.DriverBundlePacks().List(ctx)
-	if err != nil {
-		return err
-	}
-	return s.Store.Tx(ctx, func(tx store.Store) error {
-		for _, link := range links {
-			if link.BundleID != id {
-				continue
-			}
-			if err := tx.DriverBundlePacks().Delete(ctx, link.ID); err != nil {
-				return err
-			}
-		}
-		return tx.DriverBundles().Delete(ctx, id)
-	})
-}
-
-// BundleArchive 把驱动包组打成一个 zip，每个成员包一个目录，供超管适配工具使用。
-func (s DriverService) BundleArchive(ctx context.Context, id string) (string, []byte, error) {
-	bundle, err := s.Store.DriverBundles().Get(ctx, id)
-	if err != nil {
-		return "", nil, err
-	}
-	links, err := s.Store.DriverBundlePacks().List(ctx)
-	if err != nil {
-		return "", nil, err
-	}
-	var buf bytes.Buffer
-	out := zip.NewWriter(&buf)
-	for _, link := range links {
-		if link.BundleID != id {
-			continue
-		}
-		pack, err := s.Store.DriverPacks().Get(ctx, link.PackID)
-		if err != nil {
-			return "", nil, err
-		}
-		if err := s.appendPackToArchive(out, pack); err != nil {
-			return "", nil, err
-		}
-	}
-	if err := out.Close(); err != nil {
-		return "", nil, err
-	}
-	return bundle.Name + ".zip", buf.Bytes(), nil
-}
-
-func (s DriverService) appendPackToArchive(out *zip.Writer, pack domain.DriverPack) error {
-	src, err := zip.OpenReader(s.packPath(pack))
-	if err != nil {
-		return fmt.Errorf("open pack %s: %w", pack.ID, err)
-	}
-	defer src.Close()
-	folder := sanitizeArchiveName(pack.Name)
-	if folder == "" {
-		folder = pack.ID
-	}
-	for _, f := range src.File {
-		if f.FileInfo().IsDir() {
-			continue
-		}
-		name, ok := safeArchivePath(f.Name)
-		if !ok {
-			continue
-		}
-		w, err := out.Create(folder + "/" + name)
-		if err != nil {
-			return err
-		}
-		rc, err := f.Open()
-		if err != nil {
-			return err
-		}
-		if _, err := io.Copy(w, rc); err != nil {
-			_ = rc.Close()
-			return err
-		}
-		_ = rc.Close()
-	}
+	_ = os.Remove(file)
 	return nil
 }
 
@@ -436,19 +194,6 @@ func safeArchivePath(name string) (string, bool) {
 		return "", false
 	}
 	return clean, true
-}
-
-func sanitizeArchiveName(name string) string {
-	var b strings.Builder
-	for _, r := range strings.TrimSpace(name) {
-		switch {
-		case r == '/' || r == '\\' || r == ':' || r == '*' || r == '?' || r == '"' || r == '<' || r == '>' || r == '|':
-			b.WriteRune('_')
-		default:
-			b.WriteRune(r)
-		}
-	}
-	return b.String()
 }
 
 func (s DriverService) packRisks(pack domain.DriverPack) []string {
@@ -539,32 +284,40 @@ func validDriverCategory(c domain.DriverPackCategory) bool {
 	return false
 }
 
-func hwidsOverlap(set map[string]bool, others []string) bool {
-	for _, hw := range others {
-		if set[hw] {
-			return true
-		}
+// PackPath 优先当前文件库；旧绝对路径只在当前文件缺失且旧文件存在时兼容。
+func (s DriverService) PackPath(ctx context.Context, pack domain.DriverPack) (string, error) {
+	dir, err := s.driverDir(ctx)
+	if err != nil {
+		return "", err
 	}
-	return false
-}
-
-// packPath 由包 id 和当前驱动目录推导文件位置，不信任行里存的路径：存绝对路径时
-// 目录一挪或数据库恢复到布局不同的主机就失效。旧行记录的路径在文件确实存在时仍然采用。
-func (s DriverService) packPath(pack domain.DriverPack) string {
-	derived := filepath.Join(s.driverDir(), "packs", pack.ID+".zip")
+	derived := filepath.Join(dir, "packs", pack.ID+".zip")
+	if _, err := os.Stat(derived); err == nil {
+		return derived, nil
+	} else if !os.IsNotExist(err) {
+		return "", err
+	}
 	if pack.StoragePath != "" && pack.StoragePath != derived {
 		if _, err := os.Stat(pack.StoragePath); err == nil {
-			return pack.StoragePath
+			return pack.StoragePath, nil
+		} else if !os.IsNotExist(err) {
+			return "", err
 		}
 	}
-	return derived
+	return derived, nil
 }
 
-func (s DriverService) driverDir() string {
-	if strings.TrimSpace(s.Dir) == "" {
-		return config.DefaultDriverDir
+func (s DriverService) driverDir(ctx context.Context) (string, error) {
+	if s.FilesDir != nil {
+		dir, err := s.FilesDir(ctx)
+		if err != nil {
+			return "", err
+		}
+		return filepath.Join(dir, "drivers"), nil
 	}
-	return s.Dir
+	if strings.TrimSpace(s.Dir) == "" {
+		return config.DefaultDriverDir, nil
+	}
+	return s.Dir, nil
 }
 
 func (s DriverService) now() time.Time {

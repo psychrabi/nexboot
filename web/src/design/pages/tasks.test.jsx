@@ -1,8 +1,9 @@
 import React from 'react';
+import userEvent from '@testing-library/user-event';
 import { render, screen, waitFor, within } from '@testing-library/react';
 import { afterEach, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
-import { StoreProvider } from '../store.jsx';
+import { StoreProvider, useStore } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageTasks } from './tasks.jsx';
 
@@ -19,7 +20,47 @@ function stubApi(tasks) {
 
 const renderPage = () => render(<StoreProvider><ConfirmProvider><PageTasks/></ConfirmProvider></StoreProvider>);
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.unstubAllGlobals(); });
+
+it('ISO 失败详情可直接处理安装，不用去镜像页寻找取消入口', async () => {
+  stubApi([{ID:'task-install-old',Type:'install_image',Status:'failed',Error:'准备失败'}]);
+  vi.spyOn(api,'taskLog').mockResolvedValue(new Response(''));
+  vi.spyOn(api,'listInstallations').mockResolvedValue(page([{id:'install-old',task_id:'task-install-old',phase:'failed',name:'Windows Lab'}]));
+  vi.spyOn(api,'getInstallation').mockResolvedValue({id:'install-old',task_id:'task-install-old',phase:'failed',name:'Windows Lab',mac:'001122334455',error:'准备失败'});
+  const cancel = vi.spyOn(api,'cancelInstallation').mockResolvedValue({phase:'cancelled'});
+  renderPage();
+  await userEvent.click(await screen.findByText('ISO 创建镜像'));
+  await userEvent.click(await screen.findByRole('button',{name:'处理安装'}));
+  expect(await screen.findByRole('button',{name:'重试'})).toBeTruthy();
+  await userEvent.click(screen.getByRole('button',{name:'放弃安装'}));
+  expect(screen.getByText(/原 ISO 文件保留/)).toBeTruthy();
+  expect(screen.getAllByRole('dialog')).toHaveLength(1);
+  await userEvent.click(screen.getByRole('button',{name:'返回'}));
+  expect(cancel).not.toHaveBeenCalled();
+});
+
+it('ISO 等待开机不显示虚假百分比，详情提供 Ubuntu 安装日志', async () => {
+  stubApi([{ID:'task-iso-1',Type:'install_image',TargetRef:'iso-1',Status:'running',Progress:0,Message:'请启动安装客户机',CreatedAt:new Date().toISOString()}]);
+  vi.spyOn(api,'taskLog').mockImplementation(async()=>new Response('installer log'));
+  renderPage();
+  await userEvent.click(await screen.findByText('ISO 创建镜像'));
+  expect(screen.queryByText('0%')).toBeNull();
+  expect(screen.getByText('Ubuntu 安装日志')).toBeTruthy();
+  await userEvent.click(screen.getByText('Ubuntu 安装日志'));
+  await waitFor(()=>expect(api.taskLog).toHaveBeenCalledWith('task-iso-1','subiquity.log'));
+});
+
+it('ISO 任务详情可直接读取磁盘和 iSCSI 诊断日志', async () => {
+  stubApi([{ID:'task-centos-1',Type:'install_image',Status:'failed',Error:'安装失败'}]);
+  const log = vi.spyOn(api,'taskLog').mockImplementation(async (_id,name)=>new Response(`log ${name}`));
+  renderPage();
+  await userEvent.click(await screen.findByText('ISO 创建镜像'));
+  for (const [label,name] of [['磁盘识别日志','storage.log'],['命令日志','program.log'],['iSCSI 诊断','iscsi.log']]) {
+    await userEvent.click(screen.getByRole('button',{name:label}));
+    await waitFor(()=>expect(log).toHaveBeenLastCalledWith('task-centos-1',name));
+    await screen.findByText(`log ${name}`);
+  }
+});
 
 // 失败原因要直接显示在列表行上，只显示「失败」和 0% 会被误认为卡住。
 it('失败的任务直接显示原因，不用点开', async () => {
@@ -95,4 +136,37 @@ it('任务对象显示名称，数据集 ID 留在悬浮提示里', async () => 
   renderPage();
   const cell = await screen.findByText('Win11 电竞版 / default / 装完显卡驱动');
   expect(cell.getAttribute('title')).toBe('win11-_default_____179');
+});
+
+it.each([
+  ['GBK', new Uint8Array([0xd6, 0xd0, 0xce, 0xc4])],
+  ['UTF-16LE', new Uint8Array([0xff, 0xfe, 0x2d, 0x4e, 0x87, 0x65])],
+  ['UTF-16BE', new Uint8Array([0xfe, 0xff, 0x4e, 0x2d, 0x65, 0x87])],
+])('从机型入口定位任务，读取 %s 终态PE日志并显示Windows中文，下载保留原始字节', async (_encoding, logBytes) => {
+  const task = { ID: 'task-model_adapt-1', Type: 'model_adapt', Status: 'success', Result: '适配完成' };
+  for (const name of ['listTasks', 'listTerminals', 'listImages', 'listGroups', 'listPools', 'listAlarms', 'listClusterNodes']) vi.spyOn(api, name).mockResolvedValue({ items: [] });
+  vi.spyOn(api, 'listClusterPools').mockResolvedValue({ nodes: [] });
+  vi.spyOn(api, 'listTaskHistory').mockResolvedValue({ items: [], total: 0 });
+  const getTask = vi.spyOn(api, 'getTask').mockResolvedValue(task);
+  const fetch = vi.fn(async path => new Response(path.endsWith('dism.log') ? logBytes : 'PE finished\r\n', { headers: { 'Content-Type': 'application/octet-stream' } }));
+  vi.stubGlobal('fetch', fetch);
+  let downloaded;
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL(blob) { downloaded = blob; return 'blob:pe-log'; }
+    static revokeObjectURL() {}
+  });
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {});
+  function Go() { const store = useStore(); return <><button onClick={() => store.goto('tasks', { taskId: task.ID })}>定位适配任务</button><PageTasks/></>; }
+  render(<StoreProvider><Go/></StoreProvider>);
+  await userEvent.click(screen.getByRole('button', { name: '定位适配任务' }));
+  expect(await screen.findByText('适配完成')).toBeTruthy();
+  expect(await screen.findByText('PE finished')).toBeTruthy();
+  expect(getTask).toHaveBeenCalledWith(task.ID);
+  await userEvent.click(screen.getByRole('button', { name: 'DISM 日志' }));
+  expect(await screen.findByText('中文')).toBeTruthy();
+  expect(fetch).toHaveBeenCalledWith('/api/tasks/task-model_adapt-1/logs/dism.log', expect.anything());
+  expect(screen.getByRole('button', { name: '下载原始日志' })).toBeTruthy();
+  await userEvent.click(screen.getByRole('button', { name: '下载原始日志' }));
+  await waitFor(() => expect(click).toHaveBeenCalled());
+  expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(logBytes);
 });

@@ -4,11 +4,12 @@ import React from 'react';
 import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
 import { Modal, useConfirm } from '../overlay.jsx';
-import { Field, Select, TableState, SearchBox } from '../primitives.jsx';
+import { Field, Select, SearchBox, Tip } from '../primitives.jsx';
 import { ConfigsTab, RestorePointsTab, ExportModal, loadConfigUsers, UsageCell } from './image-configs.jsx';
 import { api } from '../../lib/api.js';
-import { fmtDateTime, redName } from '../../lib/format.js';
-import { useResource, useMutation, usePolling } from '../../lib/hooks.js';
+import { fmtDateTime, redName, normMac, fmtMac } from '../../lib/format.js';
+import { useResource, useMutation, usePolling, onMutation } from '../../lib/hooks.js';
+import { InstallationDetails, InstallationPhase, installationOSLabel, installationPhaseLabel, installationShowsProgress } from '../installation.jsx';
 const { useState, useEffect, useRef } = React;
 
 // 尽力列出引用该对象的分组，删除确认时直接点名；查询失败返回空列表，最终以后端判定为准。
@@ -24,6 +25,9 @@ const namesClause = (names) => names.slice(0, 5).join("、") + (names.length > 5
 
 const GiB = 1024 ** 3;
 const fmtGiB = (b) => `${(Number(b || 0) / GiB).toFixed(1)} GiB`;
+// 默认选带图形界面的版本：Server Core 没有桌面，要运维主动选。
+const defaultEdition = (editions) => (editions?.find(e => !e.core) || editions?.[0])?.index || 0;
+
 const normalizeImageName = (v) => {
   v = (v || "").trim().toLowerCase();
   let out = "";
@@ -45,6 +49,58 @@ const OS_META = { windows: { t: "Windows" }, linux: { t: "Linux" } };
 const PURPOSE_META = { system: { t: "系统盘镜像", c: "cyan" }, data: { t: "数据盘镜像", c: "violet" } };
 const purposeOf = (img) => (img.Purpose === "data" ? "data" : "system");
 const FS_META = { ntfs: { t: "NTFS（Windows）" }, ext4: { t: "ext4（Linux）" } };
+const NO_DATA_POOL = "当前主机还没有数据池：请先在「存储池管理」创建，再开始安装。";
+
+function ImageIcon({ purpose, os }) {
+  const accent = PURPOSE_META[purpose].c;
+  return (
+    <div style={{ width: 44, height: 44, borderRadius: 8, background: `var(--${accent}-soft)`, border: `1px solid oklch(0.55 0.1 ${accent === "violet" ? 290 : 200} / 0.4)`, display: "grid", placeItems: "center", color: `var(--${accent})`, flexShrink: 0 }}
+      role="img" aria-label={purpose === "data" ? PURPOSE_META.data.t : `${(OS_META[os] || { t: os || "" }).t} ${PURPOSE_META.system.t}`}>
+      {purpose === "data" ? <Icons.Disk size={22}/> : os === "linux" ? <Icons.Linux size={22}/> : os === "windows" ? <Icons.Windows size={20}/> : <Icons.Layers size={22}/>}
+    </div>
+  );
+}
+
+const linkStyle = { background: "none", border: 0, padding: 0, color: "var(--cyan)", font: "inherit", cursor: "pointer" };
+
+// 安装中的镜像在列表里就是一张卡片；失败时直接在卡片上重试或放弃。
+// 用的是已登记的客户机时点名称可跳到客户机详情，手填 MAC 的没有详情可看。
+function InstallationCard({ session: s, terminal, onOpen, onOpenTerminal, onRetry, onAbandon }) {
+  const failed = s.phase === "failed";
+  const terminalName = String(terminal?.Name || "").trim();
+  return (
+    <div data-install-card onClick={onOpen} className="card" style={{ padding: 16, cursor: "pointer", borderColor: failed ? "oklch(0.55 0.14 18 / 0.5)" : undefined }}>
+      <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
+        <ImageIcon purpose="system" os={s.os_type}/>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="ellip" style={{ fontSize: 14, fontWeight: 600 }} title={s.name}>{s.name}</div>
+          <div className="mono meta ellip" style={{ marginTop: 2 }}>
+            ISO 安装 · {terminal
+              ? <><button style={linkStyle} title="查看这台客户机" onClick={e => { e.stopPropagation(); onOpenTerminal(); }}>客户机 {terminalName || fmtMac(s.mac)}</button>{terminalName && ` · ${fmtMac(s.mac)}`}</>
+              : `客户机 ${fmtMac(s.mac)}`}
+          </div>
+        </div>
+        <InstallationPhase session={s}/>
+      </div>
+      {failed ? (
+        <div style={{ marginTop: 10, color: "var(--rose)", fontSize: 13, overflowWrap: "anywhere", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }} title={s.error}>
+          {s.error || "安装未完成"}
+        </div>
+      ) : (
+        <div style={{ marginTop: 10 }}>
+          {installationShowsProgress(s) && <div className="bar cyan" style={{ marginBottom: 4 }}><span style={{ width: `${s.progress}%` }}/></div>}
+          <div className="meta">{s.message || installationPhaseLabel(s.phase)}</div>
+        </div>
+      )}
+      {failed && (
+        <div className="row" style={{ marginTop: 12, justifyContent: "flex-end", gap: 8 }}>
+          <button className="btn ghost" onClick={e => { e.stopPropagation(); onAbandon(); }}>放弃</button>
+          <button className="btn primary" onClick={e => { e.stopPropagation(); onRetry(); }}>重试</button>
+        </div>
+      )}
+    </div>
+  );
+}
 
 function PageImages() {
   const store = useStore();
@@ -59,12 +115,28 @@ function PageImages() {
   const [selImageId, setSelImageId] = useState(null);
 
   const [modal, setModal] = useState(null); // import | image | export | blank
-  // 两条进出路径并存：浏览器受运维上行带宽限制；服务器目录快得多，但文件只在当前服务的那台上。
+  // 两条进出路径并存：浏览器受运维上行带宽限制；服务器目录快得多，文件要放到写入节点（VIP 所在）的导入目录。
   const [importMode, setImportMode] = useState("upload");
   const [sources, setSources] = useState(null);
   const [form, setForm] = useState({});
+  const [isoStep, setIsoStep] = useState(0);
+  const [isoMeta, setIsoMeta] = useState(null);
+  const isoWarning = isoMeta?.editions?.find(e => e.index === Number(form.edition_index))?.warning;
+  const [isoError, setIsoError] = useState("");
+  // 第 3 步表单很长，报错放在正文末尾并滚到可见，否则点了按钮像没反应。
+  const isoErrorRef = useRef(null);
+  useEffect(() => { if (isoError) isoErrorRef.current?.scrollIntoView?.({ block: "nearest" }); }, [isoError]);
+  const [isoBusy, setIsoBusy] = useState(false);
+  const [isoPools, setIsoPools] = useState([]);
+  const [isoClients, setIsoClients] = useState([]);
+  const [installDetail, setInstallDetail] = useState(null); // { id, intent }
+  // 从一次已有安装「修改设置」时是那次安装；创建前要先清理它。
+  const [recreating, setRecreating] = useState(null);
+  const [installConflict, setInstallConflict] = useState(null);
   const [importDir, setImportDir] = useState("");
   const [importPoolAvail, setImportPoolAvail] = useState(null); // 字节；null 表示取不到池空间
+  // 导入目录在存储池上（<池>/nd/files/imports），剩余空间按它所在的池算。null 表示读不到。
+  const [importDirFree, setImportDirFree] = useState(null);
   const [up, setUp] = useState(null); // { name, size, sent, state, error }
   const uploadIdRef = React.useRef("");
   // 当前这次上传的 AbortController 兼作令牌：放弃、关弹窗或重选文件后旧循环立刻失效，不再发片、不再改进度。
@@ -74,7 +146,6 @@ function PageImages() {
   // 集群下要说清文件传到哪台：上传只能落在当前主机（备机写闸门关闭），运维只看得到 VIP。
   const nodesRes = useResource(() => api.listClusterNodes().catch(() => null), []);
   const nodes = (nodesRes.data && nodesRes.data.items) || [];
-  const activeNode = nodes.find(n => n.ha_state === "active");
   const importPlaceholder = `${importDir || "/tank/imports"}/win11.vmdk`;
 
   const { data: imgData, loading, error, reload: loadImages } = useResource(() => api.listImages(), []);
@@ -84,10 +155,27 @@ function PageImages() {
     || ((Date.parse(a.CreatedAt) || 0) - (Date.parse(b.CreatedAt) || 0))
     || String(a.Name || "").localeCompare(String(b.Name || "")));
   const { busy, run } = useMutation(store.toast);
+  const installationsRes = useResource(() => api.listInstallations(), []);
+  const installations = installationsRes.data?.items || [];
+  const pendingInstalls = installations.filter(s => !["ready", "cancelled"].includes(s.phase));
+  const installMacs = pendingInstalls.map(s => normMac(s.mac)).join(",");
+  const installTerminalsRes = useResource(() => (installMacs ? api.listTerminals() : Promise.resolve(null)), [installMacs]);
+  const terminalByMac = Object.fromEntries((installTerminalsRes.data?.items || []).map(t => [normMac(t.MAC), t]));
+  // 后端会拒绝这些客户机，向导里提前置灰；修改原安装的设置时，原来那台仍可选。
+  const isoClientBlocked = (t) => {
+    const busy = pendingInstalls.find(s => s.id !== recreating?.id && normMac(s.mac) === normMac(t.MAC));
+    return busy ? `正在安装「${busy.name}」` : t.State === "online" ? "运行中" : t.IsSuper ? "超管机" : "";
+  };
+  usePolling(installationsRes.reload, { intervalMs: 3000, active: pendingInstalls.some(s => s.phase !== "failed") });
+  const published = installations.filter(s => s.phase === "ready").map(s => s.id).join(",");
+  useEffect(() => { if (published) loadImages(); }, [published, loadImages]);
 
   const filtered = images.filter(i => (purposeF === "all" || purposeOf(i) === purposeF)
     && (osF === "all" || i.OSType === osF)
     && (!q || String(i.Name || "").toLowerCase().includes(q.toLowerCase())));
+  const installCards = pendingInstalls.filter(s => purposeF !== "data"
+    && (osF === "all" || s.os_type === osF)
+    && (!q || String(s.name || "").toLowerCase().includes(q.toLowerCase())));
   const showReductions = (imageId, configId) => { setRedPick({ imageId, configId }); setModal(null); setTab("reductions"); };
   const selImage = images.find(i => i.ID === selImageId) || null;
 
@@ -111,12 +199,16 @@ function PageImages() {
     deepLinkSeen.current = route.params;
     if (images.some(i => i.ID === route.params.imageId)) {
       setSelImageId(route.params.imageId);
-      setModal("image");
+      if (route.params.tab === "reductions") {
+        showReductions(route.params.imageId, route.params.configId || "");
+      } else {
+        setModal("image");
+      }
     }
   }, [route.params, imagesLoaded]); // eslint-disable-line
 
   // ── 镜像操作 ──────────────────────────────────────────────────────────────
-  const baseName = (n) => (n || "").split("/").pop().replace(/\.(zfs\.gz|zfs|gzip|vmdk|vhdx|vhd|qcow2|qcow|vdi|raw|img)$/i, "");
+  const baseName = (n) => (n || "").split("/").pop().replace(/\.(zfs\.gz|zfs|gzip|vmdk|vhdx|vhd|qcow2|qcow|vdi|raw|img|iso)$/i, "");
   const openImageDetail = (imageId) => {
     setSelImageId(imageId);
     setModal("image");
@@ -138,16 +230,40 @@ function PageImages() {
     if (await run(() => api.createBlankImage(body),
       `数据盘 ${name} 创建任务已提交`, { reload: loadImages, errMsg: "创建失败" })) setModal(null);
   };
-  const openImport = async () => {
-    setForm({ name: "", source_path: "", os_type: "windows", purpose: "system" });
-    setImportMode("upload"); setSources(null);
+  const openImport = async (kind = "import", original = null) => {
+    setRecreating(original); setInstallConflict(null);
+    setForm(original ? {name:original.name, source_path:original.source_path, edition_index:original.edition_index, size_gib:original.size_gib, mac:original.mac, ip:original.ip, netmask:original.netmask, gateway:original.gateway, dns1:original.dns1, username:original.username, password:''} : { name: "", source_path: "", os_type: "windows", purpose: "system", username: "nexboot", password: "", netmask: "255.255.255.0" });
+    setIsoStep(0); setIsoMeta(null); setIsoError("");
+    setImportMode(original ? "server" : "upload"); setSources(null);
     setUp(null); uploadIdRef.current = "";
-    setImportDir(""); setImportPoolAvail(null);
-    setModal("import");
+    setImportDir(""); setImportPoolAvail(null); setImportDirFree(null);
+    setModal(kind);
+    if (kind === "iso") {
+      try {
+        const [p, t, roster] = await Promise.all([api.listPools(), api.listTerminals(), api.listClusterNodes().catch(() => null)]);
+        // 安装文件和安装盘都在应答这台上，只能选它的池；单机没有名册，不用筛。
+        const localNode = (roster?.items || []).find(n => n.is_self)?.id;
+        const pools = (p?.items || []).filter(p => p.Role === 'data' && (!localNode || p.ServerID === localNode));
+        setIsoPools(pools); setIsoClients(t?.items || []);
+      } catch (e) { setIsoError(e.message || "无法读取存储池和客户机，请重试"); }
+    }
+    if (original) {
+      try { const r = await api.listInstallationSources(); setSources({...r, items:(r.items || []).map(f => ({...f,size:f.size_bytes,format:'ISO'}))}); }
+      catch (e) { setSources({items:[],error:e.message}); }
+      // 直接停在「设置系统」：识别大文件要半分钟左右，期间说明在做什么；识别不了再退回第 1 步。
+      setIsoBusy(true); setIsoStep(1);
+      try {
+        const meta = await api.inspectInstallationISO(original.source_path);
+        setIsoMeta(meta);
+        setForm(f => ({...f, size_gib: Math.max(Number(f.size_gib) || 0, meta.recommended_size_gib), edition_index: meta.editions?.some(e => e.index === Number(f.edition_index)) ? Number(f.edition_index) : defaultEdition(meta.editions)}));
+      } catch (e) { setIsoStep(0); setIsoError(`原安装文件识别不了：${e.message || "请重新选择安装文件"}`); }
+      finally { setIsoBusy(false); }
+    }
     try {
       const r = await api.listImportSources();
       setImportDir((r && r.import_dir) || "");
       setImportPoolAvail(r && typeof r.pool_available === "number" ? r.pool_available : null);
+      setImportDirFree(r && typeof r.import_dir_free === "number" ? r.import_dir_free : null);
     } catch {
       // 取不到池空间时照常上传，只是少了提前拦截。
     }
@@ -158,10 +274,19 @@ function PageImages() {
   // 从本机分片上传镜像文件，支持断点续传：每片声明起点，断开后先问服务器已收到多少再接着传。
   const uploadFile = async (file) => {
     if (!file) return;
+    if ((modal === "iso") !== /\.iso$/i.test(file.name)) {
+      setUp({name: file.name, size: file.size, sent: 0, state: "error", error: modal === "iso" ? "请选择 ISO 安装文件" : "ISO 是安装介质，请使用「从 ISO 创建」"});
+      return;
+    }
     // 池装不下就当场拒绝，否则传完几十 G 才在导入时被拒。
     if (importPoolAvail != null && file.size > importPoolAvail) {
       setUp({ name: file.name, size: file.size, sent: 0, state: "error",
         error: `存储池放不下：文件 ${fmtGiB(file.size)}，可用 ${fmtGiB(importPoolAvail)}` });
+      return;
+    }
+    if (importDirFree != null && file.size > importDirFree) {
+      setUp({ name: file.name, size: file.size, sent: 0, state: "error",
+        error: `导入目录空间不足：${importDir} 剩余 ${fmtGiB(importDirFree)}，本次上传需要 ${fmtGiB(file.size)}。请先清理存储池` });
       return;
     }
     stopUpload();
@@ -228,11 +353,70 @@ function PageImages() {
 
   // 关弹窗只停本地循环、保留服务端会话，重选同一个文件还能续传；「放弃」才作废会话。
   const closeImport = () => { stopUpload(); setModal(null); };
+  // Esc、点遮罩、取消都走这里：截图工具常用 Esc 退出，上传中先问一句，免得几 G 的上传悄悄停掉。
+  const requestCloseImport = async () => {
+    if (up && up.state === "uploading" && !(await conf.ask({ title: "中断上传？", confirmText: "中断上传",
+      message: `文件还在上传（${fmtGiB(up.sent)} / ${fmtGiB(up.size)}）。关闭后上传会停下，已传的部分留在服务器上，之后重新选择同一个文件可以接着传。` }))) return;
+    closeImport();
+  };
 
   const loadImportSources = async () => {
-    try { setSources(await api.listImportSources()); }
+    try {
+      const r = await (modal === "iso" ? api.listInstallationSources() : api.listImportSources());
+      setSources(modal === "iso" ? {...r, items: (r.items || []).map(f => ({...f, size: f.size_bytes, format: "ISO"}))} : {...r, items: (r.items || []).filter(f => !/\.iso$/i.test(f.name))});
+    }
     catch (e) { setSources({ items: [], import_dir: "", node: "", error: e.message }); }
   };
+
+  const advanceISO = async () => {
+    setIsoError("");
+    if (isoStep === 0) {
+      setIsoBusy(true);
+      try {
+        const meta = await api.inspectInstallationISO(form.source_path);
+        setIsoMeta(meta);
+        setForm(f => ({...f, name: f.name || normalizeImageName(baseName(f.source_path)), size_gib: Math.max(Number(f.size_gib) || 0, meta.recommended_size_gib), edition_index: meta.editions?.some(e => e.index === Number(f.edition_index)) ? Number(f.edition_index) : defaultEdition(meta.editions)}));
+        setIsoStep(1);
+      } catch (e) { setIsoError(e.message || "无法识别 ISO，请使用支持的官方安装文件"); }
+      finally { setIsoBusy(false); }
+      return;
+    }
+    if (!isoPools.length) { setIsoError(NO_DATA_POOL); return; }
+    const missing = !form.name?.trim() ? "请填写镜像名称"
+      : !form.username?.trim() ? "请填写初始账户"
+      : (form.password || "").length < 8 ? `初始密码至少 8 位，现在 ${(form.password || "").length} 位`
+      : !(Number(form.size_gib) >= isoMeta.recommended_size_gib) ? `系统盘至少 ${isoMeta.recommended_size_gib} GiB` : "";
+    if (missing) { setIsoError(missing); return; }
+    if (isoStep === 1) { setIsoStep(2); return; }
+    if (!form.mac?.trim() || !form.ip?.trim()) { setIsoError("请填写客户机 MAC 和安装 IP"); return; }
+    setIsoBusy(true);
+    try {
+      if (recreating && recreating.phase !== "cancelled") {
+        const next = await api.cancelInstallation(recreating.id);
+        if (next.phase !== "cancelled") { setIsoError(`请先关闭客户机 ${fmtMac(recreating.mac)}，等原来的安装清理完再创建。`); return; }
+        setRecreating(next);
+      }
+      await api.createInstallation({source_path: form.source_path, source_fingerprint: isoMeta.fingerprint, edition_index: Number(form.edition_index), name: form.name.trim(), size_gib: Number(form.size_gib), mac: form.mac.trim(), ip: form.ip.trim(), netmask: form.netmask, gateway: form.gateway || "", dns1: form.dns1 || "", username: form.username.trim(), password: form.password});
+      onMutation.emit();
+      await installationsRes.reload();
+      setModal(null); setForm({}); setRecreating(null);
+      store.toast(`安装已开始，请启动客户机 ${form.mac.trim()} 进行 UEFI 网络启动；进度显示在镜像列表里`, "ok");
+    } catch (e) {
+      setIsoError(e.message || "无法创建安装任务");
+      const current = await api.listInstallations().catch(() => null);
+      const mac = String(form.mac || '').replace(/[^a-z0-9]/gi,'').toUpperCase();
+      setInstallConflict(current?.items?.find(s => !['ready','cancelled'].includes(s.phase) && (s.mac === mac || s.name === form.name.trim())) || null);
+    }
+    finally { setIsoBusy(false); }
+  };
+
+  const recreateSeen = useRef(null);
+  useEffect(() => {
+    const id = route.params.recreateInstallationId;
+    if (!id || recreateSeen.current === route.params) return;
+    recreateSeen.current = route.params;
+    api.getInstallation(id).then(s => { setTab('images'); openImport('iso', s); }).catch(e => store.toast(e.message,'err'));
+  }, [route.params]); // eslint-disable-line
 
   const doImport = async () => {
     const name = (form.name || "").trim(), source = (form.source_path || "").trim();
@@ -259,17 +443,21 @@ function PageImages() {
   const doDeleteImage = async () => {
     if (!selImage) return;
     const refs = await groupsReferencing(g => g.SystemImageID === selImage.ID);
-    const message = refs.length
-      ? `${selImage.Name} 正被分组 ${namesClause(refs)} 用作系统盘，删除会失败。\n请先在分组中改绑其他镜像。`
-      : `删除 ${selImage.Name}？其全部配置与还原点将一并删除。若被分组用作数据盘，删除会失败。`;
-    const ok = await conf.ask({ title: "删除镜像", message, danger: true });
+    if (refs.length) {
+      await conf.ask({ title: "无法删除镜像", notice: true,
+        message: `${selImage.Name} 正被分组 ${namesClause(refs)} 用作系统盘。\n请先在分组中改绑其他镜像，再删除。` });
+      return;
+    }
+    const ok = await conf.ask({ title: "删除镜像", danger: true,
+      message: `删除 ${selImage.Name}？其全部配置与还原点将一并删除。若被分组用作数据盘，删除会失败。` });
     if (!ok) return;
-    await run(() => api.deleteImage(selImage.ID), "镜像已删除", { reload: loadImages, errMsg: "删除失败" });
+    // 删除后选中会落到列表里下一个镜像，不关弹窗就变成了别的镜像的详情。
+    if (await run(() => api.deleteImage(selImage.ID), "镜像已删除", { reload: loadImages, errMsg: "删除失败" })) setModal(null);
   };
 
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-      <div className="tabs">
+      <div className="tabs" style={{flexWrap:'wrap'}}>
         {[["images", "镜像", images.length], ["configs", "配置"], ["reductions", "还原点"]].map(([v, label, n]) => (
           <div key={v} role="button" className={`tab ${tab === v ? "active" : ""}`} onClick={() => setTab(v)}>
             {label}{n != null && <span className="count">{n}</span>}
@@ -278,7 +466,8 @@ function PageImages() {
         <div style={{ flex: 1 }}/>
         {tab === "images" && <>
           <button className="btn" style={{ marginBottom: 6 }} onClick={openBlank}><Icons.Disk size={12}/> 新建数据盘</button>
-          <button className="btn primary" style={{ marginBottom: 6, marginLeft: 6 }} onClick={openImport}><Icons.Plus size={12}/> 导入镜像</button>
+          <button className="btn" style={{ marginBottom: 6, marginLeft: 6 }} onClick={() => openImport("iso")}>从 ISO 创建</button>
+          <button className="btn primary" style={{ marginBottom: 6, marginLeft: 6 }} onClick={() => openImport()}><Icons.Plus size={12}/> 导入镜像</button>
         </>}
       </div>
 
@@ -294,11 +483,23 @@ function PageImages() {
         <SearchBox value={q} onChange={setQ} placeholder="搜索镜像名称"/>
       </div>}
 
+      {tab === "images" && installationsRes.error && (
+        <div role="alert" aria-label="安装进度读取失败" className="hint">
+          安装进度读取失败：{installationsRes.error} <button className="btn" onClick={installationsRes.reload}>重试</button>
+        </div>
+      )}
+      {installDetail && <InstallationDetails key={installDetail.id} id={installDetail.id} intent={installDetail.intent}
+        onClose={() => setInstallDetail(null)} onChanged={installationsRes.reload}
+        onEditSettings={sess => { setInstallDetail(null); openImport("iso", sess); }}/>}
       {tab === "images" &&       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(330px, 1fr))", gap: 12, alignContent: "start" }}>
+        {installCards.map(sess => (
+          <InstallationCard key={sess.id} session={sess} terminal={terminalByMac[normMac(sess.mac)]} onOpenTerminal={() => goto("terminals", { terminalId: terminalByMac[normMac(sess.mac)].ID })}
+            onOpen={() => setInstallDetail({ id: sess.id })}
+            onRetry={() => setInstallDetail({ id: sess.id, intent: "retry" })} onAbandon={() => setInstallDetail({ id: sess.id, intent: "abandon" })}/>
+        ))}
         {filtered.map(img => {
           const active = selImageId === img.ID;
           const os = OS_META[img.OSType] || { t: img.OSType || "—" };
-          const accent = PURPOSE_META[purposeOf(img)].c;
           const st = IMG_STATE[img.State] || { t: img.State || "—", c: "" };
           return (
             <div key={img.ID} onClick={() => openImageDetail(img.ID)} className="card" style={{
@@ -307,10 +508,7 @@ function PageImages() {
               boxShadow: active ? "0 0 0 1px var(--cyan)" : undefined,
             }}>
               <div style={{ display: "flex", alignItems: "flex-start", gap: 12 }}>
-                <div style={{ width: 44, height: 44, borderRadius: 8, background: `var(--${accent}-soft)`, border: `1px solid oklch(0.55 0.1 ${accent === "violet" ? 290 : 200} / 0.4)`, display: "grid", placeItems: "center", color: `var(--${accent})` }}
-                  role="img" aria-label={purposeOf(img) === "data" ? PURPOSE_META.data.t : `${os.t} ${PURPOSE_META.system.t}`}>
-                  {purposeOf(img) === "data" ? <Icons.Disk size={22}/> : img.OSType === "linux" ? <Icons.Linux size={22}/> : img.OSType === "windows" ? <Icons.Windows size={20}/> : <Icons.Layers size={22}/>}
-                </div>
+                <ImageIcon purpose={purposeOf(img)} os={img.OSType}/>
                 <div style={{ flex: 1, minWidth: 0 }}>
                   <div className="ellip" style={{ fontSize: 14, fontWeight: 600 }}>{img.Name}</div>
                   {/* 同时给逻辑大小和实占：只给一个数会被读成「这个镜像占了池这么多」。 */}
@@ -337,9 +535,9 @@ function PageImages() {
             </div>
           );
         })}
-        {!filtered.length && (
+        {!filtered.length && !installCards.length && (
           <div className="card" style={{ padding: 40, textAlign: "center", color: "var(--fg-faint)", fontSize: 13, gridColumn: "1 / -1" }}>
-            {loading ? "加载中…" : error ? `加载失败：${error}` : images.length ? "没有符合筛选条件的镜像" : "暂无镜像 · 右上角可导入镜像或新建数据盘"}
+            {loading ? "加载中…" : error ? `加载失败：${error}` : images.length ? "没有符合筛选条件的镜像" : "暂无镜像 · 可导入现有镜像、从 ISO 创建系统镜像或新建数据盘"}
           </div>
         )}
       </div>}
@@ -360,6 +558,7 @@ function PageImages() {
               <span className="hint">{selImage.Origin === "blank" ? "新建的空数据盘" : "导入的镜像"} · 被分组使用时不能改用途</span>
             </div>
             {purposeOf(selImage) === "system" && <ImageHealthCard imageId={selImage.ID}/>}
+            {purposeOf(selImage) === "system" && selImage.OSType === "windows" && <RecoveryEnvironment imageId={selImage.ID}/>}
 
             <ConfigOverview image={selImage} onManage={(cfg) => showReductions(selImage.ID, cfg.ID)}/>
           </>
@@ -373,14 +572,27 @@ function PageImages() {
         ticket={(gzip) => api.exportImageTicket(selImage.ID, gzip)}
         toDir={() => api.exportImage(selImage.ID)}/>}
 
-      <Modal open={modal === "import"} onClose={() => !busy && closeImport()} title="导入镜像"
-        footer={<><button className="btn" disabled={busy} onClick={closeImport}>取消</button>
+      <Modal open={modal === "import" || modal === "iso"} onClose={() => !busy && !isoBusy && requestCloseImport()} title={modal === "iso" ? "从 ISO 创建系统镜像" : "导入镜像"}
+        footer={<><button className="btn" disabled={busy || isoBusy} onClick={requestCloseImport}>取消</button>
+          {modal === "iso" && isoStep > 0 && <button className="btn" disabled={isoBusy} onClick={() => {setIsoError("");setIsoStep(isoStep-1);}}>上一步</button>}
           {/* 源路径要上传完成才有，传完之前按钮禁用并说明在等什么。 */}
-          <button className="btn primary" onClick={doImport}
-            disabled={busy || (importMode === "server" ? !form.source_path : (!up || up.state !== "done"))}>
-            {busy ? "提交中…" : importMode === "upload" && up && up.state === "uploading" ? "上传中…" : "导入"}
+          <button className="btn primary" onClick={modal === "iso" ? advanceISO : doImport}
+            disabled={busy || isoBusy || (isoStep === 0 && (importMode === "server" ? !form.source_path : (!up || up.state !== "done")))}>
+            {isoBusy ? "处理中…" : modal === "iso" ? ["识别并继续","下一步","创建安装任务"][isoStep] : busy ? "提交中…" : importMode === "upload" && up && up.state === "uploading" ? "上传中…" : "导入"}
           </button></>}>
-        <Field label="镜像名称" required><input className="input" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Win11-Pro-2026Q1"/></Field>
+        {modal === "iso" && <>
+          <ol aria-label="创建步骤" className="row" style={{ listStyle: "none", margin: "0 0 12px", padding: 0, gap: 6, flexWrap: "wrap" }}>
+            {["选择安装文件", "设置系统", "选择安装客户机"].map((label, i) => (
+              <li key={label} aria-current={i === isoStep ? "step" : undefined} className={`chip ${i === isoStep ? "cyan" : i < isoStep ? "emerald" : ""}`}>{i + 1} {label}</li>
+            ))}
+          </ol>
+          {recreating && <p className="hint">已沿用原安装设置，初始密码需要重新填写{recreating.phase !== "cancelled" ? "；创建时会先清理原来那次安装" : ""}。</p>}
+          {isoStep === 0 && <p className="hint row" style={{ gap: 6 }}>支持官方 Windows 10/11、Windows Server 2016 及以上（x64）、Ubuntu 24.04 LTS，以及 CentOS / RHEL / Rocky Linux / AlmaLinux 7/8/9 完整安装 DVD。
+            <Tip label="安装要求" text="客户机需使用 UEFI 网络启动并关闭 Secure Boot；Linux 安装所需组件须由 ISO 提供，无需访问外网；不支持缺少离线软件包的网络安装 ISO。安装完成后自动关机，再次开机验证成功才会发布镜像。"/></p>}
+        </>}
+        {modal !== "iso" && <Field label="镜像名称" required><input className="input" style={{ width: "100%" }} value={form.name || ""} onChange={e => setForm({ ...form, name: e.target.value })} placeholder="Win11-Pro-2026Q1"/></Field>}
+        {(modal !== "iso" || isoStep === 0) && <>
+        {recreating && form.source_path && <p className="hint mono" style={{overflowWrap:'anywhere'}}>原安装文件：{form.source_path}</p>}
         {/* 两条路的取舍见 importMode 处注释；服务器目录这条必须写明是哪台。 */}
         <div className="row" style={{ gap: 0, marginBottom: 10 }}>
           <div className="btn-group">
@@ -393,49 +605,55 @@ function PageImages() {
         {importMode === "server" ? (
           <Field label="选择服务器上的文件" required
             hint={sources
-              ? `目录在当前主机 ${sources.node || "?"} 的 ${sources.import_dir}——把文件 scp 到这台机器上，它就会出现在这里。`
-                + "导入过程中若发生主备切换，任务会失败，可在任务页看到。"
+              ? `请把文件放到写入节点（VIP 所在${sources.node ? `的 ${sources.node}` : "的主机"}）的导入目录 ${sources.import_dir}，它就会出现在这里，并自动同步到备用节点。`
+                + (modal === "iso" ? "安装资源保存在当前节点，请保持该节点在线。" : "导入过程中若发生主备切换，任务会失败，可在任务页看到。")
                 + (sources.pool_available != null ? ` · 存储池可用 ${fmtGiB(sources.pool_available)}` : "")
               : "正在读取服务器目录…"}>
-            <div style={{ border: "1px solid var(--line)", borderRadius: 6, maxHeight: 220, overflowY: "auto" }}>
+            <div role="radiogroup" aria-label="服务器上的文件" style={{ border: "1px solid var(--line)", borderRadius: 6, maxHeight: 220, overflowY: "auto" }}>
               {(sources?.items || []).length === 0 && (
                 <div className="hint" style={{ padding: 12 }}>
-                  {sources ? "这个目录里还没有可导入的文件" : "读取中…"}
+                  {sources?.error || (sources ? "这个目录里还没有可导入的文件" : "读取中…")}
                 </div>
               )}
-              {(sources?.items || []).map(f => (
-                <div key={f.path} onClick={() => setForm({ ...form, source_path: f.path })}
-                  style={{ padding: "8px 12px", cursor: "pointer", display: "flex", gap: 10, alignItems: "center",
-                    background: form.source_path === f.path ? "var(--bg-0)" : undefined,
-                    boxShadow: form.source_path === f.path ? "inset 2px 0 0 var(--accent)" : undefined }}>
-                  <span className="mono" style={{ flex: 1 }}>{f.name}</span>
-                  <span className="chip">{f.format}</span>
-                  <span className="meta mono">{fmtGiB(f.size)}</span>
-                </div>
-              ))}
+              {(sources?.items || []).map(f => {
+                const picked = form.source_path === f.path;
+                return (
+                  <button type="button" role="radio" aria-checked={picked} className="btn ghost" key={f.path} onClick={() => setForm({ ...form, source_path: f.path })}
+                    style={{ padding: "8px 12px", cursor: "pointer", display: "flex", gap: 10, alignItems: "center",
+                      width:"100%", textAlign:"left",
+                      background: picked ? "var(--cyan-soft)" : undefined,
+                      boxShadow: picked ? "inset 3px 0 0 var(--cyan)" : undefined }}>
+                    <span aria-hidden="true" style={{ width: 14, display: "inline-grid", placeItems: "center", color: "var(--cyan)" }}>{picked && <Icons.Check size={14}/>}</span>
+                    <span className="mono" style={{ flex: 1, color: picked ? "var(--cyan)" : undefined }}>{f.name}</span>
+                    <span className="chip">{f.format}</span>
+                    <span className="meta mono">{fmtGiB(f.size)}</span>
+                  </button>
+                );
+              })}
             </div>
           </Field>
         ) : (
           <Field label="选择本机文件" required
             hint={(nodes.length > 1
               ? "上传完成后即可导入，镜像会自动同步到集群所有节点"
-              : "上传完成后即可导入")
+              : (modal === "iso" ? "上传完成后识别系统版本" : "上传完成后即可导入"))
               + "。支持断点续传：中断后重新选择同一个文件即可接着传。"
+              + (importDirFree != null ? ` · 导入目录 ${importDir} 可用 ${fmtGiB(importDirFree)}` : "")
               + (importPoolAvail != null ? ` · 存储池可用 ${fmtGiB(importPoolAvail)}` : "")}>
             <input className="input" type="file" style={{ width: "100%" }} disabled={up && up.state === "uploading"}
-              onChange={e => uploadFile(e.target.files && e.target.files[0])}/>
+              accept={modal === "iso" ? ".iso" : undefined} onChange={e => uploadFile(e.target.files && e.target.files[0])}/>
             {up && (
               <div style={{ marginTop: 10 }}>
                 <div className="row" style={{ justifyContent: "space-between", fontSize: 13, marginBottom: 4 }}>
-                  <span className="mono muted">{up.name}</span>
-                  <span className="mono">{up.size ? Math.floor((up.sent / up.size) * 100) : 0}%</span>
+                  <span className="mono muted" title={up.name} style={{ minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{up.name}</span>
+                  <span className="mono" style={{ flexShrink: 0 }}>{up.size ? Math.floor((up.sent / up.size) * 100) : 0}%</span>
                 </div>
                 <div className={`bar ${up.state === "error" ? "rose" : up.state === "done" ? "emerald" : "cyan"}`}>
                   <span style={{ width: `${up.size ? (up.sent / up.size) * 100 : 0}%` }}/>
                 </div>
                 <div className="row" style={{ justifyContent: "space-between", marginTop: 6 }}>
-                  <span className="meta">
-                    {up.state === "done" ? "上传完成，可以导入了"
+                  <span className={up.state === "error" ? "" : "meta"} style={up.state === "error" ? { color: "var(--rose)", fontSize: 13 } : undefined}>
+                    {up.state === "done" ? (modal === "iso" ? "上传完成，可以识别系统版本了" : "上传完成，可以导入了")
                       : up.state === "error" ? up.error
                         : `${fmtGiB(up.sent)} / ${fmtGiB(up.size)}`}
                   </span>
@@ -448,10 +666,38 @@ function PageImages() {
           </Field>
         )}
 
-        <Field label="操作系统" required><Select value={form.os_type || "windows"} onChange={v => setForm({ ...form, os_type: v })} options={[{ value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/></Field>
+        </>}
+        {modal === "iso" && isoStep > 0 && <p><strong>{installationOSLabel(isoMeta || {})}{isoMeta?.distribution === "ubuntu-desktop" ? " 桌面版" : isoMeta?.distribution === "ubuntu-server" ? " 服务器版" : ""} · x64</strong></p>}
+        {modal === "iso" && isoStep > 0 && isoWarning && <p className="hint" role="status" aria-label="ISO 兼容性提示" style={{color:"var(--amber)"}}>兼容性提示：{isoWarning}</p>}
+        {modal === "iso" && isoStep === 1 && !isoMeta && <p className="hint" role="status">正在重新识别安装文件 {baseName(form.source_path)}，大文件约需半分钟…</p>}
+        {modal === "iso" && isoStep === 1 && isoMeta && <>
+          {isoMeta?.editions?.length > 0 && <Field label="系统版本" required><Select aria-label="系统版本" value={String(form.edition_index)} onChange={v => setForm({...form,edition_index:v})} options={isoMeta.editions.map(e => ({value:String(e.index), label:e.core ? `${e.name}（Server Core，无图形界面）` : e.name}))}/></Field>}
+          <Field label="镜像名称" required><input style={{width:"100%"}} className="input" aria-label="镜像名称" value={form.name || ""} onChange={e => setForm({...form,name:e.target.value})}/></Field>
+          {/* 安装文件和安装盘都在当前主机上，池由主机唯一确定，只做说明不让选。 */}
+          <p className="hint">{isoPools[0] ? `安装到当前主机的数据池「${isoPools[0].Name}」` + (isoPools[0].Capacity ? `，可用 ${fmtGiB(Math.max(0, isoPools[0].Capacity - (isoPools[0].Used || 0)))}` : "") : NO_DATA_POOL}</p>
+          <Field label="系统盘容量（GiB）" required><input style={{width:"100%"}} className="input mono" type="number" aria-label="系统盘容量" min={isoMeta.recommended_size_gib} value={form.size_gib || ""} onChange={e => setForm({...form,size_gib:e.target.value})}/></Field>
+          <Field label="初始账户" required><input style={{width:"100%"}} className="input" autoComplete="off" aria-label="初始账户" value={form.username || ""} onChange={e => setForm({...form,username:e.target.value})}/></Field>
+          <Field label="初始密码" required hint={form.password && form.password.length < 8
+            ? <span style={{color:"var(--rose)"}}>至少 8 位，现在 {form.password.length} 位</span>
+            : "8 至 127 位。此账户用于新系统首次登录，请妥善保存。"}><input style={{width:"100%"}} className="input" type="password" autoComplete="new-password" aria-label="初始密码" value={form.password || ""} onChange={e => setForm({...form,password:e.target.value})}/></Field>
+        </>}
+        {modal === "iso" && isoStep === 2 && <>
+          <Field label="安装客户机" hint="客户机必须已关机；无需提前创建分组或镜像。"><Select aria-label="安装客户机" value={form.terminal_id || ""} onChange={v => {const t=isoClients.find(c => c.ID === v);setForm({...form,terminal_id:v,mac:t?.MAC || "",ip:t?.IP || ""});}} options={[{value:"",label:"手动填写 MAC 和 IP"},...isoClients.map(t => {const why = isoClientBlocked(t); return {value:t.ID,label:`${t.Name || "未命名"} · ${fmtMac(t.MAC)}${why ? `（${why}）` : ""}`,disabled:!!why};})]}/></Field>
+          <Field label="客户机 MAC" required><input style={{width:"100%"}} className="input mono" aria-label="客户机 MAC" placeholder="70:70:FC:05:87:A2" value={form.mac || ""} onChange={e => setForm({...form,mac:e.target.value})}/></Field>
+          <Field label="安装 IP" required hint="填写客户机有线网络中的空闲地址。"><input style={{width:"100%"}} className="input mono" aria-label="安装 IP" value={form.ip || ""} onChange={e => setForm({...form,ip:e.target.value})}/></Field>
+          <Field label="子网掩码" required><input style={{width:"100%"}} className="input mono" aria-label="安装子网掩码" value={form.netmask || ""} onChange={e => setForm({...form,netmask:e.target.value})}/></Field>
+          <Field label="网关" hint="直连且无路由器时留空。"><input style={{width:"100%"}} className="input mono" aria-label="安装网关" value={form.gateway || ""} onChange={e => setForm({...form,gateway:e.target.value})}/></Field>
+          <Field label="DNS"><input style={{width:"100%"}} className="input mono" aria-label="安装 DNS" value={form.dns1 || ""} onChange={e => setForm({...form,dns1:e.target.value})}/></Field>
+          <p className="hint">系统只安装到服务器新建的专用盘；无法唯一确认目标盘时会停止。客户机本地磁盘不参与安装。</p>
+        </>}
+        {modal === "iso" && (isoError || installConflict) && <div ref={isoErrorRef}>
+          {isoError && <p role="alert" style={{color:"var(--rose)", overflowWrap:"anywhere"}}>{isoError}</p>}
+          {installConflict && <button className="btn" onClick={() => {closeImport();setInstallDetail({ id: installConflict.id });}}>处理已有安装 · {installConflict.name}</button>}
+        </div>}
+        {modal !== "iso" && <><Field label="操作系统" required><Select value={form.os_type || "windows"} onChange={v => setForm({ ...form, os_type: v })} options={[{ value: "windows", label: "Windows" }, { value: "linux", label: "Linux" }]}/></Field>
         <Field label="用途" required hint={form.purpose === "data" ? "数据盘镜像：挂给分组作 D 盘等，不烘焙启动脚本、不做引导体检" : "系统盘镜像：分组的启动盘"}>
           <Select value={form.purpose || "system"} aria-label="用途" onChange={v => setForm({ ...form, purpose: v })} options={[{ value: "system", label: "系统盘镜像" }, { value: "data", label: "数据盘镜像" }]}/>
-        </Field>
+        </Field></>}
       </Modal>
 
       {/* 新建空数据盘 */}
@@ -590,3 +836,28 @@ function ConfigOverview({ image, onManage }) {
 window.PageImages = PageImages;
 
 export { PageImages };
+
+function RecoveryEnvironment({ imageId }) {
+  const store = useStore();
+  const peFile = useRef(null);
+  const bcdFile = useRef(null);
+  const { data, error, reload } = useResource(async () => {
+    const [envs, tasks] = await Promise.all([api.listWinPE(), api.listTaskHistory({ status: 'failed', size: 100 })]);
+    return { envs, failed: (tasks.items || []).some(t => t.Type === 'winpe_extract' && t.TargetRef === imageId && t.Status === 'failed') };
+  }, [imageId]);
+  const { busy, run } = useMutation(store.toast);
+  const winre = data?.envs.images.find(i => i.image_id === imageId)?.winre;
+  const available = winre || data?.envs.adk.length;
+  const missingBCD = winre && !Object.keys(winre.Files || {}).some(f => /^BCD/i.test(f)) && !data.envs.bcd;
+  const upload = async (file, bcd) => {
+    if (!file) return;
+    const fd = new FormData(); fd.append('file', file);
+    await run(() => bcd ? api.uploadPEBCD(fd) : api.uploadWinPE(fd), '恢复环境已上传', { reload });
+  };
+  return <div className="row" style={{ marginBottom: 12 }}>
+    <span className="lbl">恢复环境</span>
+    <span className="hint">{error || (!data ? '加载中…' : available ? (winre ? '镜像自带，已就绪' : '使用上传的恢复环境') : data.failed ? '镜像缺少可用恢复环境，请上传 WinPE 包' : '首次适配时自动提取镜像自带恢复环境')}</span>
+    {data && !available && data.failed && <><button className="btn" disabled={busy} onClick={() => peFile.current.click()}>上传 WinPE 包</button><input ref={peFile} aria-label="上传 WinPE 包" type="file" accept=".zip" hidden onChange={e => upload(e.target.files[0], false)}/></>}
+    {missingBCD && <><button className="btn" disabled={busy} onClick={() => bcdFile.current.click()}>上传启动配置</button><input ref={bcdFile} aria-label="上传启动配置" type="file" hidden onChange={e => upload(e.target.files[0], true)}/></>}
+  </div>;
+}

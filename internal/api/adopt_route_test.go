@@ -77,3 +77,21 @@ type stubRegistry struct{}
 
 func (stubRegistry) Register(context.Context, ha.NodeInfo) error  { return nil }
 func (stubRegistry) Peers(context.Context) ([]ha.NodeInfo, error) { return nil, nil }
+
+// 控制台纳管要「IP:端口」。只给 IP 时当场 400 说清格式，而不是拨 80 端口失败后报 502「未响应」。
+func TestAdoptNodeHandlerRejectsAnAddressWithoutAPort(t *testing.T) {
+	called := ""
+	h := adoptNodeHandler(func(_ context.Context, addr string) error { called = addr; return nil })
+	for _, addr := range []string{"192.168.10.5", "192.168.10.5:", ":8080", "192.168.10.5:http", "192.168.10.5:70000"} {
+		rec := httptest.NewRecorder()
+		h(rec, httptest.NewRequest(http.MethodPost, "/api/cluster/adopt", strings.NewReader(`{"address":"`+addr+`"}`)))
+		if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "IP:端口") || called != "" {
+			t.Fatalf("%q: 应 400 并说明格式，得到 %d %s（called=%q）", addr, rec.Code, rec.Body.String(), called)
+		}
+	}
+	rec := httptest.NewRecorder()
+	h(rec, httptest.NewRequest(http.MethodPost, "/api/cluster/adopt", strings.NewReader(`{"address":" 192.168.10.5:8080 "}`)))
+	if rec.Code != http.StatusAccepted || called != "192.168.10.5:8080" {
+		t.Fatalf("合法地址应受理：%d %q", rec.Code, called)
+	}
+}

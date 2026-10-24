@@ -5,6 +5,7 @@ package place
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"strings"
 	"sync"
@@ -84,20 +85,8 @@ func (r *Router) ForClient(ctx context.Context, g domain.Group, t domain.Termina
 	// 只剩下一条指向不存在快照的还原点记录，此后该分组 /boot 全部 500。
 	// 超管会话只有一台机器，不分散也没有代价。
 	if t.IsSuper {
-		if p, ok := r.writer(candidates); ok {
-			if t.StorageServerID != nil && *t.StorageServerID != "" && *t.StorageServerID != p.ServerID {
-				r.logf("placement: super machine moved to the writer; saving anywhere else is rolled back by replication",
-					"terminal", t.ID, "was", *t.StorageServerID, "now", p.ServerID)
-			}
+		if p, ok := r.superHost(candidates, t); ok {
 			return p
-		}
-		// 无写入者（单机或节点表尚未收敛）时回退到原锚定节点，保证单机可用。
-		if t.StorageServerID != nil && *t.StorageServerID != "" {
-			if p, ok := r.pick(*t.StorageServerID, candidates); ok {
-				return p
-			}
-			// 锚定节点已不在，别处无法服务这块盘：降级回落本机，不在别处悄悄另起一份。
-			return r.local(false)
 		}
 	}
 
@@ -116,6 +105,34 @@ func (r *Router) ForClient(ctx context.Context, g domain.Group, t domain.Termina
 
 	// 4. 分散到最空节点
 	return r.leastLoaded(candidates)
+}
+
+// superHost 是超管机的落点（ForClient 规则 1）；ok 为 false 时按普通客户机放。
+func (r *Router) superHost(candidates []domain.Server, t domain.Terminal) (Placed, bool) {
+	if p, ok := r.writer(candidates); ok {
+		if t.StorageServerID != nil && *t.StorageServerID != "" && *t.StorageServerID != p.ServerID {
+			r.logf("placement: super machine moved to the writer; saving anywhere else is rolled back by replication",
+				"terminal", t.ID, "was", *t.StorageServerID, "now", p.ServerID)
+		}
+		return p, true
+	}
+	// 无写入者（单机或节点表尚未收敛）时回退到原锚定节点，保证单机可用。
+	if t.StorageServerID != nil && *t.StorageServerID != "" {
+		if p, ok := r.pick(*t.StorageServerID, candidates); ok {
+			return p, true
+		}
+		// 锚定节点已不在，别处无法服务这块盘：降级回落本机，不在别处悄悄另起一份。
+		return r.local(false), true
+	}
+	return Placed{}, false
+}
+
+// ForSuper 返回超管机持久盘所在节点，与开机落点一致。
+func (r *Router) ForSuper(ctx context.Context, t domain.Terminal) Placed {
+	if p, ok := r.superHost(r.candidates(ctx), t); ok {
+		return p
+	}
+	return r.ForTerminal(ctx, t)
 }
 
 // candidates 返回当前可服务客户机的节点：本机加心跳新鲜的远端节点。
@@ -261,4 +278,29 @@ func (r *Router) logf(msg string, args ...any) {
 	if r.Logger != nil {
 		r.Logger.Warn(msg, args...)
 	}
+}
+
+// NamedHosts resolves exact owners for destructive cleanup. Stale heartbeats never cause local fallback.
+func (r *Router) NamedHosts(ctx context.Context, ids []string) ([]Placed, error) {
+	seen := map[string]bool{}
+	out := make([]Placed, 0, len(ids))
+	for _, id := range ids {
+		if seen[id] {
+			continue
+		}
+		seen[id] = true
+		if id == r.NodeID {
+			out = append(out, r.local(true))
+			continue
+		}
+		srv, err := r.Store.Servers().Get(ctx, id)
+		if err != nil {
+			return nil, fmt.Errorf("请先恢复身份层所在节点「%s」再重试清理：%w", id, err)
+		}
+		if srv.APIURL == "" {
+			return nil, fmt.Errorf("请先配置身份层所在节点「%s」的API地址再重试", id)
+		}
+		out = append(out, Placed{Agent: r.dial(srv), ServerID: id, Portal: srv.PortalIP, Remote: true, Healthy: r.fresh(srv)})
+	}
+	return out, nil
 }

@@ -50,7 +50,7 @@
 | 镜像 → 客户机克隆 | 支持 Windows / Ubuntu 镜像（见[客户机镜像要求](#客户机镜像要求)），BIOS 与 UEFI 启动；ZFS 写时复制克隆 + 内核 LIO iSCSI 导出 |
 | 镜像 / 配置 / 还原点 | 一个镜像可有多套配置，每套配置可有多个还原点；支持一键应用、另存为新镜像、导出为镜像文件、覆盖原镜像 |
 | 数据盘与超管机 | 分组可挂载数据盘；超管机直接修改配置并保存为新还原点 |
-| 驱动管理 | 驱动包导入、INF 解析与启动驱动集管理 |
+| 机型（网卡 PNP） | 识别网卡。镜像里没有这块 Windows 网卡的配置时，服务器用镜像里已经装好的网卡和匹配驱动（镜像自带，或已上传的 x64 驱动包）为这台客户机写出启动配置，不用逐个机型适配。机型页按实际开机结果显示正常、开机失败或等待首次开机，开机失败时再做完整适配 |
 | 告警与审计 | 节点、存储池、复制、客户机启动失败、镜像体检等告警；操作日志与登录日志 |
 | 高可用 | keepalived 虚 IP + ZFS 目录复制 + epoch 栅栏；从单机在线扩展到多节点，不重装、不迁移数据 |
 | 安全 | iSCSI CHAP（按 MAC 认证）、`/boot` 来源地址核对 |
@@ -63,27 +63,35 @@
 | [![首次登录的初始化向导](docs/images/demo/setup-wizard.jpg)](docs/images/demo/setup-wizard.jpg)<br/>首次登录的初始化向导 | [![创建集群：只填一个虚 IP](docs/images/demo/create-cluster.jpg)](docs/images/demo/create-cluster.jpg)<br/>创建集群：只填一个虚 IP |
 | [![添加节点：自动扫出待加入的服务器](docs/images/demo/add-node.jpg)](docs/images/demo/add-node.jpg)<br/>添加节点：自动扫出待加入的服务器 | [![服务器管理：集群节点与无盘服务](docs/images/demo/servers.jpg)](docs/images/demo/servers.jpg)<br/>服务器管理：集群节点与无盘服务 |
 | [![存储池管理：各节点的数据池与备份池](docs/images/demo/storage.jpg)](docs/images/demo/storage.jpg)<br/>存储池管理：各节点的数据池与备份池 | [![创建存储池](docs/images/demo/create-pool.jpg)](docs/images/demo/create-pool.jpg)<br/>创建存储池 |
-| [![镜像管理：系统盘与数据盘](docs/images/demo/images.jpg)](docs/images/demo/images.jpg)<br/>镜像管理：系统盘与数据盘 | [![配置：一个镜像多套配置](docs/images/demo/configs.jpg)](docs/images/demo/configs.jpg)<br/>配置：一个镜像多套配置 |
+| [![镜像管理：系统盘、数据盘，以及从 ISO 创建](docs/images/demo/images.jpg)](docs/images/demo/images.jpg)<br/>镜像管理：系统盘、数据盘，以及从 ISO 创建 | [![配置：一个镜像多套配置](docs/images/demo/configs.jpg)](docs/images/demo/configs.jpg)<br/>配置：一个镜像多套配置 |
 | [![还原点：应用、另存为新镜像、导出](docs/images/demo/restore-points.jpg)](docs/images/demo/restore-points.jpg)<br/>还原点：应用、另存为新镜像、导出 | [![分组管理：网段、系统盘与数据盘](docs/images/demo/groups.jpg)](docs/images/demo/groups.jpg)<br/>分组管理：网段、系统盘与数据盘 |
 | [![客户机矩阵](docs/images/demo/terminals.jpg)](docs/images/demo/terminals.jpg)<br/>客户机矩阵 | [![系统参数：高可用、客户机网络](docs/images/demo/params-ha.jpg)](docs/images/demo/params-ha.jpg)<br/>系统参数：高可用、客户机网络 |
 | [![Windows 客户机：iPXE 从服务器取得开机脚本（UEFI）](docs/images/demo/client-windows-ipxe.jpg)](docs/images/demo/client-windows-ipxe.jpg)<br/>Windows 客户机：iPXE 从服务器取得开机脚本（UEFI） | [![Windows 11 客户机无盘进入桌面](docs/images/demo/client-windows-desktop.jpg)](docs/images/demo/client-windows-desktop.jpg)<br/>Windows 11 客户机无盘进入桌面 |
 | [![Ubuntu 客户机：挂上 iSCSI 系统盘并从中引导（BIOS）](docs/images/demo/client-ubuntu-ipxe.jpg)](docs/images/demo/client-ubuntu-ipxe.jpg)<br/>Ubuntu 客户机：挂上 iSCSI 系统盘并从中引导（BIOS） | [![Ubuntu 24.04 客户机无盘启动到登录界面](docs/images/demo/client-ubuntu-login.jpg)](docs/images/demo/client-ubuntu-login.jpg)<br/>Ubuntu 24.04 客户机无盘启动到登录界面 |
+| [![机型：按开机结果显示正常、开机失败、等待首次开机](docs/images/demo/models.jpg)](docs/images/demo/models.jpg)<br/>机型：按开机结果显示正常、开机失败、等待首次开机 | [![驱动包：已签名的 x64 网卡驱动](docs/images/demo/drivers.jpg)](docs/images/demo/drivers.jpg)<br/>驱动包：已签名的 x64 网卡驱动 |
 
 ## 架构
 
-单进程内聚多个子系统，对外只暴露一个 HTTP 端口和一套内核/系统依赖：
+每台服务器跑一个静态二进制，管理界面嵌在里面。磁盘由本机的 ZFS 和内核 iSCSI（LIO）提供，DHCP 与 TFTP 由它托管的 dnsmasq 提供。客户机的地址、开机脚本和系统盘都直接连到存放这块盘的那台服务器。
 
-| 层 | 组件 | 说明 |
+```
+客户机                         一台 NexBoot 服务器
+──────                         ────────────────────────────────
+PXE ROM ── DHCP / TFTP ─────▶  dnsmasq 下发 iPXE
+iPXE ──── HTTP /boot ───────▶  按 MAC 决定镜像、还原点和数据盘
+iPXE ──── iSCSI ────────────▶  LIO target ──▶ 该还原点的 ZFS 克隆
+Windows / Linux 从网络盘启动
+```
+
+| 部分 | 技术 | 在系统里做什么 |
 |---|---|---|
-| 接入 | HTTP API + 嵌入式 Web UI | `internal/api`、`web/`（前端 `go:embed` 进二进制） |
-| 引导 | `/boot`（iPXE 脚本）、TFTP 资产 | iPXE undionly/snponly/wimboot 内嵌，启动时写入 `/srv/tftp` |
-| 控制 | 镜像/配置/还原点/分组/客户机/驱动/告警/备份 | `internal/control`；放置决策 `internal/control/place` |
-| 存储 | ZFS 池与克隆、iSCSI 导出（LIO） | `internal/storage/{zfs,iscsi,local,remote}` |
-| DHCP | dnsmasq 配置生成与托管 | `internal/dhcp` |
-| 目录库 | SQLite（分组/客户机/用户/设置/HA 状态） | `internal/store`，goose 迁移 |
-| 高可用 | 角色状态机、复制、epoch 栅栏 | `internal/ha`、`internal/control/ops`（Replicator）；keepalived 模板在 `deploy/` |
+| 管理 | 内嵌 Web 界面，一个 HTTP 端口 | 建存储池、导入镜像、维护配置和还原点、分组、登记客户机、上传驱动、查看告警和任务 |
+| 引导 | dnsmasq、iPXE | 按 MAC 分配固定 IP；TFTP 下发 iPXE；`/boot` 为这台机器生成开机脚本 |
+| 磁盘 | ZFS、LIO | 镜像下面是配置，配置下面是还原点。客户机开机时从当前还原点做写时复制克隆，系统盘和数据盘挂在同一个 iSCSI target 上 |
+| 目录 | SQLite | 保存分组、客户机、用户、系统设置和集群角色 |
+| 高可用 | keepalived | 虚 IP 跟着主节点走。目录在节点间复制，并用 epoch 防止旧主继续写入。客户机磁盘由持有该克隆的节点直接导出 |
 
-**数据面直连**：客户机的 DHCP / `/boot` / iSCSI 走承载它的那个节点（集群里由“放置”决定是哪台），不经控制面中转。
+集群里一台客户机落在哪台服务器，由放置决定：可以按分组固定，也可以在节点之间均衡。节点故障时虚 IP 切走，跑在故障节点上的客户机会重启一次，改由其它节点提供磁盘。
 
 ## 环境要求
 
@@ -96,7 +104,7 @@
 | 内存 | 最低 8 GB，推荐 32 GB 以上（按常用镜像总量能放进 ZFS ARC 估算） |
 | 网络 | 与客户机处于**同一二层网段**；集群各节点也须在该网段（VRRP 心跳经此网卡） |
 | IP 地址 | 每台服务器都要用**静态 IP**，不能用 DHCP |
-| 运行依赖 | `dnsmasq`、`dnsmasq-utils`、`qemu-utils`、`targetcli-fb`、`zfsutils-linux`、`keepalived`、`curl`（deb 包自动拉取，离线包已内置） |
+| 运行依赖 | `dnsmasq`、`dnsmasq-utils`、`qemu-utils`、`targetcli-fb`、`zfsutils-linux`、`keepalived`、`curl`、`libhivex-bin`、`libwin-hivex-perl`（deb 包自动拉取，离线包已内置） |
 
 **网络环境**
 
@@ -114,14 +122,19 @@
 
 ### 客户机镜像要求
 
+**从 ISO 创建系统镜像**：镜像管理 → 从 ISO 创建，选择安装文件、账户和关机的制作客户机（空环境可直接填写 MAC/IP）。支持 Windows 10/11、Windows Server 2016 及以上（x64）、Ubuntu 24.04 LTS，以及 CentOS / RHEL / Rocky Linux / AlmaLinux 的 Anaconda 完整 DVD（7/8/9，x86_64），均使用 UEFI/GPT。Linux 安装全程使用 ISO 内的软件包；ISO 作为 iSCSI 只读安装介质提供，不整张下载到客户机内存。识别时检查无盘启动和初始化所需组件，缺包的 boot/netinstall ISO 会提示具体原因。安装仅操作服务端指定的安装盘，首次启动成功后自动关机，保存后再次网络启动验证成功才发布镜像。RHEL 系使用 Kickstart 与 dracut/iBFT，提供安装准备和 Anaconda 日志；CentOS 7 DVD 已用于介质检查与自动化回归，完整安装、重启和不同 MAC 启动仍需实机验收，不能据此宣称所有发行版均已实测。Legacy BIOS 不在 ISO 安装流程范围内。步骤见 [ISO 安装验证](tools/e2e/README.md#iso-安装验证)。
+
+服务器和制作客户机都不需要外网；Ubuntu 制作客户机 4 GiB 内存实测可以装完。Windows 的启动网卡如果安装环境不自带驱动，请先在「机型 → 驱动包」上传对应 x64 驱动。新网卡第一次启动时，服务器按镜像里已安装的网卡和这份驱动写出这台机器的启动配置；开机成功后机型页显示正常，不需要另外适配。
+
 | 系统 | 支持情况 | 制作镜像前需要做的 |
 |---|---|---|
-| Windows | 支持 | 网卡设为自动获取 IP；Windows 11 24H2 / 25H2 须为 26100.7705 / 26200.7705 及以上版本 |
+| Windows | 支持 | 网卡设为自动获取 IP；Windows 11 24H2 / 25H2 建议使用 26100.7705 / 26200.7705 及以上版本 |
 | Ubuntu | 支持 | 安装 open-iscsi：`sudo apt install open-iscsi` |
-| CentOS / RHEL / Rocky 等其它 Linux | 未适配、未验证 | 见下方「其它 Linux」 |
+| CentOS / RHEL / Rocky / AlmaLinux | 已接入完整 DVD 的 ISO 安装流程，实机验收待完成 | 现成磁盘镜像的自动导入适配未扩展，手工准备见下方「其它 Linux」 |
 
-- **Windows 11 24H2 / 25H2**：部分版本有 iSCSI 启动失败的已知问题（蓝屏 `INACCESSIBLE_BOOT_DEVICE`，常见表现是第一次能进系统、重启后进不去），微软在 [KB5074105](https://support.microsoft.com/en-us/topic/january-29-2026-kb5074105-os-builds-26200-7705-and-26100-7705-preview-85bd25de-894a-43eb-a19b-9a59d10f194b) 中修复。
+- **Windows 11 24H2 / 25H2**：微软在 [KB5074105](https://support.microsoft.com/en-us/topic/january-29-2026-kb5074105-os-builds-26200-7705-and-26100-7705-preview-85bd25de-894a-43eb-a19b-9a59d10f194b) 中修复了可能导致 iSCSI 启动失败的问题（蓝屏 `INACCESSIBLE_BOOT_DEVICE`）。ISO 识别时对较早或无法确认的修订版本仅作提示，允许继续安装；兼容性以实际无盘启动验证为准。
 - **不要在镜像里设置静态 IP。** 所有客户机共用同一份镜像，写死的地址会被每台同时占用；如果撞上服务器的地址，客户机还会断开自己的系统盘。客户机的固定 IP 在分组里分配，由 NexBoot 的 DHCP 按 MAC 下发。Ubuntu 镜像导入时会自动把 netplan / NetworkManager 中的静态配置改为 DHCP（原文件备份为 `.nd-bak`）；Windows 镜像请在制作前手动改为自动获取。
+- **Windows 镜像请关闭自动更新、自动重启、睡眠和休眠。** 无盘客户机每次开机都从镜像还原，装过的更新会丢，每次开机都会重新下载、安装、自动重启；重启时 iSCSI 系统盘已经断开，客户机常常停在关机状态。系统补丁请用超管机统一安装，再存成还原点下发。
 - Ubuntu 的根分区可以是普通分区，也可以在 **LVM** 上（Ubuntu Server 默认安装方式，`/boot` 单独分区也支持）；只支持普通（linear）逻辑卷，精简卷、RAID 卷暂不支持。
 - **其它 Linux**（CentOS / RHEL / Rocky 等）：导入时不做自动适配，也没有经过实测。按 RHEL 的 iSCSI 引导方式，原机上至少需要配好以下几项，不保证一定能启动：
   1. 安装 iSCSI 工具，并把 iSCSI 模块打进 initramfs：`dnf install iscsi-initiator-utils && dracut --add "iscsi network" -f --regenerate-all`

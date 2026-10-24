@@ -298,3 +298,41 @@ func TestSuperMachineKeepsItsDiskWhenNoWriterIsKnown(t *testing.T) {
 		t.Fatalf("没有已知写入者时不该挪动超管机：%s", p.ServerID)
 	}
 }
+
+// 开机前对超管盘的操作（如注入驱动）必须和开机落在同一节点。
+func TestSuperDiskOperationsGoWhereTheMachineWillBoot(t *testing.T) {
+	ctx := context.Background()
+	st := newStore(t)
+	now := time.Date(2026, 10, 5, 15, 49, 0, 0, time.UTC)
+	seedServer(t, st, "node-a", now)
+	seedServer(t, st, "node-b", now)
+	writer, _ := st.Servers().Get(ctx, "node-a")
+	writer.HAState = "active"
+	if err := st.Servers().Update(ctx, writer); err != nil {
+		t.Fatal(err)
+	}
+	r := &Router{Store: st, NodeID: "node-a", Local: nullAgent{}, LocalPortal: "10.9.0.1",
+		Token: "tok", Now: func() time.Time { return now }}
+
+	lastBoot := "node-b"
+	term := domain.Terminal{ID: "s1", IsSuper: true, StorageServerID: &lastBoot}
+	boot := r.ForClient(ctx, domain.Group{ID: "g"}, term)
+	disk := r.ForSuper(ctx, term)
+	if disk.ServerID != boot.ServerID {
+		t.Fatalf("超管盘操作落在 %s，开机却落在 %s", disk.ServerID, boot.ServerID)
+	}
+}
+
+func TestNamedHostsNeverFallsBackOnAnUnknownOrUnreadableOwner(t *testing.T) {
+	st := newStore(t)
+	r := newRouter(st, time.Now())
+	if hosts, err := r.NamedHosts(context.Background(), []string{"missing-node"}); err == nil || len(hosts) > 0 {
+		t.Fatalf("unknown owner fell back locally: %v %v", hosts, err)
+	}
+	if err := st.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if hosts, err := r.NamedHosts(context.Background(), []string{"node-b"}); err == nil || len(hosts) > 0 {
+		t.Fatalf("database failure fell back locally: %v %v", hosts, err)
+	}
+}

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
 	"reflect"
 	"strings"
 	"testing"
@@ -221,6 +222,267 @@ func TestConfigServiceForkStoresBaselineReduction(t *testing.T) {
 	}
 }
 
+type failingCatalogueTxStore struct {
+	store.Store
+	fail bool
+}
+
+func (s *failingCatalogueTxStore) Tx(ctx context.Context, fn func(store.Store) error) error {
+	return s.Store.Tx(ctx, func(tx store.Store) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		if s.fail {
+			s.fail = false
+			return errors.New("catalogue transaction interrupted")
+		}
+		return nil
+	})
+}
+
+func TestConfigServiceDerivationInheritsOnlyItsSourceTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name, sourceReductionID string
+		fromImage               bool
+		wantInherited, failTx   bool
+	}{
+		{name: "selected-config-point", sourceReductionID: "red-selected", wantInherited: true},
+		{name: "image-does-not-use-config-latest", sourceReductionID: "red-selected", fromImage: true},
+		{name: "failed-template-commit-leaves-no-partial-config", sourceReductionID: "red-selected", failTx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newImageTestStore(t)
+			now := time.Now().UTC()
+			image := domain.Image{ID: "img-1", Name: "win", OSType: domain.OSTypeWindows, State: domain.ImageStateNormal, CreatedAt: now}
+			selected := domain.Reduction{ID: "red-selected", ConfigID: "cfg-1", Name: "@adapted", Status: domain.ReductionStatusReady, CreatedAt: now}
+			latest := domain.Reduction{ID: "red-latest", ConfigID: "cfg-1", Name: "@latest", Status: domain.ReductionStatusReady, CreatedAt: now.Add(time.Hour)}
+			cfg := domain.Config{ID: "cfg-1", ImageID: image.ID, Name: "default", DefaultReductionID: &latest.ID, CreatedAt: now}
+			profile := domain.HardwareProfile{ID: "e1000", Name: "e1000", Fingerprint: "e1000", NICVendor: "8086", NICDevice: "100F", CreatedAt: now, UpdatedAt: now}
+			source := domain.ModelAdaptation{ID: "adapt-source", ProfileID: profile.ID, ReductionID: tc.sourceReductionID, ConfigID: cfg.ID, Source: domain.AdaptationAdapted,
+				TemplateInstanceID: `PCI\VEN_8086&DEV_100F\4&SOURCE&0&0088`, ClassKey: "0012", NetCfgInstanceID: "{11111111-2222-3333-4444-555555555555}", DriverPackIDs: []string{"pack-source"}, CreatedAt: now}
+			other := source
+			other.ID, other.ReductionID, other.TemplateInstanceID, other.ClassKey, other.DriverPackIDs = "adapt-latest", latest.ID, `PCI\VEN_8086&DEV_100F\4&LATEST&0&0088`, "0034", []string{"pack-latest"}
+			for _, err := range []error{st.Images().Create(ctx, image), st.Configs().Create(ctx, cfg), st.Reductions().Create(ctx, selected), st.Reductions().Create(ctx, latest), st.HardwareProfiles().Create(ctx, profile), st.ModelAdaptations().Create(ctx, source), st.ModelAdaptations().Create(ctx, other)} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			var serviceStore store.Store = st
+			if tc.failTx {
+				serviceStore = &failingCatalogueTxStore{Store: st, fail: true}
+			}
+			disk := &fakeConfigStorage{}
+			service := ConfigService{Store: serviceStore, Storage: disk}
+			var result ConfigOperationResult
+			var err error
+			if tc.fromImage {
+				result, err = service.CreateFromImage(ctx, image.ID, CreateConfigRequest{Name: "fork"})
+			} else {
+				result, err = service.CreateFromConfig(ctx, cfg.ID, CreateConfigFromConfigRequest{Name: "fork", ReductionID: selected.ID})
+			}
+			if tc.failTx {
+				if err == nil || disk.deleted != "cfg-1_clone" {
+					t.Fatalf("failed commit must return an error and clean the new dataset: error=%v deleted=%s", err, disk.deleted)
+				}
+				if _, err := st.Configs().Get(ctx, "cfg-1_clone"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("partial config survived: %v", err)
+				}
+				if _, err := st.Reductions().Get(ctx, "cfg-1_clone_0"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("partial baseline survived: %v", err)
+				}
+				if rows, err := st.ModelAdaptations().ByReduction(ctx, "cfg-1_clone_0"); err != nil || len(rows) != 0 {
+					t.Fatalf("partial template survived: %+v error=%v", rows, err)
+				}
+				unchanged, err := st.ModelAdaptations().Get(ctx, source.ID)
+				if err != nil || !reflect.DeepEqual(unchanged, source) {
+					t.Fatalf("failed derivation changed its source template: %+v error=%v", unchanged, err)
+				}
+				stored, _ := st.Configs().Get(ctx, cfg.ID)
+				if stored.DefaultReductionID == nil || *stored.DefaultReductionID != latest.ID {
+					t.Fatalf("failed derivation changed source current point: %+v", stored)
+				}
+				if tasks, total, err := st.Tasks().ListPaged(ctx, string(domain.TaskStatusFailed), 10, 0); err != nil || total != 1 || len(tasks) != 1 {
+					t.Fatalf("failed derivation must have one failed task: %+v total=%d error=%v", tasks, total, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := (hwprofile.Service{Store: st}).Get(ctx, profile.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var inherited []domain.ModelAdaptation
+			for _, row := range view.Adaptations {
+				if row.ReductionID == *result.Config.DefaultReductionID {
+					inherited = append(inherited, row)
+				}
+			}
+			if !tc.wantInherited {
+				if len(inherited) != 0 {
+					t.Fatalf("image baseline must not inherit unrelated config content: %+v", inherited)
+				}
+				return
+			}
+			if len(inherited) != 1 {
+				t.Fatalf("derived baseline must expose its source model template: %+v", inherited)
+			}
+			got := inherited[0]
+			if got.Source != domain.AdaptationInherited || got.ConfigID != result.Config.ID || got.TemplateInstanceID != source.TemplateInstanceID || got.ClassKey != source.ClassKey || got.NetCfgInstanceID != source.NetCfgInstanceID || !reflect.DeepEqual(got.DriverPackIDs, source.DriverPackIDs) {
+				t.Fatalf("derived model must preserve selected source identity, not the latest: %+v", got)
+			}
+			unchanged, err := st.ModelAdaptations().Get(ctx, source.ID)
+			if err != nil || !reflect.DeepEqual(unchanged, source) {
+				t.Fatalf("source template changed: %+v, error=%v", unchanged, err)
+			}
+			stored, err := st.Configs().Get(ctx, cfg.ID)
+			if err != nil || stored.DefaultReductionID == nil || *stored.DefaultReductionID != latest.ID {
+				t.Fatalf("source config current point changed: %+v, error=%v", stored, err)
+			}
+		})
+	}
+}
+
+func TestConfigServiceRebuiltImagePreservesOnlyItsChosenTemplate(t *testing.T) {
+	for _, tc := range []struct {
+		name, oldBaselineID         string
+		newPoint, overwrite, failTx bool
+	}{
+		{name: "legacy-config-baseline", oldBaselineID: "cfg-keep_0"},
+		{name: "same-image-baseline", oldBaselineID: "img-1_0"},
+		{name: "replaces-image-baseline", oldBaselineID: "img-1_0", newPoint: true},
+		{name: "overwrite-selected-earlier-point", oldBaselineID: "img-1_0", newPoint: true, overwrite: true},
+		{name: "failed-merge-commit-is-atomic-and-retryable", oldBaselineID: "cfg-keep_0", newPoint: true, failTx: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := newImageTestStore(t)
+			now := time.Now().UTC()
+			baseline := domain.Reduction{ID: tc.oldBaselineID, ConfigID: "cfg-keep", Name: "@0", Status: domain.ReductionStatusReady, CreatedAt: now}
+			selected := baseline
+			if tc.newPoint {
+				selected.ID, selected.Name, selected.CreatedAt = "red-selected", "@selected", now.Add(time.Minute)
+			}
+			currentID := selected.ID
+			later := domain.Reduction{ID: "red-later", ConfigID: "cfg-keep", Name: "@later", Status: domain.ReductionStatusReady, CreatedAt: now.Add(2 * time.Minute)}
+			if tc.overwrite {
+				currentID = later.ID
+			}
+			image := domain.Image{ID: "img-1", Name: "win", OSType: domain.OSTypeWindows, State: domain.ImageStateNormal, CreatedAt: now}
+			cfg := domain.Config{ID: "cfg-keep", ImageID: image.ID, Name: "keep", DefaultReductionID: &currentID, CreatedAt: now}
+			profile := domain.HardwareProfile{ID: "e1000", Name: "e1000", Fingerprint: "e1000", NICVendor: "8086", NICDevice: "100F", CreatedAt: now, UpdatedAt: now}
+			for _, err := range []error{st.Images().Create(ctx, image), st.Configs().Create(ctx, cfg), st.Reductions().Create(ctx, baseline), st.HardwareProfiles().Create(ctx, profile)} {
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.newPoint {
+				if err := st.Reductions().Create(ctx, selected); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if tc.overwrite {
+				if err := st.Reductions().Create(ctx, later); err != nil {
+					t.Fatal(err)
+				}
+			}
+			chosen := domain.ModelAdaptation{ID: "adapt-selected", ProfileID: profile.ID, ReductionID: selected.ID, ConfigID: cfg.ID, Source: domain.AdaptationAdapted,
+				TemplateInstanceID: `PCI\VEN_8086&DEV_100F\4&CHOSEN&0&0088`, ClassKey: "0012", NetCfgInstanceID: "{11111111-2222-3333-4444-555555555555}", CreatedAt: now}
+			if err := st.ModelAdaptations().Create(ctx, chosen); err != nil {
+				t.Fatal(err)
+			}
+			for _, red := range []domain.Reduction{baseline, later} {
+				if red.ID == selected.ID || red.ID == later.ID && !tc.overwrite {
+					continue
+				}
+				other := chosen
+				other.ID, other.ReductionID, other.TemplateInstanceID = "adapt-"+red.ID, red.ID, `PCI\VEN_8086&DEV_100F\4&OTHER&0&0088`
+				if err := st.ModelAdaptations().Create(ctx, other); err != nil {
+					t.Fatal(err)
+				}
+			}
+			group := domain.Group{ID: "g-1", Name: "教室", StartIP: "10.0.0.1", ClientMax: 10, Gateway: "10.0.0.254", Netmask: "255.255.255.0", SystemImageID: image.ID, SystemConfigID: cfg.ID, SystemReductionID: currentID}
+			if err := st.Groups().Create(ctx, group); err != nil {
+				t.Fatal(err)
+			}
+			var serviceStore store.Store = st
+			if tc.failTx {
+				serviceStore = &failingCatalogueTxStore{Store: st, fail: true}
+			}
+			service := ConfigService{Store: serviceStore, Storage: &fakeConfigStorage{}}
+			var err error
+			if tc.overwrite {
+				_, err = service.OverwriteImage(ctx, selected.ID)
+			} else {
+				_, err = service.Merge(ctx, cfg.ID)
+			}
+			if tc.failTx {
+				if err == nil {
+					t.Fatal("interrupted merge commit must fail")
+				}
+				stored, _ := st.Configs().Get(ctx, cfg.ID)
+				storedGroup, _ := st.Groups().Get(ctx, group.ID)
+				if stored.DefaultReductionID == nil || *stored.DefaultReductionID != currentID || storedGroup.SystemReductionID != currentID {
+					t.Fatalf("failed merge changed current references: config=%+v group=%+v", stored, storedGroup)
+				}
+				for _, red := range []domain.Reduction{baseline, selected} {
+					unchanged, err := st.Reductions().Get(ctx, red.ID)
+					if err != nil || !reflect.DeepEqual(unchanged, red) {
+						t.Fatalf("failed merge changed source point: %+v error=%v", unchanged, err)
+					}
+				}
+				unchanged, sourceErr := st.ModelAdaptations().Get(ctx, chosen.ID)
+				if sourceErr != nil || !reflect.DeepEqual(unchanged, chosen) {
+					t.Fatalf("failed merge changed source template: %+v error=%v", unchanged, sourceErr)
+				}
+				if _, err := st.Reductions().Get(ctx, "img-1_0"); !errors.Is(err, store.ErrNotFound) {
+					t.Fatalf("failed merge left a new baseline: %v", err)
+				}
+				if rows, err := st.ModelAdaptations().ByReduction(ctx, "img-1_0"); err != nil || len(rows) != 0 {
+					t.Fatalf("failed merge left partial inherited templates: %+v error=%v", rows, err)
+				}
+				if tasks, total, err := st.Tasks().ListPaged(ctx, string(domain.TaskStatusFailed), 10, 0); err != nil || total != 1 || len(tasks) != 1 {
+					t.Fatalf("failed merge must have one failed task before retry: %+v total=%d error=%v", tasks, total, err)
+				}
+				_, err = service.Merge(ctx, cfg.ID)
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			cfg, _ = st.Configs().Get(ctx, cfg.ID)
+			group, _ = st.Groups().Get(ctx, group.ID)
+			if cfg.DefaultReductionID == nil || *cfg.DefaultReductionID != "img-1_0" || group.SystemReductionID != "img-1_0" {
+				t.Fatalf("rebuilt image must expose and apply its real canonical baseline: config=%+v group=%+v", cfg, group)
+			}
+			result, err := service.CreateFromImage(ctx, image.ID, CreateConfigRequest{Name: "new-config"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			view, err := (hwprofile.Service{Store: st}).Get(ctx, profile.ID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := false
+			for _, row := range view.Adaptations {
+				if row.ReductionID == *result.Config.DefaultReductionID {
+					found = true
+					if row.Source != domain.AdaptationInherited || row.TemplateInstanceID != chosen.TemplateInstanceID || row.ClassKey != chosen.ClassKey || row.NetCfgInstanceID != chosen.NetCfgInstanceID {
+						t.Fatalf("new config inherited the wrong physical source template: %+v", row)
+					}
+				}
+				if _, err := st.Reductions().Get(ctx, row.ReductionID); err != nil {
+					t.Fatalf("model history must only refer to real restore points: %+v, error=%v", row, err)
+				}
+			}
+			if !found {
+				t.Fatalf("new config baseline %s lost the rebuilt image template", *result.Config.DefaultReductionID)
+			}
+		})
+	}
+}
+
 func TestConfigServiceDelete(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
@@ -403,14 +665,14 @@ func TestConfigServiceMergeFoldsKeptReductionsIntoBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 || list[0].ID != "cfg-keep_0" || list[0].Name != "@0" {
+	if len(list) != 1 || list[0].ID != "img-1_0" || list[0].Name != "@0" {
 		t.Fatalf("reductions = %#v", list)
 	}
 	cfg, err := st.Configs().Get(ctx, "cfg-keep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.DefaultReductionID == nil || *cfg.DefaultReductionID != "cfg-keep_0" {
+	if cfg.DefaultReductionID == nil || *cfg.DefaultReductionID != "img-1_0" {
 		t.Fatalf("default reduction = %#v", cfg.DefaultReductionID)
 	}
 	if _, err := st.Reductions().Get(ctx, "red-keep-2"); !errors.Is(err, store.ErrNotFound) {
@@ -453,14 +715,14 @@ func TestConfigServiceMergeRepointsGroupsAtTheNewBaseline(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if group.SystemReductionID != "cfg-keep_0" {
+	if group.SystemReductionID != "img-1_0" {
 		t.Fatalf("group reduction = %q, want the new baseline", group.SystemReductionID)
 	}
 	list, err := st.Reductions().ListByConfig(ctx, "cfg-keep")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(list) != 1 || list[0].ID != "cfg-keep_0" {
+	if len(list) != 1 || list[0].ID != "img-1_0" {
 		t.Fatalf("reductions = %#v", list)
 	}
 }
@@ -703,7 +965,7 @@ func (s *fakeConfigStorage) MergeConfig(_ context.Context, req storage.MergeConf
 		return storage.MergeConfigResult{}, s.err
 	}
 	return storage.MergeConfigResult{Reduction: domain.Reduction{
-		ID: req.ConfigID + "_0", ConfigID: req.ConfigID, Name: "@0",
+		ID: req.ImageID + "_0", ConfigID: req.ConfigID, Name: "@0",
 		CreatedAt: time.Now().UTC(), Status: domain.ReductionStatusReady,
 	}}, nil
 }

@@ -95,7 +95,9 @@ func TestActivateProceedsWhenIncompleteAndNobodyAnswers(t *testing.T) {
 	c.ReportFile = filepath.Join(dir, "ha-takeover.json")
 	_ = WriteRoleState(c.RoleFile, RoleState{Role: "standby", Epoch: 5})
 	c.HoldsVIP = func() bool { return true }
-	c.CatalogueIncomplete = func(context.Context) []string { return []string{"配置「办公」"} }
+	c.CatalogueIncomplete = func(context.Context) []MissingDataset {
+		return []MissingDataset{{Ref: "img_office", Label: "配置「办公」"}}
+	}
 
 	if err := c.Activate(context.Background(), "keepalived master"); err != nil {
 		t.Fatalf("没有更完整的节点可等，应接任: %v", err)

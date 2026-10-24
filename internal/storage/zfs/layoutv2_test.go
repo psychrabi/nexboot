@@ -253,3 +253,29 @@ func TestEnsureDBCopyDatasetMountsAfterRepointingAnUnmountedCopy(t *testing.T) {
 		t.Fatalf("掰回挂载点之后没有挂上，calls = %#v", runner.calls)
 	}
 }
+
+// 适配环境文件（WinRE、BCD）放在 nd/files 下随目录复制到备机；首次使用时按库副本同样的方式建并挂载。
+func TestEnsureFilesDatasetCreatesAndMounts(t *testing.T) {
+	runner := &sequenceRunner{
+		outs: [][]byte{[]byte("cannot open 'tank/nd/files': dataset does not exist\n"), nil},
+		err:  fmt.Errorf("exit status 1"), errAt: 1,
+	}
+	client := newTestClient(runner)
+	dir, err := client.EnsureFilesDataset(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dir != "/ndiskless/tank/nd/files" {
+		t.Fatalf("dir = %q", dir)
+	}
+	want := fakeCall{name: "zfs", args: []string{"create", "-p", "-o", "mountpoint=/ndiskless/tank/nd/files", "tank/nd/files"}}
+	if !reflect.DeepEqual(runner.calls[1], want) {
+		t.Fatalf("create call = %#v", runner.calls[1])
+	}
+	runner = &sequenceRunner{outs: [][]byte{[]byte("/ndiskless/tank/nd/files\n"), []byte("yes\n")}}
+	client = newTestClient(runner)
+	client.statDir = func(string) error { return nil }
+	if dir, err = client.EnsureFilesDataset(context.Background()); err != nil || dir != "/ndiskless/tank/nd/files" || len(runner.calls) != 2 {
+		t.Fatalf("dir = %q err = %v calls = %#v", dir, err, runner.calls)
+	}
+}

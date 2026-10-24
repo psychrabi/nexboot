@@ -13,7 +13,8 @@ Configuration comes from the environment, never from this file:
     ND_SSH_USER   root
     ND_SSH_PASSWORD                       falls back to ND_PASSWORD
     ND_POOL       tank                    pool name
-    ND_IMPORT_DIR /tank/imports           where source images live
+    ND_IMPORT_DIR <from /api/runtime>     where source images live (the writer's
+                                          <pool>/nd/files/imports); override only for old builds
 """
 import json
 import os
@@ -31,11 +32,13 @@ SSH_HOST = os.environ.get("ND_SSH_HOST") or urllib.parse.urlparse(BASE).hostname
 SSH_USER = os.environ.get("ND_SSH_USER", "root")
 SSH_PASSWORD = os.environ.get("ND_SSH_PASSWORD") or PASSWORD
 POOL = os.environ.get("ND_POOL", "tank")
-IMPORT_DIR = os.environ.get("ND_IMPORT_DIR", "/tank/imports")
+IMPORT_DIR = os.environ.get("ND_IMPORT_DIR", "")
 
 results = []
 skipped = []
 _token = None
+# 最近一次写请求（非 GET）的 (状态码, 应答)。task_of 靠它认出「请求根本没受理」和请求建的那个任务。
+_last_write = None
 
 
 def login():
@@ -63,9 +66,30 @@ def call(method, path, body=None):
     try:
         with urllib.request.urlopen(req, timeout=90) as r:
             raw = r.read().decode()
-            return r.status, (json.loads(raw) if raw.strip().startswith(("{", "[")) else raw.strip())
+            out = r.status, (json.loads(raw) if raw.strip().startswith(("{", "[")) else raw.strip())
     except urllib.error.HTTPError as e:
-        return e.code, e.read().decode().strip()
+        out = e.code, e.read().decode().strip()
+    if method != "GET":
+        global _last_write
+        _last_write = out
+    return out
+
+
+def _runtime_import_dir():
+    """The import dir is no longer configurable: ask the node which one is in effect."""
+    try:
+        st, res = call("GET", "/api/runtime")
+    except (Exception, SystemExit) as e:  # noqa: BLE001 — no password / unreachable: leave it to the suite
+        print(f"[ndapi] could not read /api/runtime for the import dir: {e}")
+        return ""
+    if st != 200 or not isinstance(res, dict) or not res.get("import_dir"):
+        print(f"[ndapi] /api/runtime gave no import dir: {st} {res}")
+        return ""
+    return res["import_dir"]
+
+
+if not IMPORT_DIR:
+    IMPORT_DIR = _runtime_import_dir()
 
 
 def get_bytes(path):
@@ -113,17 +137,30 @@ def cfg_by_name(image, name):
     return next((c for c in configs(image) if c["Name"] == name), None)
 
 
-def task_of(prefix, timeout=180):
+def task_of(prefix, timeout=180, task_id=None):
     """Wait for the newest task of this kind to settle.
 
     It scans a window rather than reading the newest row: an import is followed
     immediately by its health check, so `limit=1` would report on the wrong
     task and call a successful import a failure.
+
+    When the last write call was refused, no task was created: report that
+    instead of an older task of the same kind (a failed import used to pass on
+    the previous run's success). When it answered with a task_id, wait for that
+    exact task.
     """
+    if task_id is None and _last_write is not None:
+        status, body = _last_write
+        if not 200 <= status < 300:
+            return {"Status": "failed", "Error": f"请求未受理（HTTP {status}）：{str(body)[:200]}"}
+        if isinstance(body, dict) and str(body.get("task_id", "")).startswith(prefix):
+            task_id = body["task_id"]
     for _ in range(timeout):
-        _, d = call("GET", "/api/tasks/history?limit=10")
+        _, d = call("GET", "/api/tasks/history?limit=" + ("50" if task_id else "10"))
         items = d if isinstance(d, list) else d.get("items", [])
         for item in items:
+            if task_id and item["ID"] != task_id:
+                continue
             if item["ID"].startswith(prefix):
                 if item["Status"] in ("success", "failed"):
                     return item

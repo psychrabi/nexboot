@@ -161,7 +161,7 @@ func TestTerminalServiceCreateUpdateTerminalName(t *testing.T) {
 	}
 }
 
-func TestTerminalServiceUpdateDemotingSuperClearsPendingBundle(t *testing.T) {
+func TestTerminalServiceUpdateDemotingSuper(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	group := seedTerminalGroup(t, ctx, st, 3)
@@ -173,29 +173,20 @@ func TestTerminalServiceUpdateDemotingSuperClearsPendingBundle(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	bundleID := "bundle-1"
-	now := time.Now().UTC()
-	terminal.PendingBundleID = &bundleID
-	terminal.PendingBundleAt = &now
-	if err := st.Terminals().Update(ctx, terminal); err != nil {
-		t.Fatal(err)
-	}
-
-	// 走编辑路径取消超管（不经 DisableSuper）也必须清掉暂存驱动包，否则普通机仍显示矛盾的「待固化」。
 	updated, err := service.Update(ctx, terminal.ID, TerminalRequest{
 		MAC: "00:11:22:33:44:55", IP: "192.168.1.10", GroupID: group.ID, IsSuper: false,
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if updated.IsSuper || updated.PendingBundleID != nil || updated.PendingBundleAt != nil {
+	if updated.IsSuper {
 		t.Fatalf("demoted terminal = %#v", updated)
 	}
 	got, err := service.Get(ctx, terminal.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PendingBundleID != nil || got.PendingBundleAt != nil {
+	if got.IsSuper {
 		t.Fatalf("persisted terminal = %#v", got)
 	}
 }
@@ -487,23 +478,12 @@ func TestTerminalServiceSuperSingletonPerConfig(t *testing.T) {
 		t.Fatalf("second should remain normal: %#v", unchanged)
 	}
 
-	// 超管机上已暂存未固化的驱动包不能在 DisableSuper 后留下：机器离开超管后它指向的克隆已不作数。
-	pendingID, pendingAt := "bundle-x", time.Now().UTC()
-	firstWithPending, err := st.Terminals().Get(ctx, first.ID)
-	if err != nil {
-		t.Fatal(err)
-	}
-	firstWithPending.PendingBundleID = &pendingID
-	firstWithPending.PendingBundleAt = &pendingAt
-	if err := st.Terminals().Update(ctx, firstWithPending); err != nil {
-		t.Fatal(err)
-	}
 	disabled, err := service.DisableSuper(ctx, first.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if disabled.PendingBundleID != nil || disabled.PendingBundleAt != nil {
-		t.Fatalf("pending bundle should be cleared on disable-super: %#v", disabled)
+	if disabled.IsSuper {
+		t.Fatalf("disable-super: %#v", disabled)
 	}
 	enabled, err = service.EnableSuper(ctx, second.ID)
 	if err != nil {
@@ -528,9 +508,6 @@ func TestTerminalServiceStopSuperSavesReduction(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	pendingID, pendingAt := "bundle-x", time.Now().UTC()
-	terminal.PendingBundleID = &pendingID
-	terminal.PendingBundleAt = &pendingAt
 	if err := st.Terminals().Update(ctx, terminal); err != nil {
 		t.Fatal(err)
 	}
@@ -573,9 +550,6 @@ func TestTerminalServiceStopSuperSavesReduction(t *testing.T) {
 	// 存还原点不动超管状态：存完中间点还要接着装，不该被踢出超管；结束编辑是「取消超管」的事。
 	if !updated.IsSuper {
 		t.Fatalf("存还原点不该把这台踢出超管：%#v", updated)
-	}
-	if updated.PendingBundleID != nil || updated.PendingBundleAt != nil {
-		t.Fatalf("pending bundle should be cleared on stop-super: %#v", updated)
 	}
 	task, err := st.Tasks().Get(ctx, result.TaskID)
 	if err != nil {
@@ -872,6 +846,40 @@ func TestTerminalServiceStopSuperNamesTheDiskWithoutASession(t *testing.T) {
 	}
 }
 
+// 注册表不能安全恢复（或快速启动关机）时拒绝保存：中文原因、不建还原点、机器仍是超管机。
+func TestTerminalServiceStopSuperRefusesUnsafeHive(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	group := seedTerminalGroup(t, ctx, st, 3)
+	terminal, err := (TerminalService{Store: st}).Create(ctx, TerminalRequest{
+		MAC: "00:11:22:33:44:55", IP: "192.168.1.10", GroupID: group.ID, IsSuper: true, State: domain.TerminalStateOffline,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before, err := st.Reductions().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fake := &fakeSuperStopStorage{err: storage.SuperHiveUnsafe{FastStartup: true}}
+	service := TerminalService{Store: st, Storage: fake}
+	_, err = service.StopSuper(ctx, terminal.ID, SuperStopRequest{ReductionName: "v2"})
+	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "快速启动") || !strings.Contains(err.Error(), terminal.MAC) {
+		t.Fatalf("err = %v", err)
+	}
+	after, err := st.Reductions().List(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) != len(before) {
+		t.Fatalf("reductions changed: %d -> %d", len(before), len(after))
+	}
+	still, err := st.Terminals().Get(ctx, terminal.ID)
+	if err != nil || !still.IsSuper {
+		t.Fatalf("a refused save must leave the machine super: %#v %v", still, err)
+	}
+}
+
 // 两个分组共用一个数据配置时不能同时开超管机，否则互相覆盖保存；冲突信息与系统配置规则一样点名配置和占用的机器。
 func TestTerminalServiceSuperExclusiveOverDataConfigs(t *testing.T) {
 	ctx := context.Background()
@@ -1063,6 +1071,180 @@ func TestTerminalServiceDeleteReclaimsCloneImmediately(t *testing.T) {
 	}
 	if _, err := st.Terminals().Get(ctx, created.ID); !errors.Is(err, store.ErrNotFound) {
 		t.Fatalf("terminal err = %v", err)
+	}
+}
+
+func TestTerminalDeleteRefusesEveryActivePESessionBeforeDiskCleanup(t *testing.T) {
+	for _, state := range []domain.PESessionState{domain.PEStatePreparing, domain.PEStatePending, domain.PEStateBooted, domain.PEStateFinalizing} {
+		t.Run(string(state), func(t *testing.T) {
+			ctx := context.Background()
+			st := newImageTestStore(t)
+			group := seedTerminalGroup(t, ctx, st, 3)
+			disks := &fakeMoveStorage{}
+			svc := TerminalService{Store: st, Storage: disks}
+			terminal, err := svc.Create(ctx, TerminalRequest{MAC: "AA:BB:CC:DD:EE:FF", IP: "192.168.1.10", GroupID: group.ID, Name: "测试机"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			now := time.Now().UTC()
+			session := domain.PESession{ID: "pe-adapt", TaskID: "task-model-adapt", TerminalID: terminal.ID, MAC: terminal.MAC, Token: "token", Mode: domain.PEModeAdapt, State: state, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)}
+			if err := st.PESessions().Create(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+			err = svc.Delete(ctx, terminal.ID)
+			if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), terminal.MAC) || !strings.Contains(err.Error(), session.TaskID) {
+				t.Fatalf("active %s must name client and task: %v", state, err)
+			}
+			if len(disks.cleaned) != 0 {
+				t.Fatalf("active PE disks must be retained: %v", disks.cleaned)
+			}
+			if _, err := svc.Get(ctx, terminal.ID); err != nil {
+				t.Fatalf("active PE terminal must be retained: %v", err)
+			}
+			session.State = domain.PEStateDone
+			if err := st.PESessions().Update(ctx, session); err != nil {
+				t.Fatal(err)
+			}
+			if err := svc.Delete(ctx, terminal.ID); err != nil {
+				t.Fatalf("finished PE must release deletion: %v", err)
+			}
+		})
+	}
+}
+
+type macEditStorage struct {
+	fakeMoveStorage
+	deleted []string
+	dropErr error
+}
+
+func (s *macEditStorage) CreateIdentityLayer(context.Context, storage.IdentityLayerReq) error {
+	return nil
+}
+func (s *macEditStorage) DeleteIdentityLayer(_ context.Context, mac string) error {
+	s.deleted = append(s.deleted, mac)
+	return s.dropErr
+}
+
+func TestTerminalMACUpdateCleansOldIdentityOrKeepsOriginalMetadata(t *testing.T) {
+	for _, scenario := range []string{"success", "online", "pending", "live-session", "cleanup-error", "old-node-missing", "peer-offline"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			st := newImageTestStore(t)
+			group := seedTerminalGroup(t, ctx, st, 3)
+			now := time.Now().UTC()
+			local, peer := &macEditStorage{}, &macEditStorage{}
+			server := httptest.NewServer(remote.Handler{Agent: peer, Token: "tok"})
+			defer server.Close()
+			svc := TerminalService{Store: st, Storage: local, Place: &place.Router{Store: st, NodeID: "node-a", Local: local, Token: "tok", Now: func() time.Time { return now }}}
+			terminal, err := svc.Create(ctx, TerminalRequest{MAC: "AA:BB:CC:DD:EE:FF", IP: "192.168.1.10", GroupID: group.ID, Name: "测试机"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			id := domain.TerminalIdentity{ID: terminal.ID, TerminalID: terminal.ID, InstanceID: `PCI\VEN_15AD&DEV_07B0\AABBCCFFFFDDEEFF00`, Source: "computed", LayerServerID: "node-b", LayerReductionRef: "old-point", UpdatedAt: now}
+			if err := st.TerminalIdentities().Create(ctx, id); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "old-node-missing" {
+				seen := now
+				if scenario == "peer-offline" {
+					seen = now.Add(-time.Hour)
+				}
+				if err := st.Servers().Create(ctx, domain.Server{ID: "node-b", Name: "b", IP: "10.9.0.2", PortalIP: "10.9.0.2", APIURL: server.URL, Role: domain.ServerRoleAll, Status: domain.ServerStatusUp, LastSeenAt: &seen}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "online" {
+				terminal.State = domain.TerminalStateOnline
+				if err := st.Terminals().Update(ctx, terminal); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "pending" {
+				if err := st.PESessions().Create(ctx, domain.PESession{ID: "pe-pending", TerminalID: terminal.ID, TaskID: "task-pe", Token: "token", Mode: domain.PEModeAdapt, State: domain.PEStatePending, CreatedAt: now, UpdatedAt: now, ExpiresAt: now.Add(time.Hour)}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "live-session" {
+				peer.dropErr = fmt.Errorf("请先关闭客户机 %s，再清理旧节点身份层", terminal.MAC)
+			}
+			if scenario == "cleanup-error" {
+				peer.dropErr = errors.New("identity cleanup failed")
+			}
+			changed, err := svc.Update(ctx, terminal.ID, TerminalRequest{MAC: "AA:BB:CC:DD:EE:01", IP: terminal.IP, GroupID: terminal.GroupID, Name: terminal.Name})
+			got, _ := st.Terminals().Get(ctx, terminal.ID)
+			identity, _ := st.TerminalIdentities().Get(ctx, terminal.ID)
+			if identity.InstanceID != id.InstanceID || identity.LayerServerID != id.LayerServerID {
+				t.Fatalf("identity cleanup must remain traceable: %+v", identity)
+			}
+			if scenario == "success" {
+				if err != nil || changed.MAC != "AABBCCDDEE01" || got.MAC != changed.MAC || len(local.deleted) != 1 || len(peer.deleted) != 1 || local.deleted[0] != terminal.MAC || peer.deleted[0] != terminal.MAC {
+					t.Fatalf("old MAC must be cleaned on all nodes before editing: changed=%+v err=%v local=%v peer=%v", changed, err, local.deleted, peer.deleted)
+				}
+			} else if !errors.Is(err, errs.ErrConflict) || got.MAC != terminal.MAC || !strings.Contains(err.Error(), terminal.MAC) {
+				t.Fatalf("unsafe MAC edit must keep original metadata: err=%v terminal=%+v", err, got)
+			} else if scenario != "online" && scenario != "pending" && !strings.Contains(err.Error(), "node-b") {
+				t.Fatalf("cleanup refusal must name the node: %v", err)
+			}
+		})
+	}
+}
+
+func TestTerminalDeleteKeepsIdentityUntilEveryHostCanBeCleaned(t *testing.T) {
+	for _, scenario := range []string{"success", "old-node-missing", "peer-offline", "cleanup-error"} {
+		t.Run(scenario, func(t *testing.T) {
+			ctx := context.Background()
+			st := newImageTestStore(t)
+			group := seedTerminalGroup(t, ctx, st, 3)
+			now := time.Now().UTC()
+			local, peer := &macEditStorage{}, &macEditStorage{}
+			server := httptest.NewServer(remote.Handler{Agent: peer, Token: "tok"})
+			defer server.Close()
+			svc := TerminalService{Store: st, Storage: local, Place: &place.Router{Store: st, NodeID: "node-a", Local: local, Token: "tok", Now: func() time.Time { return now }}}
+			terminal, err := svc.Create(ctx, TerminalRequest{MAC: "AA:BB:CC:DD:EE:FF", IP: "192.168.1.10", GroupID: group.ID, Name: "测试机"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			identity := domain.TerminalIdentity{ID: terminal.ID, TerminalID: terminal.ID, InstanceID: "captured-instance", Source: "captured", LayerServerID: "node-b", LayerReductionRef: "old-point", UpdatedAt: now}
+			if err := st.TerminalIdentities().Create(ctx, identity); err != nil {
+				t.Fatal(err)
+			}
+			if scenario != "old-node-missing" {
+				seen := now
+				if scenario == "peer-offline" {
+					seen = now.Add(-time.Hour)
+				}
+				if err := st.Servers().Create(ctx, domain.Server{ID: "node-b", Name: "b", IP: "10.9.0.2", PortalIP: "10.9.0.2", APIURL: server.URL, Role: domain.ServerRoleAll, Status: domain.ServerStatusUp, LastSeenAt: &seen}); err != nil {
+					t.Fatal(err)
+				}
+			}
+			if scenario == "cleanup-error" {
+				peer.dropErr = errors.New("identity cleanup failed")
+			}
+			err = svc.Delete(ctx, terminal.ID)
+			if scenario == "success" {
+				if err != nil || len(local.deleted) != 1 || len(peer.deleted) != 1 || local.deleted[0] != terminal.MAC || peer.deleted[0] != terminal.MAC {
+					t.Fatalf("deletion must release both identity hosts: err=%v local=%v peer=%v", err, local.deleted, peer.deleted)
+				}
+				if _, err := st.Terminals().Get(ctx, terminal.ID); !errs.IsNotFound(err) {
+					t.Fatalf("terminal was not deleted after cleanup: %v", err)
+				}
+				if _, err := st.TerminalIdentities().Get(ctx, terminal.ID); !errs.IsNotFound(err) {
+					t.Fatalf("identity metadata was not deleted after cleanup: %v", err)
+				}
+				return
+			}
+			if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), terminal.MAC) || !strings.Contains(err.Error(), "node-b") || !strings.Contains(err.Error(), "删除客户机") {
+				t.Fatalf("unsafe deletion must explain the client, old host and operation: %v", err)
+			}
+			got, identityErr := st.TerminalIdentities().Get(ctx, terminal.ID)
+			if identityErr != nil || got.InstanceID != identity.InstanceID || got.LayerServerID != identity.LayerServerID || got.LayerReductionRef != identity.LayerReductionRef {
+				t.Fatalf("failed deletion lost the old identity cleanup reference: %+v err=%v", got, identityErr)
+			}
+			if _, err := st.Terminals().Get(ctx, terminal.ID); err != nil {
+				t.Fatalf("failed deletion lost the terminal: %v", err)
+			}
+		})
 	}
 }
 
@@ -1537,4 +1719,58 @@ func TestTerminalMoveCountsSelectedMembersAgainstTheLimit(t *testing.T) {
 	if got, _ := st.Terminals().Get(ctx, newcomer.ID); got.GroupID != from.ID {
 		t.Fatalf("被拒绝的移动仍改了分组：%#v", got)
 	}
+}
+
+// A real successful boot lands between the reconciler's read and presence write.
+func TestOnlineReconcileCannotEraseConcurrentBootSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	g := seedTerminalGroup(t, ctx, st, 1)
+	at := time.Now().UTC()
+	tm := domain.Terminal{ID: "race", MAC: "001122334455", IP: "192.168.1.10", GroupID: g.ID, State: domain.TerminalStateOffline}
+	if err := st.Terminals().Create(ctx, tm); err != nil {
+		t.Fatal(err)
+	}
+	svc := TerminalService{Store: successAfterPresenceRead{Store: st, at: at}, Storage: &fakeSessionStorage{macs: []string{tm.MAC}}, Now: func() time.Time { return at }}
+	if _, err := svc.ReconcileOnline(ctx, map[string]int{}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.Terminals().Get(ctx, tm.ID)
+	if got.LastBootOKAt == nil || !got.LastBootOKAt.Equal(at) || got.LastBootReductionID != "new-verified" {
+		t.Fatalf("stale presence erased successful boot: %+v", got)
+	}
+	if got.State != domain.TerminalStateOnline {
+		t.Fatal("presence was not updated")
+	}
+}
+
+type successAfterPresenceRead struct {
+	store.Store
+	at time.Time
+}
+
+func (s successAfterPresenceRead) Terminals() store.TerminalRepo {
+	return successAfterPresenceRepo{TerminalRepo: s.Store.Terminals(), at: s.at}
+}
+
+type successAfterPresenceRepo struct {
+	store.TerminalRepo
+	at time.Time
+}
+
+func (r successAfterPresenceRepo) List(ctx context.Context) ([]domain.Terminal, error) {
+	rows, err := r.TerminalRepo.List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, old := range rows {
+		fresh := old
+		fresh.LastBootAt = &r.at
+		fresh.LastBootOKAt = &r.at
+		fresh.LastBootReductionID = "new-verified"
+		if err := r.TerminalRepo.Update(ctx, fresh); err != nil {
+			return nil, err
+		}
+	}
+	return rows, nil
 }

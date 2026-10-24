@@ -3,6 +3,7 @@ import { render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { describe, expect, it, vi } from 'vitest';
 import { Field, SegFilter, Tip } from './primitives.jsx';
+import { Modal } from './overlay.jsx';
 
 // SegFilter 按鸭子类型读选项，计数字段是 `o.n`；用例钉住双方约定的结构，传错字段名时计数会静默不显示。
 describe('分段过滤器', () => {
@@ -57,6 +58,16 @@ describe('Field 帮助说明', () => {
 });
 
 describe('Tip', () => {
+  it('弹窗中的说明先响应 Esc，第二次 Esc 才关闭弹窗', async () => {
+    const onClose = vi.fn();
+    render(<Modal open title="机型详情" onClose={onClose}><Tip label="继承依据说明" text="沿用已有启动网卡配置"/></Modal>);
+    await userEvent.click(screen.getByRole('button', { name: '继承依据说明' }));
+    await userEvent.keyboard('{Escape}');
+    expect(screen.queryByText('沿用已有启动网卡配置')).toBeNull();
+    expect(onClose).not.toHaveBeenCalled();
+    await userEvent.keyboard('{Escape}');
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
   it('Esc 收起', async () => {
     render(<Tip label="限速说明" text="营业时段保持限速"/>);
     await userEvent.click(screen.getByRole('button', { name: '限速说明' }));

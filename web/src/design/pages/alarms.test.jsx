@@ -3,7 +3,7 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
-import { StoreProvider } from '../store.jsx';
+import { StoreProvider, useStore } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageAlarms } from './alarms.jsx';
 
@@ -18,10 +18,26 @@ function stub(all) {
   return listAlarms;
 }
 
-const renderPage = () => render(<StoreProvider><ConfirmProvider><PageAlarms/></ConfirmProvider></StoreProvider>);
+function RouteProbe() {
+  const store = useStore();
+  return <output aria-label="当前路由">{JSON.stringify(store.route)}</output>;
+}
+const renderPage = () => render(<StoreProvider><ConfirmProvider><PageAlarms/><RouteProbe/></ConfirmProvider></StoreProvider>);
 
 describe('告警中心', () => {
   afterEach(() => vi.restoreAllMocks());
+
+  it('未恢复的机型告警可直达适配，按稳定 ID 传递配置和客户机且不提交任务', async () => {
+    const ModelAdapt = { ProfileID: 'h-2', ConfigID: 'c-2', TerminalID: 't-22' };
+    stub([{ ...alarm(1), ModelAdapt }, { ...alarm(2, 'acknowledged'), ModelAdapt }, { ...alarm(3, 'recovered'), ModelAdapt }, alarm(4)]);
+    const adapt = vi.spyOn(api, 'adaptModel').mockResolvedValue({});
+    renderPage();
+    await screen.findByText('m1');
+    expect(screen.getAllByRole('button', { name: '完整适配' })).toHaveLength(2);
+    await userEvent.click(within(screen.getByText('m1').closest('tr')).getByRole('button', { name: '完整适配' }));
+    expect(JSON.parse(screen.getByLabelText('当前路由').textContent)).toEqual({ page: 'models', params: { profileId: 'h-2', adapt: true, sourceConfigId: 'c-2', sourceTerminalId: 't-22' } });
+    expect(adapt).not.toHaveBeenCalled();
+  });
 
   it('默认每页 10 条，能翻页', async () => {
     const listAlarms = stub(Array.from({ length: 12 }, (_, i) => alarm(i)));
@@ -30,6 +46,15 @@ describe('告警中心', () => {
     expect(listAlarms).toHaveBeenCalledWith(expect.objectContaining({ page: 1, size: 10 }));
     await userEvent.click(screen.getByRole('button', { name: '下一页' }));
     expect(await screen.findByText('m10')).toBeTruthy();
+  });
+
+  it('首次发现时间不随巡检更新而变成新故障', async () => {
+    stub([{ ...alarm(1), UpdatedAt: '2026-10-08T01:20:00Z' }]);
+    renderPage();
+    const row = (await screen.findByText('m1')).closest('tr');
+    expect(screen.getByRole('columnheader', { name: '首次发现' })).toBeTruthy();
+    expect(within(row).getByText('2026-09-30 21:00:00')).toBeTruthy();
+    expect(within(row).queryByText('2026-10-08 09:20:00')).toBeNull();
   });
 
   it('全部确认覆盖所有活动告警，不止当前页', async () => {

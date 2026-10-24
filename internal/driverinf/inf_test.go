@@ -187,3 +187,34 @@ Class=Net
 		}
 	}
 }
+
+// 型号节的修饰 NTamd64.主.次.产品类型.套件.内部版本 决定驱动能装到哪些系统上；
+// 安装环境据此说清「驱动不支持这个版本」，而不是「没有驱动」。
+func TestMinBuildReadsTargetOSDecoration(t *testing.T) {
+	inf := func(manufacturer, sections string) []byte {
+		return []byte("[Version]\nClass=Net\nDriverVer=11/30/2022,1.9.12.0\n[Manufacturer]\n" + manufacturer + "\n" + sections)
+	}
+	const id = `PCI\VEN_15AD&DEV_07B0`
+	for _, tc := range []struct {
+		name   string
+		data   []byte
+		hwid   string
+		build  int
+		listed bool
+	}{
+		{"只支持 20124 及以上", inf(`%VMware% = vmxnet3,NTamd64.10.0...20124`, "[vmxnet3.NTamd64.10.0...20124]\n%d% = inst, PCI\\VEN_15AD&DEV_07B0\n[Strings]\nVMware=\"VMware, Inc.\"\n"), id, 20124, true},
+		{"子系统更细的硬件 ID 也算", inf(`VMware = vmxnet3,NTamd64.10.0...20124`, "[vmxnet3.NTamd64.10.0...20124]\nd = inst, PCI\\VEN_15AD&DEV_07B0&SUBSYS_07B015AD\n"), id, 20124, true},
+		{"不限内部版本", inf(`VMware = vmxnet3,NTamd64`, "[vmxnet3.NTamd64]\nd = inst, PCI\\VEN_15AD&DEV_07B0\n"), id, 0, true},
+		{"只限主次版本", inf(`VMware = vmxnet3,NTamd64.6.3`, "[vmxnet3.NTamd64.6.3]\nd = inst, PCI\\VEN_15AD&DEV_07B0\n"), id, 0, true},
+		{"新旧两节取最低", inf(`VMware = vmxnet3,NTamd64.10.0...20124,NTamd64.10.0`, "[vmxnet3.NTamd64.10.0...20124]\nd = inst, PCI\\VEN_15AD&DEV_07B0\n[vmxnet3.NTamd64.10.0]\nd = inst, PCI\\VEN_15AD&DEV_07B0\n"), id, 0, true},
+		{"只有 32 位节不算", inf(`VMware = vmxnet3,NTx86`, "[vmxnet3.NTx86]\nd = inst, PCI\\VEN_15AD&DEV_07B0\n"), id, 0, false},
+		{"没列这块网卡", inf(`VMware = vmxnet3,NTamd64.10.0...20124`, "[vmxnet3.NTamd64.10.0...20124]\nd = inst, PCI\\VEN_8086&DEV_10D3\n"), id, 0, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			build, listed, err := MinBuild(tc.data, tc.hwid)
+			if err != nil || build != tc.build || listed != tc.listed {
+				t.Fatalf("MinBuild = %d, %v, %v; want %d, %v", build, listed, err, tc.build, tc.listed)
+			}
+		})
+	}
+}

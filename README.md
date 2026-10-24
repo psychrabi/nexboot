@@ -75,7 +75,7 @@ No internet at the site? Use the offline bundle: `sudo ./install.sh` from `nexbo
 | Image import | `.vmdk` / `.vhd(x)` / `.qcow2` / `.raw` / `.zfs` streams; Windows and Linux images are adapted for iSCSI boot automatically |
 | Image management | Configs, restore points, one-click apply, save as new image, export, overwrite base image, health check |
 | Groups and clients | Fixed IP per MAC via DHCP, data disks per group, client status matrix, cross-subnet groups via DHCP relay |
-| Drivers | Driver pack import with INF parsing, applied to images through the super machine |
+| Hardware models | Discovers the NIC. When the image has no configuration for a Windows NIC, the server writes that PC's boot configuration from the image's already-installed NIC and a matching driver (built into the image, or an uploaded x64 pack), so there is no per-model adaptation step. The models page shows each model's actual boot result (OK, boot failed, waiting for first boot) and offers a full WinPE adaptation only after a failed boot |
 | Storage | ZFS pools with mirrors, cache and spare disks, managed from the UI; scheduled backups to a second pool |
 | High availability | keepalived VIP, catalogue replication with resume, epoch fencing, planned switchover; grow from one node to a cluster online |
 | Operations | Alarms (nodes, pools, replication, boot failures, image health), audit log, task center |
@@ -84,11 +84,12 @@ No internet at the site? Use the offline bundle: `sudo ./install.sh` from `nexbo
 
 | | |
 |:---:|:---:|
-| [![Overview](docs/images/demo/overview.jpg)](docs/images/demo/overview.jpg)<br/>Overview: nodes, clients, groups and storage at a glance | [![Images](docs/images/demo/images.jpg)](docs/images/demo/images.jpg)<br/>Images: system disks and data disks |
+| [![Overview](docs/images/demo/overview.jpg)](docs/images/demo/overview.jpg)<br/>Overview: nodes, clients, groups and storage at a glance | [![Images](docs/images/demo/images.jpg)](docs/images/demo/images.jpg)<br/>Images: system disks, data disks, and create from ISO |
 | [![Restore points](docs/images/demo/restore-points.jpg)](docs/images/demo/restore-points.jpg)<br/>Restore points: apply, save as image, export | [![Groups](docs/images/demo/groups.jpg)](docs/images/demo/groups.jpg)<br/>Groups: IP range, system disk and data disks |
 | [![Clients](docs/images/demo/terminals.jpg)](docs/images/demo/terminals.jpg)<br/>Client matrix | [![Storage pools](docs/images/demo/storage.jpg)](docs/images/demo/storage.jpg)<br/>Storage pools per node |
 | [![Create cluster](docs/images/demo/create-cluster.jpg)](docs/images/demo/create-cluster.jpg)<br/>Create a cluster with just a VIP | [![Add node](docs/images/demo/add-node.jpg)](docs/images/demo/add-node.jpg)<br/>Add nodes found on the network |
 | [![Windows client](docs/images/demo/client-windows-desktop.jpg)](docs/images/demo/client-windows-desktop.jpg)<br/>Windows 11 client booted over the network | [![Ubuntu client](docs/images/demo/client-ubuntu-login.jpg)](docs/images/demo/client-ubuntu-login.jpg)<br/>Ubuntu 24.04 client booted over the network |
+| [![Hardware models](docs/images/demo/models.jpg)](docs/images/demo/models.jpg)<br/>Hardware models: OK, boot failed, or waiting for first boot | [![Driver packs](docs/images/demo/drivers.jpg)](docs/images/demo/drivers.jpg)<br/>Driver packs: signed x64 NIC drivers, enabled or disabled |
 
 More screenshots are in the [Chinese README](README.zh-CN.md#演示图).
 
@@ -103,7 +104,7 @@ More screenshots are in the [Chinese README](README.zh-CN.md#演示图).
 | Memory | 8 GB minimum, 32 GB or more recommended (enough ZFS ARC for your hot images) |
 | Network | Same layer-2 segment as the clients; cluster nodes share it too (VRRP runs there) |
 | IP address | Every server needs a **static IP**, not DHCP |
-| Packages | `dnsmasq`, `dnsmasq-utils`, `qemu-utils`, `targetcli-fb`, `zfsutils-linux`, `keepalived`, `curl` (pulled in by the `.deb`, bundled in the offline package) |
+| Packages | `dnsmasq`, `dnsmasq-utils`, `qemu-utils`, `targetcli-fb`, `zfsutils-linux`, `keepalived`, `curl`, `libhivex-bin`, `libwin-hivex-perl` (pulled in by the `.deb`, bundled in the offline package) |
 
 **Network**
 
@@ -112,13 +113,17 @@ More screenshots are in the [Chinese README](README.zh-CN.md#演示图).
 
 ### Client images
 
+**Create an image from an ISO**: the ISO wizard supports Windows 10/11 and Server 2016+, Ubuntu 24.04, and Anaconda-based CentOS / RHEL / Rocky Linux / AlmaLinux 7/8/9 full DVDs (x86_64, UEFI). Linux installation uses packages on the ISO and exposes the ISO as a read-only iSCSI installation medium; boot/netinstall media missing required offline packages are rejected with a specific reason. RHEL-family installs use Kickstart and dracut/iBFT, with separate preparation and Anaconda logs. The CentOS 7 DVD is covered by media checks and automated regression tests; actual installation, reboot, and another client's diskless boot still require hardware acceptance. This does not add automatic adaptation of arbitrary imported RHEL disk images. See [ISO acceptance steps](tools/e2e/README.md#iso-安装验证).
+
 | OS | Status | Before you capture the image |
 |---|---|---|
-| Windows | Supported | Set the network card to obtain an IP automatically. Windows 11 24H2 / 25H2 must be build 26100.7705 / 26200.7705 or later ([KB5074105](https://support.microsoft.com/en-us/topic/january-29-2026-kb5074105-os-builds-26200-7705-and-26100-7705-preview-85bd25de-894a-43eb-a19b-9a59d10f194b) fixes an iSCSI boot failure) |
+| Windows | Supported | Set the network card to obtain an IP automatically. Windows 11 24H2 / 25H2 builds 26100.7705 / 26200.7705 or later are recommended ([KB5074105](https://support.microsoft.com/en-us/topic/january-29-2026-kb5074105-os-builds-26200-7705-and-26100-7705-preview-85bd25de-894a-43eb-a19b-9a59d10f194b) fixes a possible iSCSI boot failure). Earlier or unknown revisions show an advisory and can still be installed; compatibility requires an actual diskless boot test |
 | Ubuntu | Supported | `sudo apt install open-iscsi`. Plain partitions and linear LVM volumes both work |
-| CentOS / RHEL / Rocky | Not adapted, untested | See the [Chinese README](README.zh-CN.md#客户机镜像要求) for the manual dracut setup |
+| CentOS / RHEL / Rocky / AlmaLinux | Full-DVD ISO installation implemented; hardware acceptance pending | Automatic adaptation of imported disk images is not extended; see the [Chinese README](README.zh-CN.md#客户机镜像要求) for manual dracut setup |
 
 Don't set a static IP inside the image. Every PC boots the same image, so a fixed address would be claimed by all of them at once. NexBoot gives each MAC its own address over DHCP. Ubuntu images are switched to DHCP automatically on import.
+
+Turn off automatic updates, automatic restarts, sleep and hibernation in Windows images. Every boot starts from a clean copy, so each PC downloads the same updates again, restarts on its own and can end up powered off halfway through, because the iSCSI system disk is already disconnected during the restart. Install updates on a super machine and save them as a restore point instead.
 
 ## Install
 

@@ -28,8 +28,8 @@ global_defs {
 vrrp_script ndiskless_health {
     script "/etc/keepalived/ndiskless-check.sh"
     interval 2
-    timeout 5      # 必须大于探针最坏耗时（2.5s），否则脚本被杀=误判故障
-    fall 2      # 连续 2 次失败才让出：健康检查抖一下不该搬走 VIP
+    timeout 8      # 必须大于探针最坏耗时（6.5s），否则脚本被杀=误判故障
+    fall 3      # 连续 3 次失败才让出：忙时健康检查抖一下不该搬走 VIP
     rise 2
 }
 

@@ -42,6 +42,7 @@ function PageGroups() {
   const [fix, setFix] = useState(null); // { group, target, preview }
   // 服务器的客户机网段：默认值取自它，所有地址区间都对照它判断。单独获取，失败只影响判断，不影响页面。
   const { data: network, reload: reloadNetwork } = useResource(() => api.getNetwork(30).catch(() => null), []);
+  const { data: failingModels } = useResource(() => api.failingModels(), []);
   // 存储节点下拉用的集群名单；单机或获取失败时整个下拉隐藏。
   const { data: nodesData } = useResource(() => api.listClusterNodes().catch(() => null), []);
   const clusterNodes = (nodesData && nodesData.items) || [];
@@ -134,6 +135,12 @@ function PageGroups() {
     // 改网络参数前先预览影响：区间一挪，组内机器地址跟着换，运行中的机器续租时
     // dnsmasq 不再给原地址，Windows 的 IP 一变 iSCSI 就断，要在保存前告诉运维。
     const before = groups.find(g => g.ID === form.id);
+    // 运行中的机器仍在用开机时的系统盘，组内有机器运行时不能换系统镜像 / 配置（后端同样拒绝）。
+    const running = termsOf(form.id).filter(t => t.State === "online");
+    if (before && running.length && (before.SystemImageID !== body.system_image_id || before.SystemConfigID !== body.system_config_id)) {
+      store.toast(`分组内有 ${running.length} 台终端正在运行（${running.map(t => t.Name || t.MAC).join("、")}），请先关机后再修改系统镜像/配置`, "err");
+      return;
+    }
     const moved = before && (before.StartIP !== body.start_ip || before.ClientMax !== body.client_max
       || (before.Netmask || "") !== (body.netmask || "") || (before.Gateway || "") !== (body.gateway || ""));
     if (moved) {
@@ -175,10 +182,12 @@ function PageGroups() {
   };
   const onDelete = async (g) => {
     const n = termsOf(g.ID).length;
-    const message = n > 0
-      ? `分组 ${g.Name} 下还有 ${n} 台终端，删除会失败。\n请先把终端移动到其他分组或删除。`
-      : `删除分组 ${g.Name}？`;
-    const ok = await conf.ask({ title: "删除分组", message, danger: true });
+    if (n > 0) {
+      await conf.ask({ title: "无法删除分组", notice: true,
+        message: `分组 ${g.Name} 下还有 ${n} 台终端。\n请先把终端移动到其他分组或删除，再删除分组。` });
+      return;
+    }
+    const ok = await conf.ask({ title: "删除分组", message: `删除分组 ${g.Name}？`, danger: true });
     if (!ok) return;
     await run(() => api.deleteGroup(g.ID), "分组已删除", { reload: load, errMsg: "删除失败" });
   };
@@ -277,6 +286,7 @@ function PageGroups() {
               </div>
 
               <div style={{ padding: "10px 16px", borderTop: "1px solid var(--line-soft)", display: "flex", gap: 8, justifyContent: "flex-end", flexWrap: "wrap" }}>
+                {!!failingModels?.[g.ID]?.length && <button className="btn" onClick={() => goto("models", { profileId: failingModels[g.ID][0].profile_id })}><span className="dot err"/>{failingModels[g.ID].length} 种机型开机失败</button>}
                 <button className="btn" onClick={() => goto("terminals", { groupId: g.ID })}><Icons.Eye size={12}/> 查看终端</button>
                 {netStatusOf(g) === "blocked" && <button className="btn primary" onClick={() => openFix(g)}>改到服务器网段</button>}
                 {!g.IsDefault && <button className="btn" onClick={() => onSetDefault(g)}>设为默认</button>}

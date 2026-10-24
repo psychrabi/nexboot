@@ -24,6 +24,14 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
+export async function downloadRaw(res, filename) {
+  const url = URL.createObjectURL(await res.blob());
+  const a = document.createElement('a');
+  a.href = url; a.download = filename;
+  document.body.appendChild(a); a.click(); a.remove();
+  URL.revokeObjectURL(url);
+}
+
 // 请求返回 401 时触发，外壳据此回到登录页。
 export const onUnauthorized = (() => {
   const target = new EventTarget();
@@ -82,6 +90,13 @@ export const api = {
   getImage: (id) => request(`/api/images/${encodeURIComponent(id)}`),
   importImage: (body) => request('/api/images/import', { method: 'POST', body }),
   createBlankImage: (body) => request('/api/images/blank', { method: 'POST', body }),
+  listInstallations: () => request('/api/installations'),
+  getInstallation: (id) => request(`/api/installations/${encodeURIComponent(id)}`),
+  listInstallationSources: () => request('/api/installations/sources'),
+  inspectInstallationISO: (path) => request('/api/installations/inspect', { method: 'POST', body: { path } }),
+  createInstallation: (body) => request('/api/installations', { method: 'POST', body }),
+  cancelInstallation: (id) => request(`/api/installations/${encodeURIComponent(id)}/cancel`, { method: 'POST' }),
+  retryInstallation: (id) => request(`/api/installations/${encodeURIComponent(id)}/retry`, { method: 'POST' }),
   setImagePurpose: (id, body) => request(`/api/images/${encodeURIComponent(id)}`, { method: 'PATCH', body }),
   listImportSources: () => request('/api/images/import-sources'),
   exportImage: (id) => request(`/api/images/${encodeURIComponent(id)}/export`, { method: 'POST' }),
@@ -113,6 +128,10 @@ export const api = {
   getRuntime: () => request('/api/runtime'),
   getSettings: () => request('/api/settings'),
   saveSettings: (body) => request('/api/settings', { method: 'PUT', body }),
+  // 旧导入目录里留下的文件（只读），逐个移入存储池上的导入目录。
+  listLegacyImports: () => request('/api/imports/legacy'),
+  moveLegacyImport: (path) => request('/api/imports/legacy/move', { method: 'POST', body: { path } }),
+  saveWindowsPolicy: (body) => request('/api/settings/windows-policy', { method: 'PUT', body }),
   // 客户机网络：面向客户机的网卡、是否允许跨网段分组、clientMax 台机器的建议地址窗口。
   getHA: () => request('/api/ha'),
   getReplication: () => request('/api/replication'),
@@ -201,8 +220,19 @@ export const api = {
   // 数据盘在线发布：机器不关机，只有这块盘脱机几秒
   superDisks: (id) => request(`/api/terminals/${encodeURIComponent(id)}/super/disks`),
   publishDataDisk: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/super/publish`, { method: 'POST', body }),
-  injectDriver: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/inject-driver`, { method: 'POST', body }),
-  injectResult: (id) => request(`/api/terminals/${encodeURIComponent(id)}/inject-result`),
+
+  listModels: () => request('/api/models'),
+  reductionModels: (id) => request(`/api/reductions/${encodeURIComponent(id)}/models`),
+  getModel: (id) => request(`/api/models/${encodeURIComponent(id)}`),
+  renameModel: (id, body) => request(`/api/models/${encodeURIComponent(id)}`, { method: 'PUT', body }),
+  failingModels: () => request('/api/models/failing'),
+  terminalModel: (id) => request(`/api/terminals/${encodeURIComponent(id)}/model`),
+  adaptModel: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/model-adapt`, { method: 'POST', body }),
+  terminalIdentity: (id) => request(`/api/terminals/${encodeURIComponent(id)}/identity`),
+  captureIdentity: (id) => request(`/api/terminals/${encodeURIComponent(id)}/identity-capture`, { method: 'POST', body: {} }),
+  listWinPE: () => request('/api/winpe'),
+  uploadWinPE: (formData) => request('/api/winpe/adk', { method: 'POST', formData }),
+  uploadPEBCD: (formData) => request('/api/winpe/bcd', { method: 'POST', formData }),
 
   // --- 存储池 ---
   listPools: () => request('/api/pools'),
@@ -229,14 +259,7 @@ export const api = {
   uploadDriverPack: (formData) => request('/api/driver-packs', { method: 'POST', formData }),
   setDriverPackStatus: (id, status) =>
     request(`/api/driver-packs/${encodeURIComponent(id)}/status`, { method: 'POST', body: { status } }),
-  recommendDriverPack: (id) =>
-    request(`/api/driver-packs/${encodeURIComponent(id)}/recommend`, { method: 'POST' }),
   deleteDriverPack: (id) => request(`/api/driver-packs/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  listDriverBundles: () => request('/api/driver-bundles'),
-  createDriverBundle: (body) => request('/api/driver-bundles', { method: 'POST', body }),
-  deleteDriverBundle: (id) => request(`/api/driver-bundles/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  downloadDriverBundle: (id) =>
-    request(`/api/driver-bundles/${encodeURIComponent(id)}/archive`, { raw: true }),
 
   // --- 告警 ---
   listAlarms: ({ status = '', severity = '', page = 1, size = 50 } = {}) => {
@@ -287,6 +310,7 @@ export const api = {
 
   // --- 任务 ---
   getTask: (id) => request(`/api/tasks/${encodeURIComponent(id)}`),
+  taskLog: (id, name) => request(`/api/tasks/${encodeURIComponent(id)}/logs/${encodeURIComponent(name)}`, { raw: true }),
   listTasks: () => request('/api/tasks'),
   listTaskHistory: ({ page = 1, size = 20, status = '' } = {}) => {
     const q = new URLSearchParams({ page: String(page), size: String(size) });

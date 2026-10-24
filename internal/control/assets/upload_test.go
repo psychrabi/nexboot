@@ -22,6 +22,22 @@ func newUploads(t *testing.T, node string) (*UploadService, string) {
 	}, dir
 }
 
+func TestUploadAcceptsISOWithoutTreatingItAsADiskImage(t *testing.T) {
+	ctx := context.Background()
+	svc, dir := newUploads(t, "local")
+	upload, err := svc.Begin(ctx, BeginUploadRequest{FileName: "ubuntu.iso", SizeBytes: 3})
+	if err != nil {
+		t.Fatalf("installation media upload rejected: %v", err)
+	}
+	complete, err := svc.Append(ctx, upload.UploadID, 0, strings.NewReader("iso"))
+	if err != nil || !complete.Complete || complete.Path != filepath.Join(dir, "ubuntu.iso") {
+		t.Fatalf("ISO upload did not finalize: %+v %v", complete, err)
+	}
+	if isSupportedImportImageFile("ubuntu.iso") {
+		t.Fatal("ISO must not enter the qemu disk-image import path")
+	}
+}
+
 // 上传中断后，会话记得已收字节，浏览器可从断点续传，最终文件内容完整一致。
 func TestUploadResumesFromWhereItStopped(t *testing.T) {
 	ctx := context.Background()
@@ -116,6 +132,73 @@ func TestUploadOnAnotherNodeSaysTheActiveMoved(t *testing.T) {
 	}
 }
 
+// 主机切换后：旧主机的会话已随导入目录复制到新主机，新主机接手，从复制到的位置续传到完成。
+func TestUploadAdoptsAReplicatedSessionAfterFailover(t *testing.T) {
+	ctx := context.Background()
+	oldActive, oldDir := newUploads(t, "nodeA")
+	s, err := oldActive.Begin(ctx, BeginUploadRequest{FileName: "win.iso", SizeBytes: 10, LastModified: 5})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := oldActive.Append(ctx, s.UploadID, 0, strings.NewReader("01234")); err != nil {
+		t.Fatal(err)
+	}
+	newActive, newDir := newUploads(t, "nodeB")
+	// 模拟一轮复制：分片和会话信息原样出现在新主机的导入目录里。
+	if err := os.MkdirAll(filepath.Join(newDir, uploadsSubdir), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	for _, suffix := range []string{".json", ".part"} {
+		b, err := os.ReadFile(filepath.Join(oldDir, uploadsSubdir, s.UploadID+suffix))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(newDir, uploadsSubdir, s.UploadID+suffix), b, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	st, err := newActive.Status(ctx, s.UploadID)
+	if err != nil || st.Received != 5 || st.NodeID != "nodeB" {
+		t.Fatalf("新主机应接手会话：%#v %v", st, err)
+	}
+	// 浏览器重新选同一个文件：认领同一个会话。
+	again, err := newActive.Begin(ctx, BeginUploadRequest{FileName: "win.iso", SizeBytes: 10, LastModified: 5})
+	if err != nil || again.UploadID != s.UploadID || again.Received != 5 {
+		t.Fatalf("Begin 没接上复制来的断点：%#v %v", again, err)
+	}
+	done, err := newActive.Append(ctx, s.UploadID, 5, strings.NewReader("56789"))
+	if err != nil || !done.Complete {
+		t.Fatalf("续传没完成：%#v %v", done, err)
+	}
+	if b, _ := os.ReadFile(filepath.Join(newDir, "win.iso")); string(b) != "0123456789" {
+		t.Fatalf("成品内容不对：%q", b)
+	}
+	// 编号里不能夹路径。
+	if _, err := newActive.Status(ctx, "../x"); !errors.Is(err, errs.ErrInvalid) {
+		t.Fatalf("带路径的编号应拒绝：%v", err)
+	}
+}
+
+// 文件会复制到每台备机：剩余最少的那台放不下也要当场拒绝，并点名是哪台；问不到备机时只查本机。
+func TestBeginRejectsWhenTheSmallestStandbyCannotHoldIt(t *testing.T) {
+	ctx := context.Background()
+	svc, _ := newUploads(t, "nodeA")
+	svc.StandbyFree = func(context.Context) ([]NodeFree, error) {
+		return []NodeFree{{Node: "192.168.10.3", Free: 100 << 30}, {Node: "192.168.10.5", Free: 2 << 30}}, nil
+	}
+	_, err := svc.Begin(ctx, BeginUploadRequest{FileName: "win11.iso", SizeBytes: 3 << 30})
+	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "192.168.10.5") || !strings.Contains(err.Error(), "备用节点") {
+		t.Fatalf("应点名放不下的备机：%v", err)
+	}
+	if _, err := svc.Begin(ctx, BeginUploadRequest{FileName: "small.iso", SizeBytes: 512 << 20}); err != nil {
+		t.Fatalf("加余量放得下就该放行：%v", err)
+	}
+	svc.StandbyFree = func(context.Context) ([]NodeFree, error) { return nil, errors.New("unreachable") }
+	if _, err := svc.Begin(ctx, BeginUploadRequest{FileName: "win11.iso", SizeBytes: 3 << 30}); err != nil {
+		t.Fatalf("问不到备机时只查本机：%v", err)
+	}
+}
+
 // 建会话时就拒绝不支持的后缀、路径穿越和空间不足，不拖到传完才拒。
 func TestUploadValidatesNameAndTypeUpFront(t *testing.T) {
 	ctx := context.Background()
@@ -136,8 +219,21 @@ func TestUploadValidatesNameAndTypeUpFront(t *testing.T) {
 		NodeID:    "nodeA",
 		FreeSpace: func(string) (int64, error) { return 1 << 20, nil },
 	}
-	if _, err := tight.Begin(ctx, BeginUploadRequest{FileName: "big.zfs", SizeBytes: 1 << 30}); err == nil {
+	_, err := tight.Begin(ctx, BeginUploadRequest{FileName: "big.zfs", SizeBytes: 1 << 30})
+	if err == nil {
 		t.Fatal("空间不够应当在建会话时就拒绝")
+	}
+	// 用 GiB 说清差多少（含余量）、哪个目录，指出要清理存储池；导入目录已不可设，不能再叫人去系统参数改。
+	for _, want := range []string{"存储池空间不足", "2.0 GiB", "1 MiB", "1.0 GiB 余量", "清理存储池"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("报错缺少 %q：%v", want, err)
+		}
+	}
+	if strings.Contains(err.Error(), "系统参数") {
+		t.Fatalf("导入目录已不可设，不该指向系统参数：%v", err)
+	}
+	if strings.Contains(err.Error(), "字节") {
+		t.Fatalf("报错不该写原始字节数：%v", err)
 	}
 }
 
@@ -221,7 +317,7 @@ func TestBeginResumesLegacyPartWhoseIdentityWasNeverRecorded(t *testing.T) {
 func TestBeginCountsWhatIsAlreadyUploadedAgainstFreeSpace(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
-	free := int64(10000) // 开局空间充足
+	free := int64(uploadHeadroom + 10000) // 开局空间充足（余量之外）
 	svc := &UploadService{
 		ImportDir: func(context.Context) (string, error) { return dir, nil },
 		NodeID:    "nodeA",
@@ -238,7 +334,7 @@ func TestBeginCountsWhatIsAlreadyUploadedAgainstFreeSpace(t *testing.T) {
 	}
 
 	// 现在只剩 2500 可用，而文件全长 8000 —— 但还差的只有 2000，够。
-	free = 2500
+	free = uploadHeadroom + 2500
 	again, err := svc.Begin(ctx, BeginUploadRequest{FileName: "win11.zfs.gz", SizeBytes: 8000, LastModified: 42})
 	if err != nil {
 		t.Fatalf("还差 2000、可用 2500，不该被判放不下：%v", err)
@@ -248,13 +344,13 @@ func TestBeginCountsWhatIsAlreadyUploadedAgainstFreeSpace(t *testing.T) {
 	}
 
 	// 真的不够时仍要当场拒绝：还差 2000，只剩 1500。
-	free = 1500
+	free = uploadHeadroom + 1500
 	if _, err := svc.Begin(ctx, BeginUploadRequest{FileName: "win11.zfs.gz", SizeBytes: 8000, LastModified: 42}); err == nil {
 		t.Fatal("剩余空间连缺口都不够时应当拒绝")
 	}
 
 	// 全新上传（没有断点）照旧按全长判。
-	free = 1000
+	free = uploadHeadroom + 1000
 	if _, err := svc.Begin(ctx, BeginUploadRequest{FileName: "other.zfs.gz", SizeBytes: 8000, LastModified: 7}); err == nil {
 		t.Fatal("全新上传空间不够应当拒绝")
 	}

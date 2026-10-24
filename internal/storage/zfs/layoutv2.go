@@ -145,8 +145,17 @@ func (c *Client) MigrateLayout(ctx context.Context) (moved int, err error) {
 // EnsureDBCopyDataset 确保 <pool>/nd/db 存在并已挂载，返回 VACUUM INTO 写库副本的目录。
 // 首次使用时才建，不在迁移时建。mountpoint 显式设为 DBCopyDir，因为上层容器是 mountpoint=none 且会被继承。
 func (c *Client) EnsureDBCopyDataset(ctx context.Context) (string, error) {
-	dataset := path.Join(c.pool, storage.CatalogueRoot, "db")
-	mountpoint := DBCopyDir(c.pool)
+	return c.ensureMountedChild(ctx, "db", DBCopyDir(c.pool))
+}
+
+// EnsureFilesDataset 确保 <pool>/nd/files 存在并已挂载，返回适配环境文件库目录；规则与库副本相同。
+func (c *Client) EnsureFilesDataset(ctx context.Context) (string, error) {
+	return c.ensureMountedChild(ctx, "files", FilesDir(c.pool))
+}
+
+// ensureMountedChild 建或修好目录容器下的一个保留子数据集，并保证它挂在本节点自己的路径上可读。
+func (c *Client) ensureMountedChild(ctx context.Context, name, mountpoint string) (string, error) {
+	dataset := path.Join(c.pool, storage.CatalogueRoot, name)
 	args := []string{"get", "-H", "-o", "value", "mountpoint", dataset}
 	out, err := c.runner.Run(ctx, "zfs", args...)
 	if err == nil {

@@ -1354,3 +1354,24 @@ config:
 		})
 	}
 }
+
+func TestWrittenSinceUsesTheSpecifiedSnapshotAndRejectsUnknownCounts(t *testing.T) {
+	for _, value := range []string{"0\n", "4096\n", "-", "-1", "invalid"} {
+		runner := &fakeRunner{out: []byte(value)}
+		client := New("tank", runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+		got, err := client.WrittenSince(context.Background(), "tank/nd-rebuilding-42/saved", "0")
+		valid := value == "0\n" || value == "4096\n"
+		if valid && (err != nil || got < 0) || !valid && err == nil {
+			t.Fatalf("count=%q got=%d err=%v", value, got, err)
+		}
+		want := []string{"get", "-Hp", "-o", "value", "written@0", "tank/nd-rebuilding-42/saved"}
+		if !reflect.DeepEqual(runner.calls[0].args, want) {
+			t.Fatalf("queried wrong base: %v", runner.calls[0].args)
+		}
+	}
+	runner := &fakeRunner{err: errors.New("query failed")}
+	client := New("tank", runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	if _, err := client.WrittenSince(context.Background(), "tank/nd-rebuilding-42/saved", "0"); !IsCommandError(err) {
+		t.Fatalf("query failure lost: %v", err)
+	}
+}

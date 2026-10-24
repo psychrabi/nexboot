@@ -2,83 +2,148 @@ package platform
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/tianwei/diskless/internal/config"
 	"github.com/tianwei/diskless/internal/control/errs"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/store"
 )
 
 type SystemSettingsService struct {
-	Store             store.Store
-	FallbackImportDir string
+	Store store.Store
+	// ImportsDir 解析本节点存储池上的导入目录（<pool>/nd/files/imports）。目录随目录库复制到备机，
+	// 主备切换后新主机上同一批文件仍在；没有存储池时返回错误。
+	ImportsDir func(ctx context.Context) (string, error)
+	// LegacyImportDir 是旧版本的部署导入目录（NDISKLESS_IMPORT_DIR）。只作为旧文件来源列出，不再往里写。
+	LegacyImportDir string
 }
 
+// SystemSettingsRequest 保留 import_dir 只为兼容旧控制台：导入目录不再可设，收到会被忽略并给出提示。
 type SystemSettingsRequest struct {
 	ImportDir string `json:"import_dir"`
 }
 
 type SystemSettingsView struct {
-	ImportDir        string `json:"import_dir"`
-	DefaultImportDir string `json:"default_import_dir"`
+	// ImportDir 是本节点实际使用的导入目录（存储池上），只读；没有存储池时为空，原因见 ImportDirError。
+	ImportDir      string `json:"import_dir"`
+	ImportDirError string `json:"import_dir_error,omitempty"`
+	// LegacyImportDirs 是旧版本留下、仍存在的导入目录，里面的文件可移入新目录。
+	LegacyImportDirs []string `json:"legacy_import_dirs,omitempty"`
+	// Warning 说明提交里被忽略的部分（如旧控制台提交的 import_dir）。
+	Warning string `json:"warning,omitempty"`
+	// EnforceWindowsPolicy 为真时，Windows 客户机开机关闭自动更新、自动重启、睡眠和休眠。
+	EnforceWindowsPolicy bool `json:"enforce_windows_policy"`
 }
+
+// WindowsPolicyRequest 打开或关闭 Windows 客户机的开机策略。
+type WindowsPolicyRequest struct {
+	Enforce bool `json:"enforce"`
+}
+
+// noPoolForImports：上传和导入的文件放在存储池上，没有池就无处可放。
+const noPoolForImports = "请先创建存储池：上传和导入的文件存放在存储池的 imports 目录"
 
 func (s SystemSettingsService) Get(ctx context.Context) (SystemSettingsView, error) {
-	fallback := s.fallbackImportDir()
-	if s.Store == nil {
-		return SystemSettingsView{ImportDir: fallback, DefaultImportDir: fallback}, nil
+	view := SystemSettingsView{EnforceWindowsPolicy: true}
+	var stored domain.SystemSettings
+	if s.Store != nil {
+		settings, err := s.Store.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID)
+		if err != nil && !errs.IsNotFound(err) {
+			return SystemSettingsView{}, err
+		}
+		if err == nil {
+			stored = settings
+			view.EnforceWindowsPolicy = !settings.KeepWindowsDefaults
+		}
 	}
-	settings, err := s.Store.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID)
-	if errs.IsNotFound(err) {
-		return SystemSettingsView{ImportDir: fallback, DefaultImportDir: fallback}, nil
+	if dir, err := s.ImportDir(ctx); err != nil {
+		view.ImportDirError = err.Error()
+	} else {
+		view.ImportDir = dir
 	}
-	if err != nil {
-		return SystemSettingsView{}, err
-	}
-	if strings.TrimSpace(settings.ImportDir) == "" {
-		settings.ImportDir = fallback
-	}
-	return SystemSettingsView{ImportDir: settings.ImportDir, DefaultImportDir: fallback}, nil
+	view.LegacyImportDirs = s.legacyDirs(stored.ImportDir, view.ImportDir)
+	return view, nil
 }
 
-func (s SystemSettingsService) Save(ctx context.Context, req SystemSettingsRequest) (SystemSettingsView, error) {
-	importDir, err := normalizeImportDir(req.ImportDir)
-	if err != nil {
-		return SystemSettingsView{}, err
-	}
-	if err := ensureImportDirUsable(importDir); err != nil {
-		return SystemSettingsView{}, err
-	}
-	// 所有设置在同一行：只改目录，其余保留。
+// SaveWindowsPolicy 只改 Windows 客户机开机策略，其余设置保留。
+func (s SystemSettingsService) SaveWindowsPolicy(ctx context.Context, req WindowsPolicyRequest) (SystemSettingsView, error) {
 	settings, err := s.Store.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID)
 	if err != nil && !errs.IsNotFound(err) {
 		return SystemSettingsView{}, err
 	}
 	settings.ID = domain.SystemSettingsDefaultID
-	settings.ImportDir = importDir
+	settings.KeepWindowsDefaults = !req.Enforce
 	if err := s.Store.SystemSettings().Upsert(ctx, settings); err != nil {
 		return SystemSettingsView{}, err
 	}
-	return SystemSettingsView{ImportDir: importDir, DefaultImportDir: s.fallbackImportDir()}, nil
+	return s.Get(ctx)
 }
 
-func (s SystemSettingsService) ImportDir(ctx context.Context) (string, error) {
-	settings, err := s.Get(ctx)
+// Save 不再保存导入目录：目录固定在各节点存储池上。旧控制台或脚本提交的 import_dir 被忽略，
+// 应答里说明实际目录；库里旧值原样保留（只用来列出旧文件）。
+func (s SystemSettingsService) Save(ctx context.Context, req SystemSettingsRequest) (SystemSettingsView, error) {
+	view, err := s.Get(ctx)
 	if err != nil {
+		return SystemSettingsView{}, err
+	}
+	if strings.TrimSpace(req.ImportDir) != "" {
+		where := view.ImportDir
+		if where == "" {
+			where = "存储池上的 imports 目录"
+		}
+		view.Warning = "镜像导入目录已改为自动使用 " + where + "，不再支持设置；提交的目录已忽略"
+	}
+	return view, nil
+}
+
+// ImportDir 返回本节点存储池上的导入目录，不存在就建出来。没有存储池时报错，不退回系统盘目录：
+// 退回会让上传悄悄落到另一块小得多的盘上，界面显示的又是别的路径。
+func (s SystemSettingsService) ImportDir(ctx context.Context) (string, error) {
+	if s.ImportsDir == nil {
+		return "", errs.Invalid(noPoolForImports)
+	}
+	dir, err := s.ImportsDir(ctx)
+	if err != nil {
+		return "", errs.Invalid(fmt.Sprintf("%s（%v）", noPoolForImports, err))
+	}
+	if strings.TrimSpace(dir) == "" {
+		return "", errs.Invalid(noPoolForImports)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return "", err
 	}
-	return settings.ImportDir, nil
+	return dir, nil
 }
 
-func (s SystemSettingsService) fallbackImportDir() string {
-	dir, err := normalizeImportDir(s.FallbackImportDir)
+// LegacyImportDirs 列出旧版本的导入目录（部署默认目录、库里保存过的目录）中仍存在的，供移入新目录。
+func (s SystemSettingsService) LegacyImportDirs(ctx context.Context) []string {
+	view, err := s.Get(ctx)
 	if err != nil {
-		return config.DefaultImportDir
+		return nil
 	}
-	return dir
+	return view.LegacyImportDirs
+}
+
+func (s SystemSettingsService) legacyDirs(stored, current string) []string {
+	var out []string
+	seen := map[string]bool{}
+	if current != "" {
+		seen[filepath.Clean(current)] = true
+	}
+	for _, raw := range []string{s.LegacyImportDir, stored} {
+		dir, err := normalizeImportDir(raw)
+		if err != nil || seen[dir] {
+			continue
+		}
+		seen[dir] = true
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			out = append(out, dir)
+		}
+	}
+	return out
 }
 
 func normalizeImportDir(raw string) (string, error) {
@@ -99,36 +164,6 @@ func normalizeImportDir(raw string) (string, error) {
 		}
 	}
 	return dir, nil
-}
-
-func ensureImportDirUsable(dir string) error {
-	parent := filepath.Dir(dir)
-	if parent == string(filepath.Separator) {
-		return errs.Invalid("镜像目录不能直接位于根目录下，请使用数据盘挂载点下的子目录")
-	}
-	info, err := os.Stat(dir)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return errs.Invalid("镜像目录不存在，请先在数据盘或存储池挂载点中创建该目录")
-		}
-		return errs.Invalid("无法检查镜像目录：" + err.Error())
-	}
-	if !info.IsDir() {
-		return errs.Invalid("镜像目录路径不是目录")
-	}
-	f, err := os.CreateTemp(dir, ".ndiskless-write-test-*")
-	if err != nil {
-		return errs.Invalid("镜像目录不可写：" + err.Error())
-	}
-	name := f.Name()
-	if err := f.Close(); err != nil {
-		_ = os.Remove(name)
-		return errs.Invalid("镜像目录写入测试失败：" + err.Error())
-	}
-	if err := os.Remove(name); err != nil {
-		return errs.Invalid("镜像目录清理测试文件失败：" + err.Error())
-	}
-	return nil
 }
 
 // ReplicationRate 返回生效的批量传输限速：操作者设过则用设定值（0 表示明确不限速，

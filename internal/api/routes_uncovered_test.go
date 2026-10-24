@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/errs"
 	"github.com/tianwei/diskless/internal/control/network"
 	"github.com/tianwei/diskless/internal/control/ops"
@@ -201,23 +200,11 @@ func (s *recordingDriverService) SetPackStatus(_ context.Context, id string, st 
 	}
 	return domain.DriverPack{ID: id, Status: st}, nil
 }
-func (s *recordingDriverService) SetRecommended(_ context.Context, id string) (domain.DriverPack, error) {
-	s.id = id
-	return domain.DriverPack{ID: id, Recommended: true}, s.err
-}
 func (s *recordingDriverService) DeletePack(_ context.Context, id string) error {
 	s.id = id
 	return s.err
 }
-func (s *recordingDriverService) BundleArchive(_ context.Context, id string) (string, []byte, error) {
-	s.id = id
-	return s.archiveName, s.archive, s.err
-}
-func (s *recordingDriverService) ListBundles(context.Context) (adapt.DriverBundleListResult, error) {
-	return adapt.DriverBundleListResult{}, s.err
-}
-
-func TestDriverPackStatusAndRecommendCarryTheID(t *testing.T) {
+func TestDriverPackStatusCarriesTheID(t *testing.T) {
 	drivers := &recordingDriverService{}
 	router := newRouter(Services{Drivers: drivers})
 
@@ -229,40 +216,6 @@ func TestDriverPackStatusAndRecommendCarryTheID(t *testing.T) {
 		t.Fatalf("id = %q status = %q", drivers.id, drivers.status)
 	}
 
-	rec = do(router, http.MethodPost, "/api/driver-packs/pack-2/recommend", "{}")
-	if rec.Code != http.StatusOK {
-		t.Fatalf("recommend status = %d: %s", rec.Code, rec.Body)
-	}
-	if drivers.id != "pack-2" {
-		t.Fatalf("recommend id = %q", drivers.id)
-	}
-}
-
-// 归档是唯一不是 JSON 的响应：没有这些头，浏览器会把 zip 当文本显示而不是保存。
-func TestDriverBundleArchiveIsServedAsADownload(t *testing.T) {
-	drivers := &recordingDriverService{archiveName: "bundle-1.zip", archive: []byte("PK\x03\x04zip")}
-	rec := do(newRouter(Services{Drivers: drivers}), http.MethodGet, "/api/driver-bundles/bundle-1/archive", "")
-
-	if rec.Code != http.StatusOK {
-		t.Fatalf("status = %d: %s", rec.Code, rec.Body)
-	}
-	if got := rec.Header().Get("Content-Type"); got != "application/zip" {
-		t.Fatalf("Content-Type = %q", got)
-	}
-	if got := rec.Header().Get("Content-Disposition"); !strings.Contains(got, "bundle-1.zip") {
-		t.Fatalf("Content-Disposition = %q", got)
-	}
-	if rec.Body.String() != "PK\x03\x04zip" {
-		t.Fatalf("body = %q", rec.Body.String())
-	}
-}
-
-func TestDriverBundleArchiveMissingIs404(t *testing.T) {
-	drivers := &recordingDriverService{err: errs.NotFound("驱动包不存在")}
-	rec := do(newRouter(Services{Drivers: drivers}), http.MethodGet, "/api/driver-bundles/ghost/archive", "")
-	if rec.Code != http.StatusNotFound {
-		t.Fatalf("status = %d, want 404: %s", rec.Code, rec.Body)
-	}
 }
 
 type stubConsistencyService struct {

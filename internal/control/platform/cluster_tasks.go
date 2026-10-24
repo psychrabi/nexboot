@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tianwei/diskless/internal/control/assets"
+	"github.com/tianwei/diskless/internal/control/pe"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/store"
 )
@@ -30,7 +31,8 @@ type ClusterTasks struct {
 	Token   string
 	Timeout time.Duration
 	// Fetch 读取一个远端节点的池任务；nil 时用集群 HTTP 通道。
-	Fetch func(ctx context.Context, apiURL string) ([]domain.Task, error)
+	Fetch        func(ctx context.Context, apiURL string) ([]domain.Task, error)
+	LocalTaskLog func(context.Context, string, string) (pe.PEFile, error)
 }
 
 func (c ClusterTasks) GetTask(ctx context.Context, id string) (domain.Task, error) {
@@ -63,6 +65,17 @@ func (c ClusterTasks) nameTargets(ctx context.Context, tasks []domain.Task) {
 		return
 	}
 	names := map[string]string{}
+	for _, task := range tasks {
+		if task.Type != domain.TaskTypeInstallImage {
+			continue
+		}
+		if sessions, err := c.Store.InstallSessions().List(ctx); err == nil {
+			for _, session := range sessions {
+				names[session.ImageID] = session.Name
+			}
+		}
+		break
+	}
 	for i := range tasks {
 		ref := tasks[i].TargetRef
 		if ref == "" {
@@ -109,6 +122,9 @@ func (c ClusterTasks) targetName(ctx context.Context, ref string) string {
 	}
 	if g, err := st.Groups().Get(ctx, ref); err == nil {
 		return g.Name
+	}
+	if profile, err := st.HardwareProfiles().Get(ctx, ref); err == nil {
+		return profile.Name
 	}
 	return ""
 }

@@ -37,3 +37,8 @@ func WriteTo(dir string) error {
 	}
 	return nil
 }
+
+// Read 返回一个内嵌启动文件的内容，供 HTTP 下发（WinPE 引导用的 wimboot 走 HTTP 而非 TFTP）。
+func Read(name string) ([]byte, error) {
+	return fs.ReadFile(files, "files/"+name)
+}

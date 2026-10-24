@@ -26,6 +26,8 @@ TERMINAL = "terminal-AABBCC112233"
 def cleanup():
     call("DELETE", f"/api/terminals/{TERMINAL}")
     call("DELETE", "/api/terminals/terminal-AABBCC112244")
+    for tid in ("terminal-AABBCC112255", "terminal-AABBCC112266"):
+        call("DELETE", f"/api/terminals/{tid}")
     for g in call("GET", "/api/groups")[1]["items"]:
         if g["Name"].startswith("e2e-"):
             call("DELETE", f"/api/groups/{g['ID']}")
@@ -133,8 +135,15 @@ check("C0b", "卷上是 GPT 单分区 + NTFS，卷标就是盘名", "ntfs" in pa
 st, body = call("POST", f"/api/groups/{gid}/disks", {"mount_target": "D:", "image_id": IMG, "config_id": CFG})
 check("C0c", "系统盘镜像不能作数据盘", st == 400 and "系统盘镜像" in str(body), f"HTTP {st} {str(body)[:120]}")
 call("POST", f"/api/images/{DATA}/configs", {"name": "e2e-data-b"})
-time.sleep(3)
-by_name = {c["Name"]: c for c in configs(DATA)}
+# 新建配置是异步任务；集群忙（复制、别的任务）时三秒不够，等它出现在列表里再挂盘。
+for _ in range(60):
+    by_name = {c["Name"]: c for c in configs(DATA)}
+    if "e2e-data-b" in by_name:
+        break
+    time.sleep(2)
+check("C1-0", "第二个数据盘配置已建出", "e2e-data-b" in by_name, str(sorted(by_name))[:120])
+if "e2e-data-b" not in by_name:
+    sys.exit(summary())
 for name, letter in (("default", "D:"), ("e2e-data-b", "F:")):
     st, _ = call("POST", f"/api/groups/{gid}/disks",
                  {"mount_target": letter, "image_id": DATA, "config_id": by_name[name]["ID"]})
@@ -151,11 +160,44 @@ check("C4", "盘符按 LUN 对齐（D→1, F→2）",
 st, net = call("GET", f"/boot/net-config?mac={MAC}")
 check("C5", "启动脚本可取回网关与 DNS", st == 200 and net.get("gateway") == GW, str(net)[:100])
 
+section("P Windows 开机策略随 net-config 下发")
+# 831f355：系统设置里的「Windows 开机策略」（关自动更新/自动重启/睡眠/休眠）由开机脚本在
+# net-config 这一次回调里取走；开关要真的改变客户机拿到的值，并且能关回去。
+st, settings = call("GET", "/api/settings")
+was_enforce = settings.get("enforce_windows_policy") if isinstance(settings, dict) else None
+check("P1", "系统设置里读得到开机策略开关", st == 200 and isinstance(was_enforce, bool), f"HTTP {st} {str(settings)[:120]}")
+check("P2", "net-config 带的策略与设置一致", isinstance(net, dict) and net.get("windows_policy") is was_enforce, str(net)[:120])
+st, body = call("PUT", "/api/settings/windows-policy", {"enforce": not was_enforce})
+_, net2 = call("GET", f"/boot/net-config?mac={MAC}")
+check("P3", "切换开关后客户机下次回调拿到新值", st == 200 and isinstance(body, dict) and body.get("enforce_windows_policy") is (not was_enforce)
+      and isinstance(net2, dict) and net2.get("windows_policy") is (not was_enforce), f"HTTP {st} {str(body)[:80]} net={str(net2)[:80]}")
+st, body = call("PUT", "/api/settings/windows-policy", {"enforce": bool(was_enforce)})
+_, net3 = call("GET", f"/boot/net-config?mac={MAC}")
+check("P4", "开关能关回原值", st == 200 and isinstance(net3, dict) and net3.get("windows_policy") is was_enforce, str(net3)[:120])
+st, body = call("PUT", "/api/settings/windows-policy", "not-json-object")
+check("P5", "格式错误的请求被拒（400），设置不变",
+      st == 400 and call("GET", "/api/settings")[1].get("enforce_windows_policy") is was_enforce, f"HTTP {st} {str(body)[:80]}")
+
+section("Q 开机取挂盘脚本")
+# 挂盘脚本从镜像里拆出来按 MAC 现取（/boot/mount-script），镜像里只留启动器：取得到、带数据盘的盘符，
+# 不认识的 MAC 必须拒绝，不能把别人的脚本吐出来。
+st, ms = call("GET", f"/boot/mount-script?mac={MAC}")
+check("Q1", "按 MAC 取到挂盘脚本", st == 200 and len(str(ms)) > 100, f"HTTP {st} {str(ms)[:80]}")
+# 挂盘脚本是通用的（按 MAC 只在 ISO 安装验证期间换成验证脚本），所以未登记的 MAC 拿到同一份；
+# 断言它不夹带任何本节点的口令，免得这个免登录入口成了泄漏点。
+st, ms2 = call("GET", "/boot/mount-script?mac=AA:BB:CC:99:99:99")
+secrets = [v for v in ssh("grep -E '^NDISKLESS_(CHAP_SECRET|JWT_SECRET|BOOTSTRAP_PASSWORD)=' /etc/ndiskless/ndiskless.env | cut -d= -f2-").splitlines() if len(v) >= 6]
+check("Q2", "未登记 MAC 拿到的是同一份通用脚本，且不含 CHAP/JWT/管理员口令",
+      st == 200 and ms2 == ms and bool(secrets) and not any(v in str(ms2) for v in secrets), f"HTTP {st} secrets_checked={len(secrets)}")
+
 section("S 超管机停机：数据盘存还原点并应用")
 # 超管开机后直接往 D: 的持久克隆写标记，关机只把 D: 存为数据配置的还原点，分组下次普通开机从它克隆。
 disks = call("GET", f"/api/groups/{gid}/disks")[1].get("items", [])
 disk_d = next((d for d in disks if d["MountTarget"] == "D:"), {})
 disk_f = next((d for d in disks if d["MountTarget"] == "F:"), {})
+# 先清掉 /dev/zvol 下的普通文件（之前某轮在链接迟到时写出来的）：克隆建好时 udev 发现路径被普通文件
+# 占着，只记一条 "Failed to create/update device symlink" 就放弃，之后不会再试，于是轮轮都等不到链接。
+ssh("find /dev/zvol -type f -delete 2>/dev/null")
 st, _ = call("POST", f"/api/terminals/{TERMINAL}/super")
 check("S1", "终端设为超管机", st == 200, f"HTTP {st}")
 call("GET", f"/boot?mac={MAC}")
@@ -166,9 +208,12 @@ OFFSET = 1500 * 1024 * 1024
 # /dev/zvol 链接可能迟到，对不存在的路径 dd 会在 devtmpfs 里建普通文件，读写自洽但真盘没写入，
 # udev 之后也不会覆盖它。必须等路径成为符号链接再写。
 DEV_D1 = f"/dev/zvol/{POOL}/run/SCLIENT-AABBCC112233-DATA-1"
-ssh(f"find /dev/zvol -type f -delete 2>/dev/null; for i in $(seq 1 20); do test -L {DEV_D1} && break; udevadm settle; sleep 1; done")
+# 等不到就补发一次 change 事件让 udev 重建链接（它对一次失败不会重试）。
+ssh(f"find /dev/zvol -type f -delete 2>/dev/null; for i in $(seq 1 20); do test -L {DEV_D1} && break; "
+    f"[ $i = 10 ] && udevadm trigger --action=change --subsystem-match=block --sysname-match='zd*'; udevadm settle; sleep 1; done")
 check("S3a", "D: 超管克隆的设备链接已就位", ssh(f"test -L {DEV_D1} && echo ok") == "ok")
-ssh(f"printf '{MARK}' | dd of={DEV_D1} bs=1 seek={OFFSET} conv=notrunc,fsync 2>/dev/null; sync")
+# 只往链接写：对不存在的路径 dd 会在 devtmpfs 里建普通文件，挡住以后每一轮的链接。
+ssh(f"test -L {DEV_D1} && printf '{MARK}' | dd of={DEV_D1} bs=1 seek={OFFSET} conv=notrunc,fsync 2>/dev/null; sync")
 seen = ssh(f"dd if={DEV_D1} bs=1 skip={OFFSET} count={len(MARK)} 2>/dev/null")
 check("S3", "往超管机的 D: 会话写入标记", seen == MARK, seen)
 # 只保存 D:，系统盘和 F: 丢弃。
@@ -228,6 +273,25 @@ call("DELETE", f"/api/groups/{gid_b}")
 call("POST", f"/api/terminals/{TERMINAL}/super/stop", {"reduction_name": ""})
 task_of("task-super_stop", timeout=120)
 
+section("G 分组满员：报错点名分组与地址段")
+# 1cf51a3：分组地址用完时，错误要写明是哪个分组、哪段地址，并告诉人去哪调；不能只回一句「没有可用 IP」。
+st, gfull = call("POST", "/api/groups", {
+    "name": "e2e-满员班", "start_ip": f"{SEG}.180", "client_max": 1,
+    "gateway": GW, "netmask": "255.255.255.0", "dns1": GW,
+    "system_image_id": IMG, "system_config_id": CFG})
+check("G1", "建只容一台的分组", st == 201, f"HTTP {st} {str(gfull)[:120]}")
+gid_full = gfull.get("ID", "") if st == 201 and isinstance(gfull, dict) else ""
+st, t1 = call("POST", "/api/terminals", {"mac": "AA:BB:CC:11:22:55", "name": "满员一号", "group_id": gid_full, "state": "offline"})
+check("G2", "第一台分到地址", st in (200, 201) and isinstance(t1, dict) and t1.get("IP") == f"{SEG}.180", f"HTTP {st} {str(t1)[:120]}")
+st, body = call("POST", "/api/terminals", {"mac": "AA:BB:CC:11:22:66", "name": "满员二号", "group_id": gid_full, "state": "offline"})
+check("G3", "第二台被拒（409），提示点名分组与地址段", st == 409 and "e2e-满员班" in str(body) and f"{SEG}.180" in str(body),
+      f"HTTP {st} {str(body)[:200]}")
+check("G4", "被拒的那台没有留下半截终端", call("GET", "/api/terminals/terminal-AABBCC112266")[0] == 404)
+for tid in ("terminal-AABBCC112255", "terminal-AABBCC112266"):
+    call("DELETE", f"/api/terminals/{tid}")
+if gid_full:
+    call("DELETE", f"/api/groups/{gid_full}")
+
 section("N 客户机网络：网段校验与跨网段开关")
 # 分组以服务器客户机网段为准：网段外的区间当场拒绝，并点名网卡、给出可用区间；
 # 打开中继开关后放行；存在这种分组时开关不能关闭。
@@ -251,7 +315,8 @@ st, g_off = call("POST", "/api/groups", off)
 check("N5", "打开后同一分组可建", st == 201, f"HTTP {st} {str(g_off)[:120]}")
 st, body = call("PUT", "/api/network", {"client_iface": iface_setting, "allow_cross_subnet": False})
 check("N6", "有跨网段分组时关不掉，提示点名分组", st == 400 and "e2e-外网段" in str(body), f"HTTP {st} {str(body)[:160]}")
-server_ip = net.get("client_networks", [f"{GW}/24"])[0].split("/")[0]
+# client_networks 是网段（网络地址），探测要用服务器自己在客户机网卡上的地址（server_addrs）。
+server_ip = (net.get("server_addrs") or [net.get("client_networks", [f"{GW}/24"])[0]])[0].split("/")[0]
 st, body = call("POST", "/api/network/probe", {"ip": server_ip})
 check("N7", "探测服务器自己的地址：通", st == 200 and body.get("reachable") is True, f"HTTP {st} {str(body)[:120]}")
 if isinstance(g_off, dict) and g_off.get("ID"):

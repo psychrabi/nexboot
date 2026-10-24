@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"strings"
 
 	"github.com/tianwei/diskless/internal/domain"
 )
@@ -11,9 +12,15 @@ type systemSettingsRepository struct {
 }
 
 func (r systemSettingsRepository) Upsert(ctx context.Context, value domain.SystemSettings) error {
+	// 列名取自 codec，新增列不会被这里漏掉（写死列名时新列会被静默丢弃）。
+	cols := r.codec.columns
+	sets := make([]string, 0, len(cols)-1)
+	for _, c := range cols[1:] {
+		sets = append(sets, c+" = excluded."+c)
+	}
 	_, err := r.q.ExecContext(ctx,
-		"INSERT INTO system_settings (id, import_dir, client_iface, allow_cross_subnet, replication_rate_mbps, data_pool) VALUES ("+r.placeholders(1, 6)+")"+
-			" ON CONFLICT(id) DO UPDATE SET import_dir = excluded.import_dir, client_iface = excluded.client_iface, allow_cross_subnet = excluded.allow_cross_subnet, replication_rate_mbps = excluded.replication_rate_mbps, data_pool = excluded.data_pool",
+		"INSERT INTO system_settings ("+strings.Join(cols, ", ")+") VALUES ("+r.placeholders(1, len(cols))+")"+
+			" ON CONFLICT(id) DO UPDATE SET "+strings.Join(sets, ", "),
 		r.codec.values(value)...,
 	)
 	return err

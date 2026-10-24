@@ -14,8 +14,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/tianwei/diskless/internal/config"
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/control/tasks"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
@@ -46,6 +46,8 @@ type ImageService struct {
 	Replicating func(ids ...string) []string
 	// DirFree 返回目录所在文件系统的剩余字节，供导出到目录的空间预检；为 nil 时用 statfs。
 	DirFree func(dir string) (int64, error)
+	// Place resolves exact identity owners and all catalogue-copy nodes before deletion.
+	Place *place.Router
 }
 
 type ImportImageRequest struct {
@@ -510,7 +512,7 @@ func (s ImageService) importDir(ctx context.Context) (string, error) {
 		}
 	}
 	if strings.TrimSpace(s.ImportDir) == "" {
-		return config.DefaultImportDir, nil
+		return "", errs.Invalid("请先创建存储池：上传和导入的文件存放在存储池的 imports 目录")
 	}
 	return s.ImportDir, nil
 }
@@ -530,6 +532,8 @@ type ImportSourceListResult struct {
 	Total int    `json:"total"`
 	// PoolAvailable 是数据池剩余空间，与文件大小并列，提交前就能看出放不下；问不到池时为 nil。
 	PoolAvailable *int64 `json:"pool_available"`
+	// ImportDirFree 是导入目录所在存储池的剩余空间（本机）；读不到时为 nil。
+	ImportDirFree *int64 `json:"import_dir_free"`
 }
 
 // exportableImage 是两条导出路径共用的检查：镜像须存在且状态稳定，导入中或异常的镜像不能导出。
@@ -780,7 +784,11 @@ func (s ImageService) ListImportSources(ctx context.Context) (ImportSourceListRe
 		})
 	}
 	sort.Slice(items, func(i, j int) bool { return items[i].Name < items[j].Name })
-	return ImportSourceListResult{Items: items, ImportDir: dir, Node: s.NodeAddr, Total: len(items), PoolAvailable: s.poolAvailable(ctx)}, nil
+	var dirFree *int64
+	if free, err := s.dirFree(dir); err == nil {
+		dirFree = &free
+	}
+	return ImportSourceListResult{Items: items, ImportDir: dir, Node: s.NodeAddr, Total: len(items), PoolAvailable: s.poolAvailable(ctx), ImportDirFree: dirFree}, nil
 }
 
 func importFormatLabel(lower string) string {
@@ -970,6 +978,7 @@ func (s ImageService) DeleteImage(ctx context.Context, id string) error {
 	for _, cfgID := range configIDs {
 		own[cfgID] = true
 	}
+	var idle []string
 	for _, cfgID := range configIDs {
 		dependents, err := s.Storage.ConfigDependents(ctx, cfgID)
 		if err != nil {
@@ -978,11 +987,26 @@ func (s ImageService) DeleteImage(ctx context.Context, id string) error {
 			}
 			continue
 		}
-		if blockers := filterDependents(dependents, own); len(blockers) > 0 {
+		macs, blockers, err := splitIdentityCaches(ctx, s.Store, s.Storage, filterDependents(dependents, own))
+		if err != nil {
+			return err
+		}
+		if len(blockers) > 0 {
 			return blocked(ErrConfigHasDependents, explainBlockers(ctx, s.Store, blockers, "该镜像"))
 		}
+		idle = append(idle, macs...)
 	}
 	if err := s.replicatingRefusal(img, configIDs); err != nil {
+		return err
+	}
+	layers, err := nodeLayers(ctx, s.Store, reductionIDs, ErrConfigHasDependents)
+	if err != nil {
+		return err
+	}
+	if err := clearIdentityCaches(ctx, s.Storage, idle, configIDs...); err != nil {
+		return err
+	}
+	if err := clearNodeLayers(ctx, s.Place, layers); err != nil {
 		return err
 	}
 	// 下面的 destroy 与删行对复制而言是同一次变更。
@@ -996,15 +1020,53 @@ func (s ImageService) DeleteImage(ctx context.Context, id string) error {
 		}
 		return err
 	}
+	if err := s.dropAsideImage(ctx, id, configIDs); err != nil {
+		return err
+	}
 	for _, cfg := range configs {
 		if err := s.Store.Reductions().DeleteByConfig(ctx, cfg.ID); err != nil {
+			return err
+		}
+		if err := s.Store.ModelAdaptations().DeleteByConfig(ctx, cfg.ID); err != nil {
 			return err
 		}
 		if err := s.Store.Configs().Delete(ctx, cfg.ID); err != nil {
 			return err
 		}
 	}
-	return s.Store.Images().Delete(ctx, id)
+	if err := s.Store.Images().Delete(ctx, id); err != nil {
+		return err
+	}
+	return nil
+}
+
+// dropAsideImage must finish on every registered node before metadata is deleted, so failures remain retryable.
+func (s ImageService) dropAsideImage(ctx context.Context, imageID string, configIDs []string) error {
+	hosts := []place.Placed{{Agent: s.Storage}}
+	if s.Place != nil {
+		nodes, err := s.Store.Servers().List(ctx)
+		if err != nil {
+			return err
+		}
+		ids := []string{s.Place.NodeID}
+		for _, node := range nodes {
+			ids = append(ids, node.ID)
+		}
+		hosts, err = s.Place.NamedHosts(ctx, ids)
+		if err != nil {
+			return err
+		}
+	}
+	for _, h := range hosts {
+		agent, ok := h.Agent.(storage.AsideHostAgent)
+		if !ok {
+			continue
+		} // Single-node/custom agents without preserved-copy support have no aside operation.
+		if err := agent.DeleteAsideImage(ctx, imageID, configIDs); err != nil {
+			return errs.Conflict(fmt.Sprintf("请确认节点 %s 可用后重试删除镜像 %s：旧副本尚未清理，镜像记录已保留（%s）", h.ServerID, imageID, zfs.OperatorMessage(err)))
+		}
+	}
+	return nil
 }
 
 func (s ImageService) runner() tasks.Runner {

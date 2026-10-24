@@ -5,6 +5,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -112,6 +114,50 @@ func TestHealthCheckScriptDistinguishesUnhealthyFromUnreachable(t *testing.T) {
 				"脚本会被杀并判失败，健康节点因此进 FAULT，谁都不接管", elapsed)
 		}
 	})
+}
+
+// 忙时 /healthz 要一两秒才回：探针等得太短会把慢当死，两台可能一起让出 VIP。
+// 放宽后最坏路径仍须小于 keepalived 的 timeout，否则脚本被杀照样判失败。
+func TestHealthProbeToleratesASlowButHealthyNode(t *testing.T) {
+	script, err := os.ReadFile(filepath.Join("..", "..", "deploy", "ndiskless-check.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpl, err := os.ReadFile(filepath.Join("..", "..", "deploy", "keepalived.conf.tmpl"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	number := func(re string, src []byte) []float64 {
+		var out []float64
+		for _, m := range regexp.MustCompile(re).FindAllSubmatch(src, -1) {
+			v, err := strconv.ParseFloat(string(m[1]), 64)
+			if err != nil {
+				t.Fatal(err)
+			}
+			out = append(out, v)
+		}
+		return out
+	}
+	waits := number(`curl [^\n]*-m ([0-9.]+)`, script)
+	sleeps := number(`(?m)^\s*sleep ([0-9.]+)`, script)
+	timeout := number(`(?m)^\s*timeout ([0-9]+)`, tmpl)
+	fall := number(`(?m)^\s*fall ([0-9]+)`, tmpl)
+	if len(waits) == 0 || len(timeout) != 1 || len(fall) != 1 {
+		t.Fatalf("没读到探针参数：waits=%v timeout=%v fall=%v", waits, timeout, fall)
+	}
+	if waits[0] < 3 {
+		t.Errorf("单次探测只等 %v 秒，忙时健康节点也回不过来", waits[0])
+	}
+	if fall[0] < 3 {
+		t.Errorf("连续 %v 次失败就让出 VIP，忙时一抖就切", fall[0])
+	}
+	worst := 0.0
+	for _, v := range append(waits, sleeps...) {
+		worst += v
+	}
+	if worst >= timeout[0] {
+		t.Errorf("最坏路径 %v 秒不小于 keepalived timeout %v 秒，脚本会被杀并判失败", worst, timeout[0])
+	}
 }
 
 type markerState int

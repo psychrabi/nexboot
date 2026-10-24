@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/tianwei/diskless/internal/domain"
+	"github.com/tianwei/diskless/internal/ha"
 	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/store"
 )
@@ -42,7 +43,7 @@ func TestDBCopyMissingReadsTheReplicatedCopy(t *testing.T) {
 	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
 
 	got := dbCopyMissing(ctx, copyPath, inventoryOnly{datasets: []string{"img"}}, logger)
-	if !reflect.DeepEqual(got, []string{"配置「办公」"}) {
+	if !reflect.DeepEqual(got, []ha.MissingDataset{{Ref: "img_office", Label: "配置「办公」"}}) {
 		t.Fatalf("missing = %v", got)
 	}
 	if got := dbCopyMissing(ctx, copyPath, inventoryOnly{datasets: []string{"img", "img_office"}}, logger); len(got) != 0 {

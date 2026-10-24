@@ -9,6 +9,7 @@ import (
 	"bytes"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"unicode/utf16"
 	"unicode/utf8"
@@ -66,6 +67,71 @@ func Parse(data []byte) (Driver, error) {
 
 	d.HWIDs = collectHWIDs(sections, resolve)
 	return d, nil
+}
+
+// MinBuild 返回 x64 系统要装上 hwid（含更细的子系统 ID）至少需要的内部版本，0 表示不限；
+// listed 为假说明 INF 的 x64 型号节里没有这块设备。版本取自修饰 NTamd64.主.次.产品类型.套件.内部版本。
+func MinBuild(data []byte, hwid string) (build int, listed bool, err error) {
+	text, err := decode(data)
+	if err != nil {
+		return 0, false, err
+	}
+	sections := parseSections(text)
+	table := stringsTable(sections)
+	hwid = strings.ToUpper(strings.TrimSpace(hwid))
+	var bases []string
+	for _, e := range sections["manufacturer"] {
+		if len(e.values) > 0 {
+			if base := strings.ToLower(strings.TrimSpace(replaceTokens(e.values[0], table))); base != "" {
+				bases = append(bases, base)
+			}
+		}
+	}
+	for name, entries := range sections {
+		need, ok := x64SectionBuild(name, bases)
+		if !ok || !listsHWID(entries, hwid, table) {
+			continue
+		}
+		if !listed || need < build {
+			build = need
+		}
+		listed = true
+	}
+	return build, listed, nil
+}
+
+// x64SectionBuild 判断节是不是某个厂商在 x64 上的型号节，并取出修饰里的内部版本。
+func x64SectionBuild(name string, bases []string) (int, bool) {
+	for _, base := range bases {
+		if name == base {
+			return 0, true
+		}
+		if !strings.HasPrefix(name, base+".nt") {
+			continue
+		}
+		parts := strings.Split(name[len(base)+1:], ".")
+		if parts[0] != "nt" && parts[0] != "ntamd64" {
+			return 0, false
+		}
+		build := 0
+		if len(parts) > 5 {
+			build, _ = strconv.Atoi(strings.TrimSpace(parts[5]))
+		}
+		return build, true
+	}
+	return 0, false
+}
+
+func listsHWID(entries []entry, hwid string, table map[string]string) bool {
+	for _, e := range entries {
+		for _, v := range e.values[min(1, len(e.values)):] {
+			id := strings.ToUpper(strings.TrimSpace(replaceTokens(v, table)))
+			if id == hwid || strings.HasPrefix(id, hwid+"&") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 func first(values []string) string {

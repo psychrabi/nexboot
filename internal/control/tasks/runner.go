@@ -64,6 +64,7 @@ func (r Runner) Create(ctx context.Context, typ domain.TaskType, target string) 
 // Finish 经 st 把任务标为成功，st 可以是操作提交自身写入的事务。
 func (r Runner) Finish(ctx context.Context, st store.Store, task domain.Task, result string) error {
 	task.Status = domain.TaskStatusSuccess
+	task.Error = ""
 	task.Progress = 100
 	task.Result = result
 	finished := r.now()

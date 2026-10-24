@@ -1,11 +1,12 @@
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { act, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
-import { StoreProvider } from '../store.jsx';
+import { StoreProvider, useStore } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageTerminals } from './terminals.jsx';
+import { PageModels } from './models.jsx';
 
 // 客户机页：后端部分接口失败时列表仍可用，筛选结果正确，保存超管机必须填还原点名。
 
@@ -26,21 +27,32 @@ function stubApi(overrides = {}) {
     listTerminals: async () => list(TERMINALS),
     listGroups: async () => list(GROUPS),
     listImages: async () => list([{ ID: 'win11', Name: 'Win 11', OSType: 'windows', State: 'normal' }]),
-    listDriverBundles: async () => list([]),
     listTasks: async () => list([]),
     listAlarms: async () => list([]),
     listPools: async () => list([]),
     listClusterNodes: async () => list([]),
     superDisks: async () => list([]),
+    terminalModel: async () => ({}),
+    terminalIdentity: async () => ({ next_boot: { kind: 'unknown', reason: 'unconfigured' } }),
+    listInstallations: async () => list([]),
   };
   for (const [name, fn] of Object.entries({ ...base, ...overrides })) {
     vi.spyOn(api, name).mockImplementation(fn);
   }
 }
 
+function RouteProbe() {
+  const { route } = useStore();
+  return <output aria-label="当前路由">{JSON.stringify(route)}</output>;
+}
 const renderPage = () => render(
-  <StoreProvider><ConfirmProvider><PageTerminals/></ConfirmProvider></StoreProvider>,
+  <StoreProvider><ConfirmProvider><PageTerminals/><RouteProbe/></ConfirmProvider></StoreProvider>,
 );
+function WorkflowPages() {
+  const { route } = useStore();
+  return route.page === 'models' ? <PageModels/> : <PageTerminals/>;
+}
+const renderWorkflow = () => render(<StoreProvider><ConfirmProvider><WorkflowPages/><RouteProbe/></ConfirmProvider></StoreProvider>);
 
 // 多节点时显示客户机落在哪台服务器（StorageServerID），单机时不显示这一列。
 describe('终端所在节点', () => {
@@ -70,6 +82,324 @@ describe('终端所在节点', () => {
     await screen.findByText('一号机');
     expect(screen.queryByText('节点')).toBeNull();
   });
+});
+
+it('客户机系统盘保留简短机型和启动说明，不暴露身份诊断或普遍取证操作', async () => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'VMware E1000', status: 'waiting' }),
+    terminalIdentity: async () => ({ identity: { InstanceID: 'PCI\\VEN_8086&DEV_100F\\PRIVATE_INSTANCE', Source: 'captured', LayerReductionRef: 'IDENT-internal-ready' }, stale: false,
+      next_boot: { kind: 'winpe', reason: 'pending_adapt', mode: 'adapt', state: 'pending', task_id: 'adapt-task' } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const basic = await screen.findByText('基础信息');
+  const modal = basic.closest('.card');
+  const system = within(modal).getByText('系统盘');
+  const profile = await within(modal).findByText(/VMware E1000/);
+  expect(basic.compareDocumentPosition(profile) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(system.compareDocumentPosition(profile) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  expect(await within(modal).findByText(/开机进入维护环境做完整适配/)).toBeTruthy();
+  expect(within(modal).queryByRole('button', { name: '重新取证' })).toBeNull();
+  expect(within(modal).queryByText('PCI\\VEN_8086&DEV_100F\\PRIVATE_INSTANCE')).toBeNull();
+  expect(within(modal).queryByText('启动诊断')).toBeNull();
+  expect(within(modal).queryByText('身份来源')).toBeNull();
+  expect(within(modal).queryByText('身份层状态')).toBeNull();
+  expect(within(modal).queryByText('IDENT-internal-ready')).toBeNull();
+});
+
+it.each([
+  [{ status: 'waiting' }, '本机在当前还原点上还没有开机成功的回报'],
+  [{ status: 'ok', boot_verified_at: '2026-10-08T01:00:00Z' }, '本机已开机成功'],
+  [{ status: 'failed', failure: { stage: 'windows', at: '2026-10-08T01:00:00Z' } }, '上次未收到 Windows 成功回报'],
+  [{ status: 'failed', failure: { stage: 'template', at: '2026-10-08T01:00:00Z' } }, '网卡模板两次没进系统'],
+  [{ status: 'waiting', failure: { stage: 'sanhook', code: '1058021379', at: '2026-10-08T01:00:00Z' } }, '上次连接系统盘失败'],
+])('当前点依据 %j 只按本机开机结果说话，不借记录宣称能开机', async (evidence, label) => {
+  stubApi({
+    listTerminals: async () => list([{ ...TERMINALS[2], State: 'online' }]),
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-1', reduction_id: 'red-1', ...evidence }),
+    terminalIdentity: async () => ({ next_boot: { kind: 'system', reason: 'direct' } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  expect(await screen.findByText(label)).toBeTruthy();
+  expect(screen.queryByText(/蓝屏|已适配|待确认|兼容记录/)).toBeNull();
+  if (!evidence.boot_verified_at) expect(screen.queryByText('本机已开机成功')).toBeNull();
+  expect(!!screen.queryByRole('button', { name: '完整适配' })).toBe(evidence.status === 'failed');
+});
+
+it('客户机开机失败后完整适配进入精确筛选列表，不自动弹窗，编辑搜索恢复普通查询', async () => {
+  const getModel = vi.fn(async () => ({}));
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-used', reduction_id: 'red-1', status: 'failed', failure: { stage: 'windows', at: '2026-10-08T01:00:00Z' } }),
+    terminalIdentity: async () => ({ next_boot: { kind: 'system', reason: 'unverified' } }),
+    listModels: async () => [
+      { id: 'h-1', name: 'E1000', nic_label: '8086:100F', status: 'failed' },
+      { id: 'h-same', name: 'E1000', nic_label: '8086:9999', status: 'failed' },
+      { id: 'h-part', name: 'E1000 增强', nic_label: '8086:8888', status: 'failed' },
+      { id: 'h-vmx', name: 'VMXNET3', nic_label: '15AD:07B0', status: 'failed' },
+    ], getModel,
+  });
+  renderWorkflow();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  await screen.findByText('上次未收到 Windows 成功回报');
+  expect(screen.queryByRole('button', { name: '查看机型' })).toBeNull();
+  await userEvent.click(screen.getByRole('button', { name: '完整适配' }));
+  const search = await screen.findByRole('textbox', { name: '搜索机型 / 网卡' });
+  expect(search.value).toBe('E1000');
+  await screen.findByText('8086:100F');
+  expect(screen.queryByText('8086:9999')).toBeNull();
+  expect(screen.queryByText('8086:8888')).toBeNull();
+  expect(screen.queryByText('15AD:07B0')).toBeNull();
+  expect(screen.queryByText('基础信息')).toBeNull();
+  expect(screen.queryByRole('heading')).toBeNull();
+  expect(screen.queryByRole('button', { name: '开始适配' })).toBeNull();
+  expect(getModel).not.toHaveBeenCalled();
+  expect(JSON.parse(screen.getByLabelText('当前路由').textContent).params).toEqual({ filterProfileId: 'h-1', filterProfileName: 'E1000', sourceConfigId: 'cfg-used', sourceTerminalId: 'terminal-C' });
+  await userEvent.clear(search);
+  expect(screen.getAllByRole('button', { name: /^完整适配 / })).toHaveLength(4);
+  await userEvent.type(search, 'E1000');
+  expect(screen.getAllByRole('button', { name: /^完整适配 / })).toHaveLength(3);
+});
+
+it.each([
+  ['当前客户机', '美术教室机', 'AA:BB:CC:DD:EE:03'],
+  ['另一台客户机', '二号机', 'AA:BB:CC:DD:EE:02'],
+])('机型列表详情选择%s时打开对应客户机详情', async (_, name, mac) => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-used', reduction_id: 'red-1', status: 'failed' }),
+    terminalIdentity: async () => ({ next_boot: { kind: 'system', reason: 'unverified' } }),
+    listModels: async () => [{ id: 'h-1', name: 'E1000', nic_label: '8086:100F', status: 'failed' }],
+    getModel: async () => ({ id: 'h-1', name: 'E1000', status: 'failed', terminal_list: [
+      { id: 'terminal-C', name: '美术教室机', state: 'offline' },
+      { id: 'terminal-B', name: '二号机', mac: 'AABBCCDDEE02', state: 'offline' },
+    ] }),
+  });
+  renderWorkflow();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  await userEvent.click(await screen.findByRole('button', { name: '完整适配' }));
+  await userEvent.click(await screen.findByRole('button', { name: '详情' }));
+  await userEvent.click(await screen.findByRole('button', { name: 'Windows 客户机 (2)' }));
+  await userEvent.click(within(screen.getByRole('region', { name: '机型客户机' })).getByRole('button', { name }));
+  const detail = (await screen.findByText('基础信息')).closest('.card');
+  expect(within(detail).getAllByText(name).length).toBeGreaterThan(0);
+  expect(within(detail).getByText(mac)).toBeTruthy();
+  expect(screen.queryByRole('heading', { name: 'E1000' })).toBeNull();
+  expect(JSON.parse(screen.getByLabelText('当前路由').textContent).page).toBe('terminals');
+});
+
+it('客户机导航机型页后缺驱动可上传并返回原适配表单', async () => {
+  const adaptModel = vi.fn(async () => { throw new Error('离线Windows中找不到启动网卡的已发布INF'); });
+  const uploadDriverPack = vi.fn(async () => ({}));
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-used', reduction_id: 'red-1', status: 'failed' }),
+    terminalIdentity: async () => ({ next_boot: { kind: 'system', reason: 'unverified' } }),
+    listModels: async () => [{ id: 'h-1', name: 'E1000', nic_label: '8086:100F', status: 'failed' }],
+    listDriverPacks: async () => list([]),
+    getModel: async () => ({ id: 'h-1', name: 'E1000', terminal_list: [{ id: 'terminal-C', name: '美术教室机', state: 'offline' }] }),
+    listConfigs: async () => list([{ ID: 'cfg-used', Name: '当前教学配置' }]),
+    adaptModel, uploadDriverPack,
+  });
+  renderWorkflow();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  await userEvent.click(await screen.findByRole('button', { name: '完整适配' }));
+  await userEvent.click(await screen.findByRole('button', { name: '完整适配 E1000' }));
+  await screen.findByRole('option', { name: /当前教学配置/ });
+  await userEvent.type(screen.getByLabelText('还原点名称'), '当前机型新点');
+  await userEvent.click(screen.getByRole('button', { name: '开始适配' }));
+  await userEvent.click(await screen.findByRole('button', { name: '上传匹配驱动包' }));
+  await userEvent.click(await screen.findByRole('button', { name: '上传驱动包' }));
+  expect(await screen.findByRole('button', { name: '上传并解析' })).toBeTruthy();
+  expect(screen.queryByLabelText('还原点名称')).toBeNull();
+  expect(screen.queryByText('基础信息')).toBeNull();
+  await userEvent.type(screen.getByPlaceholderText('Intel I219 v12.19'), '本机网卡');
+  const uploadModal = screen.getByPlaceholderText('Intel I219 v12.19').closest('.card');
+  await userEvent.upload(uploadModal.querySelector('input[type=file]'), new File(['zip'], 'nic.zip', { type: 'application/zip' }));
+  await userEvent.click(screen.getByRole('button', { name: '上传并解析' }));
+  await waitFor(() => expect(uploadDriverPack).toHaveBeenCalled());
+  const sent = uploadDriverPack.mock.calls[0][0];
+  expect(sent.get('file').name).toBe('nic.zip');
+  expect(sent.get('category')).toBe('boot_critical_nic');
+  await userEvent.click(screen.getByRole('button', { name: '返回机型' }));
+  expect(await screen.findByLabelText('还原点名称')).toBeTruthy();
+  expect(screen.getByLabelText('还原点名称').value).toBe('当前机型新点');
+  expect(screen.getByLabelText('目标系统配置').value).toBe('cfg-used');
+  expect(screen.getByLabelText('关机客户机').value).toBe('terminal-C');
+  expect(JSON.parse(screen.getByLabelText('当前路由').textContent).page).toBe('models');
+  await userEvent.keyboard('{Escape}');
+  expect(screen.queryByText('基础信息')).toBeNull();
+  expect(screen.getByRole('textbox', { name: '搜索机型 / 网卡' }).value).toBe('E1000');
+  expect(adaptModel).toHaveBeenCalledTimes(1);
+});
+
+it.each([
+  { kind: 'winpe', mode: 'probe', task_id: 'probe-task' },
+  { kind: 'wait', mode: 'adapt', reason: 'finalizing', task_id: 'adapt-task' },
+])('客户机已有维护 %j 时完整适配导航禁用，不绕过维护占用', async next => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-1', reduction_id: 'red-1', status: 'failed' }),
+    terminalIdentity: async () => ({ next_boot: next }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const adapt = await screen.findByRole('button', { name: '完整适配' });
+  expect(adapt.disabled).toBe(true);
+  await userEvent.click(adapt);
+  expect(screen.getByText('基础信息')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '查看机型' })).toBeNull();
+  expect(JSON.parse(screen.getByLabelText('当前路由').textContent).page).not.toBe('models');
+});
+
+it.each([
+  [{ kind: 'system', reason: 'linux' }, '直接启动 Linux。'],
+  [{ kind: 'system', reason: 'super' }, '启动超管环境，使用最新可用还原点。'],
+  [{ kind: 'unknown', reason: 'unconfigured' }, '尚未配置启动系统，请检查分组的系统镜像与配置。'],
+])('启动目标 %j 不套用 Windows 验证与适配入口', async (next, label) => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'cfg-1', reduction_id: 'red-1', boot_verified_at: '2026-10-08T01:00:00Z' }),
+    terminalIdentity: async () => ({ next_boot: next }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  expect(await screen.findByText(label)).toBeTruthy();
+  expect(screen.queryByText('本机已开机成功')).toBeNull();
+  expect(screen.queryByRole('button', { name: '完整适配' })).toBeNull();
+});
+
+it('尚未解析到当前还原点时不能从客户机详情跳过系统配置去适配其他点', async () => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000' }),
+    terminalIdentity: async () => ({ next_boot: { kind: 'unknown', reason: 'unconfigured' } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  expect(await screen.findByText('尚未配置启动系统，请检查分组的系统镜像与配置。')).toBeTruthy();
+  expect(screen.queryByRole('button', { name: '完整适配' })).toBeNull();
+  expect(screen.queryByRole('button', { name: '查看机型' })).toBeNull();
+});
+
+it.each([
+  ['普通客户机', false, 'red-applied', '已应用点'],
+  ['超管机', true, 'red-latest', '最新可用点'],
+])('系统盘展示%s实际下一次还原点，而非分组旧缓存', async (_, isSuper, reductionID, expectedName) => {
+  stubApi({
+    listTerminals: async () => list([{ ...TERMINALS[2], IsSuper: isSuper }]),
+    listGroups: async () => list([{ ...GROUPS[1], SystemConfigID: 'cfg-1', SystemReductionID: 'red-group' }]),
+    listConfigs: async () => list([{ ID: 'cfg-1', Name: '教学配置', DefaultReductionID: 'red-applied' }]),
+    listReductions: async () => list([
+      { ID: 'red-group', DisplayName: '旧分组点', Status: 'ready', CreatedAt: '2026-10-01T01:00:00Z' },
+      { ID: 'red-applied', DisplayName: '已应用点', Status: 'ready', CreatedAt: '2026-10-02T01:00:00Z' },
+      { ID: 'red-latest', DisplayName: '最新可用点', Status: 'ready', CreatedAt: '2026-10-03T01:00:00Z' },
+    ]),
+    terminalIdentity: async () => ({ next_boot: { kind: 'system', reason: isSuper ? 'super' : 'direct', image_id: 'win11', config_id: 'cfg-1', reduction_id: reductionID } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const modal = (await screen.findByText('基础信息')).closest('.card');
+  expect(await within(modal).findByText(expectedName)).toBeTruthy();
+  expect(within(modal).queryByText('旧分组点')).toBeNull();
+  expect(within(modal).getByText('教学配置')).toBeTruthy();
+});
+
+it.each([
+  [{ kind: 'system', reason: 'direct' }, '直接启动 Windows'],
+  [{ kind: 'system', reason: 'linux' }, '直接启动 Linux'],
+  [{ kind: 'system', reason: 'super' }, '启动超管环境'],
+  [{ kind: 'system', reason: 'automatic_config' }, '直接启动 Windows'],
+  [{ kind: 'system', reason: 'identity_rebuild' }, '直接启动 Windows'],
+  [{ kind: 'system', reason: 'automatic_template' }, '自动生成网卡配置后启动 Windows'],
+  [{ kind: 'winpe', reason: 'automatic_identity' }, '首次开机会进入维护环境'],
+  [{ kind: 'winpe', reason: 'pending_identity', mode: 'identity', state: 'pending' }, '完成客户机启动准备'],
+  [{ kind: 'winpe', reason: 'pending_probe', mode: 'probe', state: 'pending' }, '进行启动网卡检测'],
+  [{ kind: 'winpe', reason: 'pending_adapt', mode: 'adapt', state: 'booted' }, '已进入维护环境，请等待'],
+  [{ kind: 'wait', reason: 'preparing', state: 'preparing' }, '服务器正在准备维护任务'],
+  [{ kind: 'wait', reason: 'finalizing', state: 'finalizing' }, '等待服务器保存适配结果'],
+  [{ kind: 'system', reason: 'unverified' }, '尝试启动 Windows'],
+  [{ kind: 'unknown', reason: 'unconfigured' }, '尚未配置启动系统'],
+])('下一次启动按真实路由 %j 给行动说明', async (next, text) => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', status: 'ok' }),
+    terminalIdentity: async () => ({ next_boot: next }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const modal = (await screen.findByText('基础信息')).closest('.card');
+  expect(await within(modal).findByText(new RegExp(text))).toBeTruthy();
+  if (['automatic_config', 'identity_rebuild'].includes(next.reason)) {
+    expect(within(modal).getByText('直接启动 Windows。')).toBeTruthy();
+    expect(within(modal).queryByText(/服务器会准备客户机配置/)).toBeNull();
+  }
+});
+
+it('维护适配目标跨镜像时显示实际目标业务名，不沿用分组系统', async () => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'old-config', reduction_id: 'old-red', boot_verified_at: '2026-10-08T01:00:00Z' }),
+    listImages: async () => list([{ ID: 'win11', Name: '分组 Windows', OSType: 'windows' }, { ID: 'target-image', Name: '目标 Windows', OSType: 'windows' }]),
+    listConfigs: async id => list(id === 'target-image' ? [{ ID: 'target-config', Name: '目标教学配置', DefaultReductionID: 'target-red' }] : [{ ID: 'old-config', Name: '旧分组配置' }]),
+    listReductions: async id => list(id === 'target-config' ? [{ ID: 'target-red', DisplayName: '适配来源点', Status: 'ready' }] : []),
+    terminalIdentity: async () => ({ next_boot: { kind: 'winpe', reason: 'pending_adapt', mode: 'adapt', state: 'pending', image_id: 'target-image', config_id: 'target-config', reduction_id: 'target-red' } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const modal = (await screen.findByText('基础信息')).closest('.card');
+  expect(await within(modal).findByText('目标教学配置')).toBeTruthy();
+  expect(within(modal).getByText('目标 Windows')).toBeTruthy();
+  expect(within(modal).getByText('适配来源点')).toBeTruthy();
+  expect(within(modal).queryByText('分组 Windows')).toBeNull();
+  expect(within(modal).queryByText('本机已开机成功')).toBeNull();
+});
+
+it.each([
+  [{ kind: 'winpe', reason: 'pending_adapt', mode: 'adapt', state: 'pending' }, '开机进入维护环境做完整适配'],
+  [{ kind: 'wait', reason: 'preparing', mode: 'adapt', state: 'preparing' }, '服务器正在准备维护任务'],
+  [{ kind: 'wait', reason: 'finalizing', mode: 'adapt', state: 'finalizing' }, '等待服务器保存适配结果'],
+])('维护适配目标 %j 缺失时不把分组镜像和旧还原点冒充目标', async (next, text) => {
+  stubApi({
+    terminalModel: async () => ({ profile_id: 'h-1', profile_name: 'E1000', config_id: 'old-config', reduction_id: 'old-red', boot_verified_at: '2026-10-08T01:00:00Z' }),
+    listGroups: async () => list([{ ...GROUPS[1], SystemConfigID: 'old-config', SystemReductionID: 'old-red' }]),
+    listImages: async () => list([{ ID: 'win11', Name: '旧分组镜像', OSType: 'windows' }]),
+    listConfigs: async () => list([{ ID: 'old-config', Name: '旧分组配置', DefaultReductionID: 'old-red' }]),
+    listReductions: async () => list([{ ID: 'old-red', DisplayName: '旧分组点' }]),
+    terminalIdentity: async () => ({ next_boot: next }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const modal = (await screen.findByText('基础信息')).closest('.card');
+  expect(await within(modal).findByText(new RegExp(text))).toBeTruthy();
+  expect(within(modal).getByText('适配目标镜像')).toBeTruthy();
+  expect(within(modal).queryByText('旧分组镜像')).toBeNull();
+  expect(within(modal).queryByText('旧分组配置')).toBeNull();
+  expect(within(modal).queryByText('旧分组点')).toBeNull();
+  expect(within(modal).queryByText('本机已开机成功')).toBeNull();
+});
+
+it.each([
+  [{ kind: 'winpe', reason: 'pending_adapt', mode: 'adapt', state: 'pending' }, '开机进入维护环境做完整适配'],
+  [{ kind: 'wait', reason: 'finalizing', mode: 'adapt', state: 'finalizing' }, '等待服务器保存适配结果'],
+])('详情保持打开时维护状态 %j 完成后自动更新启动说明和同配置新还原点名称', async (pending, text) => {
+  vi.useFakeTimers({ shouldAdvanceTime: true });
+  try {
+    let completed = false;
+    const user = userEvent.setup({ advanceTimers: vi.advanceTimersByTime });
+    stubApi({
+      listGroups: async () => list([{ ...GROUPS[1], SystemConfigID: 'same-config', SystemReductionID: 'source-red' }]),
+      listConfigs: async () => list([{ ID: 'same-config', Name: '教学配置', DefaultReductionID: completed ? 'new-red' : 'source-red' }]),
+      listReductions: async () => list(completed ? [{ ID: 'new-red', DisplayName: '新可开机点', Status: 'ready' }] : [{ ID: 'source-red', DisplayName: '适配来源点', Status: 'ready' }]),
+      terminalIdentity: async () => ({ next_boot: { image_id: 'win11', config_id: 'same-config',
+        ...(completed ? { kind: 'system', reason: 'direct', reduction_id: 'new-red' } : { ...pending, reduction_id: 'source-red', task_id: 'adapt-task' }) } }),
+    });
+    renderPage();
+    await user.click(await screen.findByText('美术教室机'));
+    const modal = (await screen.findByText('基础信息')).closest('.card');
+    expect(await within(modal).findByText(new RegExp(text))).toBeTruthy();
+    expect(await within(modal).findByText('适配来源点')).toBeTruthy();
+    completed = true;
+    await act(async () => { vi.advanceTimersByTime(5000); });
+    expect(await within(modal).findByText('直接启动 Windows。')).toBeTruthy();
+    expect(await within(modal).findByText('新可开机点')).toBeTruthy();
+    expect(within(modal).queryByText('适配来源点')).toBeNull();
+    expect(within(modal).queryByText('适配目标镜像')).toBeNull();
+    expect(within(modal).getByText('系统镜像')).toBeTruthy();
+  } finally { vi.useRealTimers(); }
 });
 
 describe('终端页', () => {
@@ -384,4 +714,74 @@ it('筛选或切换视图后清空勾选', async () => {
   expect(screen.getByText('已选 1')).toBeTruthy();
   await userEvent.click(screen.getByRole('button', { name: '矩阵' }));
   await waitFor(() => expect(screen.queryByText(/已选/)).toBeNull());
+});
+
+// ISO 安装会临时借用客户机：开机先走安装，客户机页要看得出被谁占着、哪些操作要等安装结束。
+const INSTALLING = { id: 'install-1', task_id: 'task-install-1', name: 'win11-新装', mac: 'AABBCCDDEE03', ip: '192.168.60.101', phase: 'waiting', progress: 0, message: '等待客户机开机', os_type: 'windows' };
+
+it('被 ISO 安装占用的客户机，详情说明占用、下次开机进安装程序，冲突操作禁用', async () => {
+  const getInstallation = vi.fn(async () => ({ ...INSTALLING, source_path: '/srv/iso/win11.iso' }));
+  stubApi({
+    listInstallations: async () => list([INSTALLING, { ...INSTALLING, id: 'install-0', name: '早先装好的', phase: 'ready' }]),
+    terminalIdentity: async () => ({ next_boot: { kind: 'install', reason: 'waiting', task_id: 'task-install-1', install_id: 'install-1' } }),
+    getInstallation,
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  const modal = (await screen.findByText('基础信息')).closest('.card');
+  expect(await within(modal).findByText(/正在用于安装镜像「win11-新装」/)).toBeTruthy();
+  expect(within(modal).queryByText(/早先装好的/)).toBeNull();
+  expect(await within(modal).findByText(/进入 ISO 安装程序/)).toBeTruthy();
+  expect(within(modal).getByText(/安装期间开机不使用分组的系统盘/)).toBeTruthy();
+  expect(within(modal).getByRole('button', { name: '设为超管' }).disabled).toBe(true);
+  expect(within(modal).getByRole('button', { name: '删除' }).disabled).toBe(true);
+  expect(within(modal).getByText(/安装结束或放弃后/)).toBeTruthy();
+
+  await userEvent.click(within(modal).getByRole('button', { name: '查看安装' }));
+  expect(getInstallation).toHaveBeenCalledWith('install-1');
+  expect(await screen.findByText('ISO 安装')).toBeTruthy();
+});
+
+it.each([
+  ['preparing', /服务器正在准备安装资源/],
+  ['installing', /安装进行中，请勿重启/],
+  ['initializing', /从新装好的系统盘启动/],
+  ['saving', /等待安装保存完成/],
+  ['verifying', /启动新镜像做开机验证/],
+  ['failed', /安装失败，开机不会启动任何系统/],
+])('安装阶段 %s 的预计下次启动照实说', async (phase, text) => {
+  stubApi({
+    listInstallations: async () => list([{ ...INSTALLING, phase }]),
+    terminalIdentity: async () => ({ next_boot: { kind: 'install', reason: phase, task_id: 'task-install-1', install_id: 'install-1' } }),
+  });
+  renderPage();
+  await userEvent.click(await screen.findByText('美术教室机'));
+  expect(await screen.findByText(text)).toBeTruthy();
+});
+
+it('列表和矩阵把被安装占用的客户机标成安装中，编辑和删除要等安装结束', async () => {
+  stubApi({ listInstallations: async () => list([INSTALLING, { ...INSTALLING, id: 'install-2', mac: 'AABBCCDDEE01', phase: 'cancelled' }]) });
+  renderPage();
+  const row = (await screen.findByText('美术教室机')).closest('tr');
+  expect(await within(row).findByText('安装中')).toBeTruthy();
+  expect(within(row).queryByText('离线')).toBeNull();
+  expect(within(row).getByRole('button', { name: '编辑' }).disabled).toBe(true);
+  expect(within(row).getByRole('button', { name: /删除终端/ }).disabled).toBe(true);
+  expect(within(row).getByRole('button', { name: '编辑' }).title).toMatch(/win11-新装/);
+
+  const other = screen.getByText('一号机').closest('tr');
+  expect(within(other).getByText('在线')).toBeTruthy();
+  expect(within(other).getByRole('button', { name: '编辑' }).disabled).toBe(false);
+
+  await userEvent.click(screen.getByRole('button', { name: '矩阵' }));
+  const cell = screen.getByText('美术教室机').closest('.tmcell');
+  expect(within(cell).getByText('安装中')).toBeTruthy();
+});
+
+it('安装列表读不到时客户机页照常可用', async () => {
+  stubApi({ listInstallations: async () => { throw new Error('boom'); } });
+  renderPage();
+  const row = (await screen.findByText('美术教室机')).closest('tr');
+  expect(within(row).getByText('离线')).toBeTruthy();
+  expect(within(row).getByRole('button', { name: '编辑' }).disabled).toBe(false);
 });

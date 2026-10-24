@@ -25,8 +25,12 @@ import (
 	"github.com/tianwei/diskless/internal/control"
 	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/assets"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/identity"
+	"github.com/tianwei/diskless/internal/control/install"
 	"github.com/tianwei/diskless/internal/control/network"
 	"github.com/tianwei/diskless/internal/control/ops"
+	"github.com/tianwei/diskless/internal/control/pe"
 	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/control/platform"
 	"github.com/tianwei/diskless/internal/control/tasks"
@@ -241,12 +245,24 @@ func main() {
 		os.Exit(1)
 	}
 	placeRouter := &place.Router{Store: st, NodeID: cfg.NodeID, Local: agent, LocalPortal: cfg.PortalAddr, Token: cfg.ClusterToken, Logger: logger}
-	bootService := control.BootService{PortalAddr: cfg.PortalAddr, Store: st, Storage: agent, Builder: boot.Builder{CHAPSecret: chapSecret}, Logger: logger, APIPort: apiPort, Place: placeRouter}
-	adaptationService := adapt.AdaptationService{Store: st}
+	// 机型：/boot 上报的硬件归并与每次开机是否进了系统。
+	hardwareService := &hwprofile.Service{Store: st, Logger: logger}
+	bootService := control.BootService{PortalAddr: cfg.PortalAddr, Store: st, Storage: agent, Builder: boot.Builder{CHAPSecret: chapSecret}, Logger: logger, APIPort: apiPort, Place: placeRouter, Hardware: hardwareService}
+	// 适配环境：镜像自带 WinRE 的提取与 BCD / ADK 包的上传，文件落在随目录复制的文件库里。
+	winpeService := pe.EnvService{Store: st, Storage: agent, Async: true}
 	// driverService/terminalService 在下面接线，自动适配依赖也在那里设置。
-	settingsService := platform.SystemSettingsService{Store: st, FallbackImportDir: cfg.ImportDir}
-	// 运维从自己机器上传镜像：分片落到导入目录，之后走原来的导入。
-	// 会话编号带本机节点标识，主机切换后新主能认出「不是我的会话」并给出准确提示。
+	// 导入目录固定为本机存储池文件库下的 imports：随目录库复制到备机，各节点按自己的池名解析。
+	// cfg.ImportDir（部署时的旧目录）只作为旧文件来源列出，不再使用。
+	settingsService := platform.SystemSettingsService{Store: st, LegacyImportDir: cfg.ImportDir,
+		ImportsDir: func(ctx context.Context) (string, error) {
+			files, err := agent.EnsureFilesDir(ctx)
+			if err != nil {
+				return "", err
+			}
+			return filepath.Join(files, "imports"), nil
+		}}
+	// 运维从自己机器上传镜像：分片落到导入目录（随目录库复制），之后走原来的导入。
+	// 会话编号带本机节点标识；主机切换后新主机接手已复制过来的会话，没复制到的给出准确提示。
 	uploadService := &assets.UploadService{
 		ImportDir: settingsService.ImportDir,
 		NodeID:    cfg.NodeID,
@@ -254,16 +270,16 @@ func main() {
 		Now:       func() time.Time { return time.Now().UTC() },
 	}
 	fullSends := &ha.FullSends{}
-	imageService := assets.ImageService{Store: st, Storage: agent, Async: true, ImportDir: cfg.ImportDir, ImportDirResolver: settingsService.ImportDir,
-		NodeAddr: nodeSelfAddr(cfg), Replicating: fullSends.Sending,
+	imageService := assets.ImageService{Store: st, Storage: agent, Async: true, ImportDirResolver: settingsService.ImportDir,
+		NodeAddr: nodeSelfAddr(cfg), Place: placeRouter, Replicating: fullSends.Sending,
 		MountScriptBake: func(os domain.OSType) ([]byte, string) {
 			if os == domain.OSTypeLinux {
 				return adapt.RenderLinuxMountScript(apiPort), adapt.LinuxMountScriptVersion(apiPort)
 			}
 			return adapt.RenderMountScript(apiPort), adapt.MountScriptVersion(apiPort)
 		}}
-	configService := assets.ConfigService{Store: st, Storage: agent, Async: true, Replicating: fullSends.Sending}
-	reductionService := assets.ReductionService{Store: st, Storage: agent, Async: true}
+	configService := assets.ConfigService{Store: st, Storage: agent, Async: true, Place: placeRouter, Replicating: fullSends.Sending}
+	reductionService := assets.ReductionService{Store: st, Storage: agent, Async: true, Place: placeRouter}
 	// 每条任务记下执行节点，任务列表的「服务器」列读它。
 	tasks.SetNode(hostIPForNode(cfg))
 	nodeRow := domain.Server{
@@ -309,7 +325,34 @@ func main() {
 		logger.Warn("could not register the data pool", "pool", cfg.Pool, "error", err)
 	}
 	userService := platform.UserService{Store: st}
-	driverService := adapt.DriverService{Store: st, Dir: cfg.DriverDir}
+	driverService := adapt.DriverService{Store: st, Dir: cfg.DriverDir, FilesDir: agent.EnsureFilesDir}
+	// PE 会话：客户机进 WinPE 的行程；回报地址与开机脚本回调一样指向本节点对外地址。
+	peSessions := pe.SessionService{Store: st, FilesDir: agent.EnsureFilesDir, Async: true, Logger: logger,
+		ReportBase: "http://" + net.JoinHostPort(cfg.PortalAddr, apiPort)}
+	winpeService.InUse = peSessions.InUse
+	peSessions.EnsureEnv = winpeService.EnsureForImage
+	modelAdaptService := &pe.ModelAdaptService{Store: st, Storage: agent, PE: &peSessions, PortalAddr: cfg.PortalAddr, Place: placeRouter}
+	peSessions.CHAPSecret = chapSecret
+	identityService := &identity.Service{Store: st, PE: &peSessions, Storage: agent, Place: placeRouter, NodeID: cfg.NodeID, Logger: logger}
+	// 网卡模板。未设置时，画像里每块 PCI 网卡都按镜像里已装的网卡和驱动文件现写。
+	// 设置了文件就只允许文件里的型号；文件有误时一台也不套，机器照旧按适配记录开机。
+	if path := os.Getenv("NDISKLESS_NIC_TEMPLATES"); path != "" {
+		identityService.RestrictTemplates = true
+		if list, err := identity.LoadTemplates(path); err != nil {
+			logger.Error("网卡模板名单无效，已按空名单运行", "path", path, "error", err)
+		} else {
+			identityService.Templates = list
+		}
+	}
+	bootService.Identity = identityService
+	peSessions.OnDone = func(ctx context.Context, sess domain.PESession, result pe.PEResult) error {
+		if sess.Mode == domain.PEModeIdentity {
+			return identityService.OnDone(ctx, sess, result)
+		}
+		return modelAdaptService.OnDone(ctx, sess, result)
+	}
+	peSessions.OnFailure = modelAdaptService.OnFailure
+	bootService.PE = peSessions
 	backupService := ops.BackupService{Store: st, Storage: agent}
 	serverService := platform.ServiceService{Client: systemd.Client{}, Units: managedUnits(), Version: version}
 	auditService := platform.AuditService{Store: st}
@@ -326,7 +369,7 @@ func main() {
 	replRoot := cfg.Pool + "/" + storage.CatalogueRoot
 	replicator := &ops.Replicator{
 		Store: st, ZFS: zfsClient, Gate: gate, Root: replRoot,
-		DBSnapshot: st.Snapshot, DBRevision: st.Revision,
+		DBSnapshot: st.Snapshot, DBRevision: st.Revision, IdentityLayers: agent,
 		Now: time.Now, Logger: logger, LiveDBPath: liveDBPath(cfg.DBDSN), SelfURL: selfAPIURL(cfg)}
 	if cfg.PortalAddr != "" && cfg.PortalAddr != nodeSelfAddr(cfg) {
 		// 复制源是 VIP：VIP 在本机时向它拉就是向自己拉。
@@ -350,6 +393,15 @@ func main() {
 			return res.Items, err
 		},
 	}
+	// 导入的文件会复制到每台备机：上传前按剩余最少的备机池判断放不放得下。
+	uploadService.StandbyFree = func(ctx context.Context) ([]assets.NodeFree, error) {
+		res, err := clusterPools.List(ctx)
+		if err != nil {
+			return nil, err
+		}
+		return standbyPoolFree(res), nil
+	}
+	legacyImports := &assets.LegacyImports{Dirs: settingsService.LegacyImportDirs, ImportDir: settingsService.ImportDir, Uploads: uploadService}
 	// 被保留的目录副本在保住它的那台上，告警只在写入者评估，所以由写入者挨个问。
 	clusterPreserved := platform.ClusterPreserved{
 		Store: st, NodeID: cfg.NodeID, Token: cfg.ClusterToken,
@@ -372,7 +424,7 @@ func main() {
 	if cfg.PeerURL != "" {
 		alarmService.Rules = append(alarmService.Rules, platform.TakeoverAlarmRule(
 			func() (ha.TakeoverReport, bool) { return ha.ReadTakeoverReport(takeoverReport) },
-			func() time.Time { return time.Now().UTC() }))
+			func() time.Time { return time.Now().UTC() }, reconcileService.MissingDatasets))
 	}
 	const tftpRoot = "/srv/tftp"
 	if err := tftpassets.WriteTo(tftpRoot); err != nil {
@@ -390,17 +442,40 @@ func main() {
 	}
 	networkService = network.Service{Store: st, BootHost: storageServerFromBootURL(cfg.BootURL), BaseConfPath: dnsmasqBaseConf, Base: dhcpManager, Logger: logger}
 	groupService := assets.GroupService{Store: st, DHCP: dhcpManager, Logger: logger, LocalAddrs: localIPv4Addrs, Network: networkService.Client}
+	isoRuntime := install.Runtime{FilesDir: agent.EnsureFilesDir, ReportBase: peSessions.ReportBase, APIPort: apiPort, CHAPSecret: chapSecret, PE: peSessions}
+	isoInspector := install.Inspector{ImportDir: settingsService.ImportDir}
+	installationService := &install.Service{
+		Store: st, Storage: agent, Host: agent, Builder: boot.Builder{CHAPSecret: chapSecret},
+		NodeID: cfg.NodeID, ReportBase: peSessions.ReportBase, Network: networkService.Client,
+		SyncDHCP: groupService.SyncDHCP, ImportDir: settingsService.ImportDir,
+		InspectSource: isoInspector.Inspect, Prepare: isoRuntime.Prepare, Render: isoRuntime.Render,
+		MountScript: isoRuntime.MountScript, RedactSecrets: isoRuntime.RedactSecrets, CanWrite: gate.Allow, Async: true,
+		BakeMountScript: func() ([]byte, string) { return adapt.RenderMountScript(apiPort), adapt.MountScriptVersion(apiPort) },
+		FilesDir:        agent.EnsureFilesDir,
+		CleanupRemote: func(ctx context.Context, req storage.InstallationCleanupReq) error {
+			node, err := st.Servers().Get(ctx, req.NodeID)
+			if err != nil {
+				return err
+			}
+			if node.APIURL == "" {
+				return fmt.Errorf("请恢复原安装节点「%s」后重试结束安装", req.NodeID)
+			}
+			return (remote.Client{BaseURL: node.APIURL, Token: cfg.ClusterToken}).CleanupInstallationResources(ctx, req)
+		},
+	}
+	bootService.Install = installationService
+	localTaskLog := func(ctx context.Context, id, name string) (pe.PEFile, error) {
+		task, err := st.Tasks().Get(ctx, id)
+		if err != nil {
+			return pe.PEFile{}, err
+		}
+		if task.Type == domain.TaskTypeInstallImage {
+			return installationService.TaskLog(ctx, id, name)
+		}
+		return peSessions.TaskLog(ctx, id, name)
+	}
 	groupDiskService := assets.GroupDiskService{Store: st}
 	terminalService := assets.TerminalService{Store: st, DHCP: dhcpManager, Storage: agent, Logger: logger, BackupTrigger: backupService.Trigger, Async: true, Place: placeRouter}
-	// 驱动注入：离线把驱动包和开机安装脚本放进超管克隆，运维随后用 StopSuper 保存结果。
-	adaptationService.Storage = agent
-	adaptationService.Place = placeRouter
-	adaptationService.Logger = logger
-	adaptationService.APIPort = apiPort
-	adaptationService.BundleZip = func(ctx context.Context, bundleID string) ([]byte, error) {
-		_, data, err := driverService.BundleArchive(ctx, bundleID)
-		return data, err
-	}
 	if err := networkService.SyncBaseAtStartup(context.Background()); err != nil {
 		logger.Error("dnsmasq base config sync failed; dnsmasq keeps listening the way it was configured", "error", err)
 	}
@@ -456,6 +531,17 @@ func main() {
 	// 否则临时克隆要等它的客户机下次开机才清，轮换使用的机房每台机器积一个死数据集。
 	// 回收比对账慢得多：不急（宽限期远大于周期），每次回收要拆 configfs 再 zfs destroy。
 	gatedLoop(time.Minute, terminalService.RunCloneReclaimer)
+	// 等不到客户机进 WinPE 的会话要判超时，否则任务一直显示执行中、客户机下次开机还会被引到 WinPE。
+	gatedLoop(time.Minute, peSessions.RunExpirer)
+	gatedLoop(time.Minute, identityService.RunRebuilder)
+	// Installation checkpoints survive service restarts; each resumed mutation rechecks the writer gate.
+	gatedLoop(10*time.Second, func(ctx context.Context, _ time.Duration) {
+		installationService.Resume(ctx)
+		installationService.RunSweeper(ctx)
+	})
+	if gate.Allow() == nil {
+		go modelAdaptService.ResumeFinalizing(context.Background())
+	}
 	// 只有写入者决定何时备份一轮并打标记，标记随复制到达各节点。
 	gatedLoop(time.Minute, backupService.RunScheduler)
 	// 送副本则是每个节点自己的事，写入者也一样，所以不过闸门：备机有完整目录副本和
@@ -488,7 +574,7 @@ func main() {
 	const switchFile = "/run/ndiskless.switching"
 	ha.ClearSwitching(switchFile)
 
-	health := nodeHealth(st, zfsClient, cfg.Role, func() string { return readDataPool(liveDBPath(cfg.DBDSN)) })
+	health := nodeHealth(st, zfsClient, cfg.Role, func() string { return readDataPool(liveDBPath(cfg.DBDSN)) }, logger)
 	haController := &ha.Controller{
 		NodeID:       cfg.NodeID,
 		RoleFile:     roleFile,
@@ -524,7 +610,7 @@ func main() {
 			return ops.CompleteMarker(inv, replRoot)
 		},
 		Healthy: func(ctx context.Context) bool { return health(ctx) == nil },
-		CatalogueIncomplete: func(ctx context.Context) []string {
+		CatalogueIncomplete: func(ctx context.Context) []ha.MissingDataset {
 			copyDir, err := zfsClient.EnsureDBCopyDataset(ctx)
 			if err != nil {
 				return nil
@@ -697,6 +783,10 @@ func main() {
 			case <-sweepCtx.Done():
 				return
 			case <-ticker.C:
+				// 备机上的导入目录是复制来的，由写入者清理后随复制同步过去。
+				if gate.Allow() != nil {
+					continue
+				}
 				if n := uploadService.Reap(sweepCtx, 24*time.Hour); n > 0 {
 					logger.Info("清理了没人续传的上传分片", "count", n)
 				}
@@ -958,7 +1048,7 @@ func main() {
 		NodeBackup:     backupService.LocalStatus,
 		NodePreserved:  agent.PreservedCopies,
 		NodeTasks:      func(ctx context.Context) ([]domain.Task, error) { return platform.NodePoolTasks(ctx, st) },
-		StorageHandler: remote.Handler{Agent: agent, Token: cfg.ClusterToken},
+		StorageHandler: remote.Handler{Agent: agent, Token: cfg.ClusterToken, NodeID: cfg.NodeID, CleanupInstallation: installationService.CleanupLocalInstallation},
 		HA: ha.StatusService{Controller: haController, NodeID: cfg.NodeID, PeerURL: cfg.PeerURL, Peer: haController.Peer,
 			Rate: func(ctx context.Context) (int, string, error) {
 				return settingsService.ReplicationRate(ctx, cfg.ReplicationRateMBPerSec)
@@ -1013,7 +1103,7 @@ func main() {
 				_ = st.ReplicationStates().Upsert(context.Background(), row)
 			}},
 		Replication: replicator,
-		Boot:        bootService, BootPeerCheckOff: envBool("NDISKLESS_BOOT_PEER_CHECK_OFF"), Auth: authService, Images: imageService, Uploads: uploadService, Configs: configService, Reductions: reductionService, Groups: groupService, GroupDisks: groupDiskService, Terminals: terminalService, Pools: poolService, Users: userService, Backups: backupService, Consistency: reconcileService, Settings: settingsService, Network: networkService, Tasks: platform.ClusterTasks{Store: st, Local: imageService, NodeID: cfg.NodeID, Token: cfg.ClusterToken}, Drivers: driverService, Adaptations: adaptationService, Server: serverService, Audit: auditService, Alarms: alarmService, Runtime: api.RuntimeConfig{ImportDir: cfg.ImportDir}})
+		Boot:        bootService, BootPeerCheckOff: envBool("NDISKLESS_BOOT_PEER_CHECK_OFF"), Auth: authService, Images: imageService, Uploads: uploadService, LegacyImports: legacyImports, Configs: configService, Reductions: reductionService, Groups: groupService, GroupDisks: groupDiskService, Terminals: terminalService, Pools: poolService, Users: userService, Backups: backupService, Consistency: reconcileService, Settings: settingsService, Network: networkService, Tasks: platform.ClusterTasks{Store: st, Local: imageService, NodeID: cfg.NodeID, Token: cfg.ClusterToken, LocalTaskLog: localTaskLog}, Drivers: driverService, WinPE: winpeService, PE: peSessions, Install: installationService, LocalTaskLog: localTaskLog, ModelAdapt: modelAdaptService, Identity: identityService, Models: api.ModelAPI{Service: *hardwareService}, Server: serverService, Audit: auditService, Alarms: alarmService, Runtime: api.RuntimeConfig{}})
 	server := &http.Server{
 		Addr:    cfg.Addr,
 		Handler: router,
@@ -1023,8 +1113,8 @@ func main() {
 		"addr", cfg.Addr,
 		"db_dsn", cfg.DBDSN,
 		"pool", cfg.Pool,
-		"fallback_import_dir", cfg.ImportDir,
-		"effective_import_dir", effectiveImportDir(context.Background(), settingsService, cfg.ImportDir),
+		"import_dir", effectiveImportDir(context.Background(), settingsService),
+		"legacy_import_dirs", settingsService.LegacyImportDirs(context.Background()),
 		"dnsmasq_conf", cfg.DnsmasqConf,
 		"workers", cfg.Workers,
 	)
@@ -1040,7 +1130,7 @@ func bootURLWithHints(raw string) string {
 	if raw == "" || strings.Contains(raw, "platform=") {
 		return raw
 	}
-	return raw + "&platform=${platform}&busid=${net0/busid}&manufacturer=${manufacturer:uristring}&product=${product:uristring}"
+	return raw + "&platform=${platform}&busid=${net0/busid}&busloc=${net0/busloc}&manufacturer=${manufacturer:uristring}&product=${product:uristring}"
 }
 
 func storageServerFromBootURL(raw string) string {
@@ -1051,12 +1141,33 @@ func storageServerFromBootURL(raw string) string {
 	return u.Hostname()
 }
 
-func effectiveImportDir(ctx context.Context, settings platform.SystemSettingsService, fallback string) string {
+func effectiveImportDir(ctx context.Context, settings platform.SystemSettingsService) string {
 	dir, err := settings.ImportDir(ctx)
-	if err != nil || strings.TrimSpace(dir) == "" {
-		return fallback
+	if err != nil {
+		return "（" + err.Error() + "）"
 	}
 	return dir
+}
+
+// standbyPoolFree 取联系得上的其它节点数据池的剩余空间；联系不上的不算（不因一台离线挡住上传）。
+func standbyPoolFree(res platform.ClusterPoolsResult) []assets.NodeFree {
+	var out []assets.NodeFree
+	for _, n := range res.Nodes {
+		if n.IsSelf || !n.Reachable {
+			continue
+		}
+		for _, p := range n.Pools {
+			if p.Role != ops.PoolRoleData {
+				continue
+			}
+			name := n.IP
+			if name == "" {
+				name = n.NodeID
+			}
+			out = append(out, assets.NodeFree{Node: name, Free: p.Capacity - p.Used})
+		}
+	}
+	return out
 }
 
 // holdsAddr 判断该地址当前是否配在本机上，节点靠它区分「keepalived 把 VIP 给了我」和「VIP 在对端」。
@@ -1423,8 +1534,20 @@ func unprovisionedNonStandby(dataPool, role string) bool {
 // nodeHealth 是 /healthz 的报告，也是 keepalived track_script 读的结果：库可读写、数据池可读且健康、
 // LIO configfs 存在、运维未打维护标记。每条原因都写给看到 VIP 迁走的运维。
 // localDataPool 在检查时读取而非接线时捕获：无池装机的节点可能几分钟后才在界面建池。
-func nodeHealth(st *store.SQLStore, zfsClient *zfs.Client, role string, localDataPool func() string) func(context.Context) error {
+func nodeHealth(st *store.SQLStore, zfsClient *zfs.Client, role string, localDataPool func() string, logger *slog.Logger) func(context.Context) error {
+	pools := &poolStatusCache{fetch: zfsClient.PoolStatus, now: time.Now, every: 5 * time.Second, staleAfter: 30 * time.Second}
 	return func(ctx context.Context) error {
+		// 探针只等几秒：慢了就记下每步耗时，查得出是库还是池拖慢了它。
+		start, mark, steps := time.Now(), time.Now(), []any{}
+		step := func(name string) {
+			steps = append(steps, name, time.Since(mark).Round(time.Millisecond).String())
+			mark = time.Now()
+		}
+		defer func() {
+			if d := time.Since(start); d > time.Second && logger != nil {
+				logger.Warn("健康检查慢", append([]any{"total", d.Round(time.Millisecond).String()}, steps...)...)
+			}
+		}()
 		// 池名在检查时取：无池装机后在界面建池会不重启地 SetPool；/healthz 决定 VIP 归属，
 		// 不跟上的话节点会对着旧默认名（tank）永远 503，新建的池明明 ONLINE 也拿不到 VIP。
 		pool := zfsClient.PoolName()
@@ -1439,11 +1562,14 @@ func nodeHealth(st *store.SQLStore, zfsClient *zfs.Client, role string, localDat
 		if err := st.Ping(ctx); err != nil {
 			return fmt.Errorf("数据库无响应: %w", err)
 		}
+		step("db_ping")
 		// 光能读不够：磁盘满或只读重挂时读都正常、写全失败，而本节点是唯一允许写的。
 		if err := st.CheckWritable(ctx); err != nil {
 			return fmt.Errorf("数据库不可写（磁盘满或文件只读）: %w", err)
 		}
-		status, err := zfsClient.PoolStatus(ctx, pool)
+		step("db_write")
+		status, err := pools.get(ctx, pool)
+		step("pool")
 		if err != nil {
 			// 还没建池的独立节点是「还没配」不是「坏了」，让它健康，VIP 才落得下来，运维才能从 VIP 进来建池。
 			if unprovisionedNonStandby(localDataPool(), role) {

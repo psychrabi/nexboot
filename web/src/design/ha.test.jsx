@@ -85,7 +85,7 @@ describe('HACard', () => {
 
     await user.click(screen.getByRole('button', { name: '计划切换' }));
     // 确认弹窗用操作者的话说明后果
-    expect(await screen.findByText(/运行中的普通客户机会重启一次/)).toBeTruthy();
+    expect(await screen.findByText(/在线普通客户机需要重新开机/)).toBeTruthy();
     await user.click(screen.getByRole('button', { name: '切换' }));
     await waitFor(() => expect(api.plannedSwitch).toHaveBeenCalled());
   });

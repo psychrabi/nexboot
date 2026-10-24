@@ -8,6 +8,8 @@ import (
 	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/control/tasks"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
@@ -61,6 +63,7 @@ type ReductionService struct {
 	Storage storage.StorageAgent
 	Now     func() time.Time
 	Async   bool
+	Place   *place.Router
 }
 
 type ReductionListResult struct {
@@ -165,6 +168,9 @@ func (s ReductionService) executeCreate(ctx context.Context, task domain.Task, c
 		if err := tx.Reductions().Create(ctx, reduction); err != nil {
 			return err
 		}
+		if err := hwprofile.InheritLatest(ctx, tx, reduction, time.Now().UTC()); err != nil {
+			return err
+		}
 		if cfg.DefaultReductionID == nil || setCurrent {
 			if err := setConfigCurrent(ctx, tx, configID, reduction.ID); err != nil {
 				return err
@@ -196,10 +202,7 @@ func (s ReductionService) SetCurrent(ctx context.Context, reductionID string) (S
 	terminalAllocMu.Lock()
 	defer terminalAllocMu.Unlock()
 
-	if err := refuseSuperConfigChange(ctx, s.Store, cfg.ID, "应用还原点"); err != nil {
-		return SetCurrentResult{}, err
-	}
-
+	// 超管期间放行：只移动指针，不影响超管机的持久盘和保存。
 	claim, err := claimConfigImage(ctx, s.Store, taskTypeApplyReduction, cfg.ImageID, cfg.ID)
 	if err != nil {
 		return SetCurrentResult{}, err
@@ -284,7 +287,18 @@ func (s ReductionService) Delete(ctx context.Context, reductionID string) (Reduc
 	if err != nil {
 		return ReductionTaskResult{}, err
 	}
-	if err := s.ensureReductionRemovable(ctx, ix, &cfg, reduction); err != nil {
+	idle, err := s.ensureReductionRemovable(ctx, ix, &cfg, reduction)
+	if err != nil {
+		return ReductionTaskResult{}, err
+	}
+	layers, err := nodeLayers(ctx, s.Store, []string{reductionID}, ErrReductionHasDependents)
+	if err != nil {
+		return ReductionTaskResult{}, err
+	}
+	if err := clearIdentityCaches(ctx, s.Storage, idle, reduction.ConfigID+"@"+strings.TrimPrefix(reduction.Name, "@")); err != nil {
+		return ReductionTaskResult{}, err
+	}
+	if err := clearNodeLayers(ctx, s.Place, layers); err != nil {
 		return ReductionTaskResult{}, err
 	}
 	task, err := claim.Run(ctx, s.runner(), domain.TaskTypeDeleteReduction, reductionID, func(ctx context.Context, task domain.Task) error {
@@ -304,6 +318,9 @@ func (s ReductionService) executeDelete(ctx context.Context, task domain.Task, r
 	}
 	return s.Store.Tx(ctx, func(tx store.Store) error {
 		if err := tx.Reductions().Delete(ctx, reductionID); err != nil {
+			return err
+		}
+		if err := tx.ModelAdaptations().DeleteByReduction(ctx, reductionID); err != nil {
 			return err
 		}
 		if err := s.repairDefaultReduction(ctx, tx, reduction.ConfigID, ""); err != nil {
@@ -372,11 +389,29 @@ func (s ReductionService) Merge(ctx context.Context, configID string, req MergeR
 	if err != nil {
 		return ReductionTaskResult{}, err
 	}
+	var idle []string
 	for _, item := range doomed {
-		if err := s.ensureReductionRemovable(ctx, ix, nil, item); err != nil {
+		macs, err := s.ensureReductionRemovable(ctx, ix, nil, item)
+		if err != nil {
 			return ReductionTaskResult{}, err
 		}
+		idle = append(idle, macs...)
 	}
+	layers, err := nodeLayers(ctx, s.Store, reductionIDsOf(doomed), ErrReductionHasDependents)
+	if err != nil {
+		return ReductionTaskResult{}, err
+	}
+	sources := make([]string, 0, len(doomed))
+	for _, r := range doomed {
+		sources = append(sources, r.ConfigID+"@"+strings.TrimPrefix(r.Name, "@"))
+	}
+	if err := clearIdentityCaches(ctx, s.Storage, idle, sources...); err != nil {
+		return ReductionTaskResult{}, err
+	}
+	if err := clearNodeLayers(ctx, s.Place, layers); err != nil {
+		return ReductionTaskResult{}, err
+	}
+
 	task, err := claim.Run(ctx, s.runner(), domain.TaskTypeMergeReduction, configID, func(ctx context.Context, task domain.Task) error {
 		return s.executeMerge(ctx, task, configID, keep.ID, doomed)
 	})
@@ -407,6 +442,9 @@ func (s ReductionService) executeMerge(ctx context.Context, task domain.Task, co
 			if err := tx.Reductions().Delete(ctx, item.ID); err != nil {
 				return err
 			}
+			if err := tx.ModelAdaptations().DeleteByReduction(ctx, item.ID); err != nil {
+				return err
+			}
 		}
 		if err := s.repairDefaultReduction(ctx, tx, configID, keepID); err != nil {
 			return err
@@ -424,43 +462,47 @@ func (s ReductionService) executeMerge(ctx context.Context, task domain.Task, co
 
 // ensureReductionRemovable 同时查库内引用（分组、客户机克隆）和池上依赖（fork 直接克隆快照，库里不记）。
 // 不查池，ZFS 会在执行中以原文失败，还会建议会连带删掉依赖的 `destroy -R`。
-// 调用方自己改配置指向时（合并）cfg 为 nil。
-func (s ReductionService) ensureReductionRemovable(ctx context.Context, ix refIndex, cfg *domain.Config, reduction domain.Reduction) error {
+// 调用方自己改配置指向时（合并）cfg 为 nil。返回关机客户机的身份层，由调用方在所有检查通过后清掉。
+func (s ReductionService) ensureReductionRemovable(ctx context.Context, ix refIndex, cfg *domain.Config, reduction domain.Reduction) ([]string, error) {
 	dependents, err := s.Storage.ReductionDependents(ctx, reduction.ConfigID, reduction.Name)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotImplemented) {
 			// 存储层答不了这个问题时，「正在使用」仍然要拦。
 			if err := s.ensureNotApplied(ctx, ix, cfg, reduction); err != nil {
-				return err
+				return nil, err
 			}
 			if ix.reductionInUse(reduction.ID) {
-				return ErrReductionInUse
+				return nil, ErrReductionInUse
 			}
-			return nil
+			return nil, nil
 		}
 		// 快照已丢失的还原点开不了机，必须删得掉：无人引用直接放行；仍被引用时不替运维决定改指哪里，
 		// 但要说清先切当前应用点再删，而不是只回「正在使用中」。
 		if errors.Is(err, storage.ErrSnapshotMissing) {
 			if !ix.reductionInUse(reduction.ID) {
-				return nil
+				return nil, nil
 			}
-			return errs.Conflict(fmt.Sprintf(
+			return nil, errs.Conflict(fmt.Sprintf(
 				"还原点 %s 的快照在存储池上已丢失，它已经不能用来开机，但仍被引用着。"+
 					"请先把该配置的当前应用点切到其它还原点，再删除它",
 				displayNameOf(reduction)))
 		}
-		return err
+		return nil, err
 	}
-	if len(dependents) > 0 {
-		return blocked(ErrReductionHasDependents, explainBlockers(ctx, s.Store, dependents, "该还原点"))
+	idle, blockers, err := splitIdentityCaches(ctx, s.Store, s.Storage, dependents)
+	if err != nil {
+		return nil, err
+	}
+	if len(blockers) > 0 {
+		return nil, blocked(ErrReductionHasDependents, explainBlockers(ctx, s.Store, blockers, "该还原点"))
 	}
 	if err := s.ensureNotApplied(ctx, ix, cfg, reduction); err != nil {
-		return err
+		return nil, err
 	}
 	if ix.reductionInUse(reduction.ID) {
-		return ErrReductionInUse
+		return nil, ErrReductionInUse
 	}
-	return nil
+	return idle, nil
 }
 
 // repairDefaultReduction 保证配置默认还原点存在。用户选的默认点只要还在就不动；
@@ -536,4 +578,9 @@ func (s ReductionService) ensureNotApplied(ctx context.Context, ix refIndex, cfg
 	}
 	return errs.Conflict(fmt.Sprintf("还原点「%s」是配置「%s」当前应用的还原点%s；请先应用该配置的其它还原点，再删除它",
 		displayNameOf(reduction), cfg.Name, who))
+}
+
+// ValidateReductionName keeps PE adaptation naming consistent with restore-point creation.
+func ValidateReductionName(raw string, existing []domain.Reduction) (string, string, error) {
+	return validateReductionName(raw, existing)
 }

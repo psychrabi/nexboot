@@ -3,10 +3,13 @@ package platform
 import (
 	"context"
 	"log/slog"
+	"strings"
 	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
 	"github.com/tianwei/diskless/internal/domain"
+	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/store"
 )
 
@@ -45,8 +48,20 @@ type AlarmQuery struct {
 	Size     int
 }
 
+// AlarmView 的操作入口按当前目录生成，不写入历史告警。
+type AlarmView struct {
+	domain.Alarm
+	ModelAdapt *AlarmModelAdapt `json:",omitempty"`
+}
+
+type AlarmModelAdapt struct {
+	ProfileID  string
+	ConfigID   string
+	TerminalID string
+}
+
 type AlarmListResult struct {
-	Items   []domain.Alarm     `json:"items"`
+	Items   []AlarmView        `json:"items"`
 	Total   int                `json:"total"`
 	Page    int                `json:"page"`
 	Size    int                `json:"size"`
@@ -171,10 +186,45 @@ func (s AlarmService) List(ctx context.Context, q AlarmQuery) (AlarmListResult, 
 	if err != nil {
 		return AlarmListResult{}, err
 	}
-	if items == nil {
-		items = []domain.Alarm{}
+	views := make([]AlarmView, len(items))
+	candidates := false
+	for i, a := range items {
+		views[i].Alarm = a
+		if a.Source == "boot" && a.Value == domain.BootStageWindows && a.Status != "recovered" {
+			candidates = true
+		}
 	}
-	return AlarmListResult{Items: items, Total: total, Page: page, Size: size, Summary: summary}, nil
+	if candidates {
+		terminals, err := s.Store.Terminals().List(ctx)
+		if err != nil {
+			return AlarmListResult{}, err
+		}
+		failing, err := (hwprofile.Service{Store: s.Store, Now: s.Now}).FailingByGroup(ctx)
+		if err != nil {
+			return AlarmListResult{}, err
+		}
+		byMAC := make(map[string]domain.Terminal, len(terminals))
+		for _, t := range terminals {
+			byMAC[storage.NormalizeMAC(t.MAC)] = t
+		}
+		for i := range views {
+			a := &views[i]
+			if a.Source != "boot" || a.Value != domain.BootStageWindows || a.Status == "recovered" || !strings.HasPrefix(a.AlarmKey, "boot:") {
+				continue
+			}
+			t, ok := byMAC[storage.NormalizeMAC(strings.TrimPrefix(a.AlarmKey, "boot:"))]
+			if !ok {
+				continue
+			}
+			for _, m := range failing[t.GroupID] {
+				if m.ProfileID == t.HardwareProfileID {
+					a.ModelAdapt = &AlarmModelAdapt{ProfileID: m.ProfileID, ConfigID: m.ConfigID, TerminalID: t.ID}
+					break
+				}
+			}
+		}
+	}
+	return AlarmListResult{Items: views, Total: total, Page: page, Size: size, Summary: summary}, nil
 }
 
 // Acknowledge 把活动告警静默，条件消失时仍会自动恢复；对非活动告警确认会返回错误。

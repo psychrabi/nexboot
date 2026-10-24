@@ -995,6 +995,9 @@ func (s PoolService) ownerGone(ctx context.Context, pool domain.Pool) bool {
 }
 
 func (s PoolService) Destroy(ctx context.Context, id string) (PoolTaskResult, error) {
+	if err := s.ensureNoInstallation(ctx, id); err != nil {
+		return PoolTaskResult{}, err
+	}
 	if pool, err := s.Store.Pools().Get(ctx, id); err == nil && s.ownerGone(ctx, pool) {
 		// 节点已经不在：它的池只能在这里清记录，否则「移出集群」永远卡在
 		// 「名下还有存储池」。不碰任何磁盘；节点回来时心跳会把池重新报上来。
@@ -1023,6 +1026,9 @@ func (s PoolService) Destroy(ctx context.Context, id string) (PoolTaskResult, er
 }
 
 func (s PoolService) executeDestroy(ctx context.Context, task domain.Task, pool domain.Pool) error {
+	if err := s.ensureNoInstallation(ctx, pool.ID); err != nil {
+		return err
+	}
 	// 池已不存在就是目标状态：记录可能比池活得久（建池失败、拔盘、手动 export），
 	// 这里报错会留下一行永远删不掉的记录。
 	if err := s.Storage.DestroyPool(ctx, pool.Name); err != nil && !zfs.IsNotExist(err) {
@@ -1032,6 +1038,9 @@ func (s PoolService) executeDestroy(ctx context.Context, task domain.Task, pool 
 }
 
 func (s PoolService) dropPoolRecord(ctx context.Context, task domain.Task, pool domain.Pool) error {
+	if err := s.ensureNoInstallation(ctx, pool.ID); err != nil {
+		return err
+	}
 	return s.Store.Tx(ctx, func(tx store.Store) error {
 		disks, err := tx.PoolDisks().List(ctx)
 		if err != nil {
@@ -1269,6 +1278,9 @@ func (s PoolService) ensurePoolCountBelowLimit(ctx context.Context, name string)
 // ensurePoolNotInUse 只拦数据池的销毁（镜像、配置、克隆都在上面）；其他池不放这些东西，
 // 不能因为“存在任何镜像”就拦。
 func (s PoolService) ensurePoolNotInUse(ctx context.Context, pool domain.Pool) error {
+	if err := s.ensureNoInstallation(ctx, pool.ID); err != nil {
+		return err
+	}
 	if s.Storage == nil || pool.Name != s.Storage.DataPoolName() {
 		return nil
 	}
@@ -1509,4 +1521,17 @@ func (s PoolService) PoolReport(ctx context.Context, names []string) (ha.PoolRep
 		}
 	}
 	return report, nil
+}
+
+func (s PoolService) ensureNoInstallation(ctx context.Context, poolID string) error {
+	sessions, err := s.Store.InstallSessions().List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, sess := range sessions {
+		if sess.Active() && sess.PoolID == poolID {
+			return errs.Conflict("请先完成或取消客户机「" + sess.MAC + "」创建镜像的任务，再销毁它使用的存储池")
+		}
+	}
+	return nil
 }

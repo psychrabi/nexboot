@@ -3,6 +3,7 @@ package control
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -77,6 +78,7 @@ func TestCheckBootModeRecordsOnlyAMismatch(t *testing.T) {
 		{"BIOS 客户机开仅 UEFI 的镜像", []string{domain.BootModeUEFI}, "pcbios", true},
 		{"两种都支持", []string{domain.BootModeBIOS, domain.BootModeUEFI}, "efi", false},
 		{"体检没判出来", nil, "efi", false},
+		{"Windows 无体检 + BIOS", nil, "pcbios", true},
 		{"客户机没报平台", []string{domain.BootModeBIOS}, "", false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -94,5 +96,72 @@ func TestCheckBootModeRecordsOnlyAMismatch(t *testing.T) {
 				t.Fatalf("stage = %s", rows[0].Stage)
 			}
 		})
+	}
+}
+
+func TestDisklessFirmwareRejectBlocksBIOSWindowsWithoutSanboot(t *testing.T) {
+	st := seedBootStore(t)
+	service := BootService{Store: st}
+
+	script, reject, err := service.DisklessFirmwareReject(context.Background(), "aa:bb:cc:dd:ee:ff", "pcbios")
+	if err != nil || !reject {
+		t.Fatalf("reject=%v err=%v", reject, err)
+	}
+	for _, want := range []string{
+		"#!ipxe",
+		"Diskless boot blocked",
+		"BIOS/Legacy",
+		"platform=pcbios",
+		"UEFI-only",
+		"Booting from SAN device",
+		"snponly.efi",
+		"undionly.kpxe",
+		"Firmware = EFI",
+		"Network only",
+		"sleep 30",
+		"exit",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("prompt missing %q in:\n%s", want, script)
+		}
+	}
+	for _, r := range script {
+		if r > 127 {
+			t.Fatalf("iPXE prompt must be ASCII-only, found %q (U+%04X)", r, r)
+		}
+	}
+	if rows, _ := st.BootFailures().List(context.Background()); len(rows) != 1 || rows[0].Stage != domain.BootStageBootMode {
+		t.Fatalf("failures = %#v", rows)
+	}
+
+	// UEFI client must not be rejected.
+	if script, reject, err := service.DisklessFirmwareReject(context.Background(), "aa:bb:cc:dd:ee:ff", "efi"); err != nil || reject || script != "" {
+		t.Fatalf("efi reject=%v script=%q err=%v", reject, script, err)
+	}
+}
+
+func TestDisklessFirmwareRejectAllowsBIOSWhenImageListsBIOS(t *testing.T) {
+	st := seedBootStore(t)
+	seedBootModes(t, st, domain.BootModeBIOS, domain.BootModeUEFI)
+	service := BootService{Store: st}
+	if _, reject, err := service.DisklessFirmwareReject(context.Background(), "AABBCCDDEEFF", "pcbios"); err != nil || reject {
+		t.Fatalf("reject=%v err=%v", reject, err)
+	}
+}
+
+func TestDisklessFirmwareRejectSkipsLinuxWithoutHealthModes(t *testing.T) {
+	st := seedBootStore(t)
+	ctx := context.Background()
+	img, err := st.Images().Get(ctx, "img-1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img.OSType = domain.OSTypeLinux
+	if err := st.Images().Update(ctx, img); err != nil {
+		t.Fatal(err)
+	}
+	service := BootService{Store: st}
+	if _, reject, err := service.DisklessFirmwareReject(ctx, "AABBCCDDEEFF", "pcbios"); err != nil || reject {
+		t.Fatalf("linux without modes must not reject: reject=%v err=%v", reject, err)
 	}
 }

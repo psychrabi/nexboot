@@ -18,7 +18,6 @@ import (
 	"sync"
 	"time"
 
-	"github.com/tianwei/diskless/internal/config"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/storage/iscsi"
@@ -41,6 +40,7 @@ type ZFS interface {
 	PruneSnapshots(ctx context.Context, root, prefix string, keep int) error
 	EnsureFilesystem(ctx context.Context, dataset string) error
 	EnsureDBCopyDataset(ctx context.Context) (string, error)
+	EnsureFilesDataset(ctx context.Context) (string, error)
 	Rename(ctx context.Context, source, dataset string) error
 	ReceiveFile(ctx context.Context, filePath, dataset string, onProgress func(percent int)) error
 	SendSnapshot(ctx context.Context, snapshot string, w io.Writer) error
@@ -90,11 +90,12 @@ type ZFS interface {
 var _ ZFS = (*zfs.Client)(nil)
 
 type Agent struct {
-	server   string
-	zfs      ZFS
-	exporter Exporter
-	runner   runner
-	qemu     *qemu.Client
+	identityWriteFn func(context.Context, string, storage.IdentityLayerReq) error
+	server          string
+	zfs             ZFS
+	exporter        Exporter
+	runner          runner
+	qemu            *qemu.Client
 	// 每个 MAC 一把锁：同一客户机的供给与回收不能交错，否则回收会销毁开机
 	// 路径刚克隆的数据集。不同客户机互不阻塞，开机风暴不受影响。
 	cloneLocks sync.Map
@@ -208,7 +209,6 @@ func (a *Agent) CreateClientLUN(ctx context.Context, req storage.ClientReq) (sto
 		return storage.LUNInfo{}, fmt.Errorf("mac is required")
 	}
 	defer a.lockClient(req.MAC)()
-	a.provisionedAt.Store(storage.NormalizeMAC(req.MAC), time.Now())
 	return a.createClientLUN(ctx, req)
 }
 
@@ -221,6 +221,7 @@ func (a *Agent) createClientLUN(ctx context.Context, req storage.ClientReq) (sto
 	if err := a.teardownForBoot(ctx, req, datasets); err != nil {
 		return storage.LUNInfo{}, err
 	}
+	a.provisionedAt.Store(storage.NormalizeMAC(req.MAC), time.Now())
 	info, err := a.createClientDisks(ctx, req, datasets)
 	if err != nil && !req.Super {
 		// 普通克隆是一次性的，要么全成要么全无；残缺的 target 不符合分组约定，整体回滚。
@@ -240,6 +241,9 @@ func (a *Agent) SuperStart(ctx context.Context, req storage.ClientReq) (storage.
 // backstore 会占住 zvol，不先释放，后面的销毁和挂载脚本注入都会 EBUSY。
 // 普通开机还会丢弃残留的超管克隆；超管开机保留 SCLIENT 数据集复用。
 func (a *Agent) teardownForBoot(ctx context.Context, req storage.ClientReq, datasets []string) error {
+	if err := a.ordinaryTargetAvailable(req.MAC, datasets); err != nil {
+		return err
+	}
 	clientClones := clientCloneDatasets(a.zfs, req.MAC, datasets)
 	superClones := superClientCloneDatasets(a.zfs, req.MAC, datasets)
 	if a.exporter != nil {
@@ -344,7 +348,11 @@ func (a *Agent) createClientDisks(ctx context.Context, req storage.ClientReq, da
 	for _, d := range disks {
 		dataset := a.zfs.Dataset(d.name)
 		if existing == nil || !existing[dataset] {
-			if err := a.zfs.Clone(ctx, a.zfs.Snapshot(d.source.ConfigID, d.source.SnapshotName), dataset); err != nil {
+			snapshot := a.zfs.Snapshot(d.source.ConfigID, d.source.SnapshotName)
+			if d.lunNo == 0 && d.source.IdentityLayer {
+				snapshot = a.zfs.Dataset(storage.IdentityCloneName(req.MAC)) + "@ready"
+			}
+			if err := a.zfs.Clone(ctx, snapshot, dataset); err != nil {
 				return storage.LUNInfo{}, err
 			}
 		}
@@ -415,14 +423,22 @@ func (a *Agent) CleanupClientClones(ctx context.Context, mac string, keep []stri
 	return a.cleanupClientClones(ctx, mac, keep)
 }
 
-// ReclaimIdleClientClones 持锁后再确认客户机自 decidedAt 起未开机且无 iSCSI 会话，
+// clientConnectGrace 是开机脚本返回后，客户机完成 sanhook 之前要留的时间。
+// 回收普查可能在打上开机时间之后才开始，这时 decidedAt 已经晚于 provisionedAt，
+// 但 iSCSI 会话还没出现。这段时间内删盘，客户机会在 sanhook 上报 I/O 错误。
+const clientConnectGrace = 90 * time.Second
+
+// ReclaimIdleClientClones 持锁后再确认客户机自 decidedAt 起未开机、连接窗口已过、且无 iSCSI 会话，
 // 才回收其克隆。普查到此刻之间这两者都可能变化，此时销毁的就是正在开机机器的盘。
 // 返回是否回收。
 func (a *Agent) ReclaimIdleClientClones(ctx context.Context, mac string, decidedAt time.Time) (bool, error) {
 	key := storage.NormalizeMAC(mac)
 	defer a.lockClient(key)()
-	if at, ok := a.provisionedAt.Load(key); ok && !at.(time.Time).Before(decidedAt) {
-		return false, nil
+	if at, ok := a.provisionedAt.Load(key); ok {
+		stamped := at.(time.Time)
+		if !stamped.Before(decidedAt) || time.Since(stamped) < clientConnectGrace {
+			return false, nil
+		}
 	}
 	if a.exporter != nil {
 		live, err := a.exporter.ActiveSessions(ctx)
@@ -435,7 +451,11 @@ func (a *Agent) ReclaimIdleClientClones(ctx context.Context, mac string, decided
 			}
 		}
 	}
-	return true, a.cleanupClientClones(ctx, key, nil)
+	err := a.cleanupClientClones(ctx, key, nil)
+	if errors.Is(err, errAdaptationOwnsTarget) {
+		return false, nil
+	}
+	return err == nil, err
 }
 
 // SuperCloneMACs 列出本节点上有持久超管克隆的 MAC。超管机放在写入者上，切换后
@@ -468,11 +488,14 @@ func (a *Agent) SuperCloneMACs(ctx context.Context) ([]string, error) {
 // 操作者的真实工作，只能在本节点不提供服务时调用（见 quiesceStandby）。
 func (a *Agent) CleanupSuperClones(ctx context.Context, mac string) error {
 	defer a.lockClient(mac)()
-	if err := a.deleteSuperBackstores(ctx, mac); err != nil {
-		return err
-	}
 	datasets, err := a.zfs.ListDatasets(ctx)
 	if err != nil {
+		return err
+	}
+	if err := a.ordinaryTargetAvailable(mac, datasets); err != nil {
+		return err
+	}
+	if err := a.deleteSuperBackstores(ctx, mac); err != nil {
 		return err
 	}
 	doomed := superClientCloneDatasets(a.zfs, mac, datasets)
@@ -492,6 +515,9 @@ func (a *Agent) cleanupClientClones(ctx context.Context, mac string, keep []stri
 	}
 	datasets, err := a.zfs.ListDatasets(ctx)
 	if err != nil {
+		return err
+	}
+	if err := a.ordinaryTargetAvailable(mac, datasets); err != nil {
 		return err
 	}
 	targets := clientCloneDatasets(a.zfs, mac, datasets)
@@ -524,6 +550,23 @@ func (a *Agent) cleanupClientClones(ctx context.Context, mac string, keep []stri
 		if err := a.deleteTarget(ctx, mac); err != nil {
 			return err
 		}
+	}
+	return nil
+}
+
+var errAdaptationOwnsTarget = errors.New("请等待机型适配任务结束后重试")
+
+// Called with this MAC's lifecycle lock held. CLIENT and ADAPT share the target
+// and backstore names; an old CLIENT dataset does not prove ownership of LUN 0.
+func (a *Agent) ordinaryTargetAvailable(mac string, datasets []string) error {
+	for _, dataset := range datasets {
+		c := storage.Classify(datasetName(dataset))
+		if c.Kind == storage.CarrierInstallation && c.MAC == storage.NormalizeMAC(mac) {
+			return fmt.Errorf("请等待客户机 %s 的系统安装任务结束后重试", c.MAC)
+		}
+	}
+	if slices.Contains(datasets, a.zfs.Dataset(storage.ModelAdaptCloneName(mac))) {
+		return fmt.Errorf("%w：客户机 %s 的适配盘正在使用", errAdaptationOwnsTarget, storage.NormalizeMAC(mac))
 	}
 	return nil
 }
@@ -641,7 +684,11 @@ func (a *Agent) ImportImage(ctx context.Context, req storage.ImportImageReq) (st
 	if req.Name == "" || req.SourcePath == "" || req.OSType == "" {
 		return storage.ImportImageResult{}, fmt.Errorf("name, source path and os type are required")
 	}
-	sourcePath, err := validateImportFilePath(req.SourcePath, importDir(req.ImportDir))
+	dir, err := a.importDir(ctx, req.ImportDir)
+	if err != nil {
+		return storage.ImportImageResult{}, err
+	}
+	sourcePath, err := validateImportFilePath(req.SourcePath, dir)
 	if err != nil {
 		return storage.ImportImageResult{}, err
 	}
@@ -990,11 +1037,16 @@ func isSupportedImportImageFile(path string) bool {
 	return isZFSStreamFile(path) || isDiskImageFile(path)
 }
 
-func importDir(dir string) string {
-	if strings.TrimSpace(dir) == "" {
-		return config.DefaultImportDir
+// importDir 是导入文件必须所在的目录：调用方传来的，没传时用本机存储池上的 imports（与控制面一致）。
+func (a *Agent) importDir(ctx context.Context, dir string) (string, error) {
+	if strings.TrimSpace(dir) != "" {
+		return dir, nil
 	}
-	return dir
+	files, err := a.EnsureFilesDir(ctx)
+	if err != nil {
+		return "", fmt.Errorf("请先创建存储池：上传和导入的文件存放在存储池的 imports 目录（%v）", err)
+	}
+	return filepath.Join(files, "imports"), nil
 }
 
 func (a *Agent) DeleteImage(ctx context.Context, imageID string, configIDs []string) error {
@@ -1156,7 +1208,7 @@ func (a *Agent) MergeConfig(ctx context.Context, req storage.MergeConfigReq) (st
 		return storage.MergeConfigResult{}, err
 	}
 	return storage.MergeConfigResult{Reduction: domain.Reduction{
-		ID:        storage.ReductionID(req.ConfigID, storage.BaselineReduction),
+		ID:        storage.ReductionID(req.ImageID, storage.BaselineReduction),
 		ConfigID:  req.ConfigID,
 		Name:      "@" + storage.BaselineReduction,
 		CreatedAt: time.Now().UTC(),
@@ -1599,6 +1651,11 @@ func (a *Agent) EnsureDBCopyDir(ctx context.Context) (string, error) {
 	return a.zfs.EnsureDBCopyDataset(ctx)
 }
 
+// EnsureFilesDir 返回随目录复制的文件库目录（适配环境文件），首次使用时创建其数据集。
+func (a *Agent) EnsureFilesDir(ctx context.Context) (string, error) {
+	return a.zfs.EnsureFilesDataset(ctx)
+}
+
 func (a *Agent) SuperStop(ctx context.Context, req storage.SuperStopReq) (storage.SuperStopResult, error) {
 	mac := strings.TrimSpace(req.MAC)
 	if mac == "" {
@@ -1607,16 +1664,19 @@ func (a *Agent) SuperStop(ctx context.Context, req storage.SuperStopReq) (storag
 	// 同一台机器的两次保存（双击，或与数据盘发布并发）会经同一个固定暂存名 promote 并改名
 	// 同一配置，交错执行可能把配置改名丢失。
 	defer a.lockClient(mac)()
+	top, err := readTopology(ctx, a.zfs)
+	if err != nil {
+		return storage.SuperStopResult{}, err
+	}
+	if err := a.ordinaryTargetAvailable(mac, top.datasets()); err != nil {
+		return storage.SuperStopResult{}, err
+	}
 	if err := a.deleteTarget(ctx, mac); err != nil {
 		return storage.SuperStopResult{}, err
 	}
 	// 数据集销毁或改名前先删 backstore：DeleteTarget 只删 target，残留的 backstore
 	// 既占住 zvol，又会被之后的导出静默复用，而它指向的已是改名后的卷。
 	if err := a.deleteSuperBackstores(ctx, mac); err != nil {
-		return storage.SuperStopResult{}, err
-	}
-	top, err := readTopology(ctx, a.zfs)
-	if err != nil {
 		return storage.SuperStopResult{}, err
 	}
 	// 先核对全部要保存的盘：任何一块来源不对都整次拒绝，不能先把系统盘存进去。
@@ -1626,6 +1686,10 @@ func (a *Agent) SuperStop(ctx context.Context, req storage.SuperStopReq) (storag
 	var result storage.SuperStopResult
 	// 先系统盘，再逐块数据盘，共用一份拓扑：上次中断的从断点继续，已完成的是空操作。
 	if strings.TrimSpace(req.ReductionName) != "" {
+		// 断电/强制关机留下的未提交 SYSTEM 先回放事务日志；不能安全恢复就整次拒绝，池保持不动。
+		if err := a.prepareSuperHive(ctx, top, mac, req.ConfigID); err != nil {
+			return storage.SuperStopResult{}, err
+		}
 		result.System, err = a.saveSuperClone(ctx, top, 0, storage.SuperClientCloneName(mac), req.ConfigID, req.ReductionName)
 		if err != nil {
 			return storage.SuperStopResult{}, err
@@ -1762,10 +1826,8 @@ func (a *Agent) saveSuperClone(ctx context.Context, top *topology, lun int, clon
 	if err := top.ensureSnapshot(ctx, configDataset, snapshot); err != nil {
 		return domain.Reduction{}, err
 	}
-	// 删掉暂存配置（可能是更早一次留下的）。
-	if err := top.ensureDestroyed(ctx, oldDataset); err != nil {
-		return domain.Reduction{}, err
-	}
+	// 删掉暂存配置；还原点已打好，删不掉不推翻保存，留给下次保存清理。
+	_ = top.ensureDestroyed(ctx, oldDataset)
 	return domain.Reduction{
 		ID:        storage.ReductionID(configID, snapshot),
 		ConfigID:  configID,

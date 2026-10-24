@@ -365,6 +365,23 @@ func (c *Client) Written(ctx context.Context, dataset string) (int64, error) {
 	return size, nil
 }
 
+// WrittenSince reports head bytes not referenced by the specified snapshot, rather than the latest snapshot.
+func (c *Client) WrittenSince(ctx context.Context, dataset, snapshot string) (int64, error) {
+	if dataset == "" || snapshot == "" || strings.ContainsAny(snapshot, "@/") {
+		return 0, fmt.Errorf("dataset and short snapshot are required")
+	}
+	args := []string{"get", "-Hp", "-o", "value", "written@" + snapshot, dataset}
+	out, err := c.runner.Run(ctx, "zfs", args...)
+	if err != nil {
+		return 0, storage.CommandError{Name: "zfs", Args: args, Output: string(out), Err: err}
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(string(out)), 10, 64)
+	if err != nil || n < 0 {
+		return 0, fmt.Errorf("invalid written@%s %q for %s", snapshot, strings.TrimSpace(string(out)), dataset)
+	}
+	return n, nil
+}
+
 // Used 是数据集及其后代占用的空间。
 func (c *Client) Used(ctx context.Context, dataset string) (int64, error) {
 	args := []string{"get", "-Hp", "-o", "value", "used", dataset}
@@ -442,6 +459,12 @@ func IsNotExist(err error) bool {
 func IsExists(err error) bool {
 	var cmdErr storage.CommandError
 	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Output, "dataset already exists")
+}
+
+// HasDependentClones 判断 destroy 因还有克隆依赖目标的快照而被拒（"has dependent clones"）。
+func HasDependentClones(err error) bool {
+	var cmdErr storage.CommandError
+	return errors.As(err, &cmdErr) && strings.Contains(cmdErr.Output, "dependent clones")
 }
 
 // IsNotClone 判断 promote 发现数据集已在链头，即同一序列里之前的 promote 已成功。

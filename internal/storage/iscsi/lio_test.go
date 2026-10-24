@@ -604,3 +604,34 @@ func TestDeleteLUNsKeepsTheACLSoTheSessionSurvives(t *testing.T) {
 		t.Fatalf("要摘的 lun_1 映射还在（err %v）", err)
 	}
 }
+
+// 只读盘（ISO 安装介质）用 iblock readonly 打开，backstore 名与普通 LUN 分开，免得被同号数据盘复用。
+func TestReadOnlyLUNUsesItsOwnReadOnlyBackstore(t *testing.T) {
+	l := newTestLIO(t)
+	target := "iqn.2026-06.local.ndiskless:client-aabbccddeeff"
+	disk, media := makeDev(t, "INSTALL-AABBCCDDEEFF"), makeDev(t, "loop7")
+	if _, err := l.ExportBlocks(context.Background(), []ExportRequest{
+		{MAC: "aa:bb:cc:dd:ee:ff", VolPath: disk, LUN: 0},
+		{MAC: "aa:bb:cc:dd:ee:ff", VolPath: media, LUN: 1, ReadOnly: true},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	tpg := filepath.Join(l.configfsBase, target, "tpgt_1")
+	so, err := os.Readlink(filepath.Join(tpg, "lun", "lun_1", "iqn-2026-06-local-ndiskless-client-aabbccddeeff-lun1-ro"))
+	if err != nil {
+		t.Fatalf("read-only LUN mapping: %v", err)
+	}
+	if got := readAttr(t, filepath.Join(so, "control")); got != "udev_path="+media+",readonly=1" {
+		t.Fatalf("read-only control = %q", got)
+	}
+	disk0, err := os.Readlink(filepath.Join(tpg, "lun", "lun_0", "iqn-2026-06-local-ndiskless-client-aabbccddeeff-lun0"))
+	if err != nil || readAttr(t, filepath.Join(disk0, "control")) != "udev_path="+disk {
+		t.Fatalf("install disk must stay writable: %v", err)
+	}
+	if err := l.TeardownTarget(context.Background(), target, []int{0, 1}); err != nil {
+		t.Fatal(err)
+	}
+	if sos, _ := filepath.Glob(filepath.Join(l.corePath(), "iblock_*", "*")); len(sos) != 0 {
+		t.Fatalf("backstores remain after teardown: %v", sos)
+	}
+}

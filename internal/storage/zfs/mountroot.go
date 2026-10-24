@@ -24,6 +24,11 @@ func DBCopyDir(pool string) string {
 	return path.Join(MountRoot, pool, storage.CatalogueRoot, "db")
 }
 
+// FilesDir 返回 pool 里随目录复制的文件库（WinRE、BCD 等适配环境文件）挂载目录。
+func FilesDir(pool string) string {
+	return path.Join(MountRoot, pool, storage.CatalogueRoot, "files")
+}
+
 // MigrateMountpoints 把仍在 ZFS 默认 /<name> 的池移到 MountRoot 下，返回被移动的池。
 // 已在其下或按设计不挂载（none、legacy）的池不动。
 func (c *Client) MigrateMountpoints(ctx context.Context) ([]string, error) {

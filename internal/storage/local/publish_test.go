@@ -116,7 +116,7 @@ func TestPublishDataDiskRefusesADiskTheMachineNeverHeld(t *testing.T) {
 func TestPublishDataDiskLeavesTheMachineADiskWhenTheSwapFailsHalfway(t *testing.T) {
 	ctx := context.Background()
 	z := seedSuperPoolWithData()
-	z.failOn = "destroy tank/nd/dcfg_before_super" // 交换的最后一步失败
+	z.failOn = "snapshot tank/nd/dcfg@games" // 克隆已改名成配置，还没打上还原点
 	ex := &fakeExporter{}
 	agent := New("server-a", z, ex)
 
@@ -127,6 +127,30 @@ func TestPublishDataDiskLeavesTheMachineADiskWhenTheSwapFailsHalfway(t *testing.
 	}
 	if !z.present("tank/run/SCLIENT-AABBCCDDEEFF-DATA-1") {
 		t.Fatalf("机器的数据盘没了：%#v", z.state())
+	}
+	if len(ex.reqs) != 1 || ex.reqs[0].LUN != 1 {
+		t.Fatalf("盘没装回机器上：%#v", ex.reqs)
+	}
+}
+
+// 还原点打好后发布即成立，删旧配置失败不推翻结果。
+func TestPublishDataDiskSucceedsWhenTheSupersededConfigCannotBeDestroyed(t *testing.T) {
+	ctx := context.Background()
+	z := seedSuperPoolWithData()
+	z.failOn = "destroy tank/nd/dcfg_before_super"
+	ex := &fakeExporter{}
+	agent := New("server-a", z, ex)
+
+	res, err := agent.PublishDataDisk(ctx, storage.PublishDataDiskReq{
+		MAC: "AA:BB:CC:DD:EE:FF", LUN: 1, ConfigID: "dcfg", ReductionName: "@games"})
+	if err != nil {
+		t.Fatalf("还原点已打好，收尾失败不该推翻发布：%v", err)
+	}
+	if res.Reduction.ConfigID != "dcfg" || res.Reduction.Name != "@games" {
+		t.Fatalf("还原点 = %#v", res.Reduction)
+	}
+	if origin := z.origin["tank/run/SCLIENT-AABBCCDDEEFF-DATA-1"]; origin != "tank/nd/dcfg@games" {
+		t.Fatalf("超管机的盘要基于刚发布的点，现在基于 %q", origin)
 	}
 	if len(ex.reqs) != 1 || ex.reqs[0].LUN != 1 {
 		t.Fatalf("盘没装回机器上：%#v", ex.reqs)

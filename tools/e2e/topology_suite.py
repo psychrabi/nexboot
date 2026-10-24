@@ -40,7 +40,7 @@ STAGES = [int(s) for s in os.environ.get("ND_STAGES", "1,2,3").split(",") if s.s
 # 开机链路（含超管保存）也要纳入分级套件，否则「超管保存落在备机上」这类缺陷测不到。
 WINDOWS_SOURCE = os.environ.get("ND_WINDOWS_SOURCE", "")
 BACKUP_POOL = os.environ.get("ND_BACKUP_POOL", "tank2")
-IMPORT_DIR = os.environ.get("ND_IMPORT_DIR", "/var/lib/ndiskless/imports")
+IMPORT_DIR = os.environ.get("ND_IMPORT_DIR", "")  # empty: the suites read it from /api/runtime
 SCRIPTS = os.environ.get("ND_SCRIPTS", "/opt/ndiskless/scripts")
 E2E_DIR = os.environ.get("ND_E2E_DIR", f"/home/{SSH_USER}/e2e")
 
@@ -61,6 +61,23 @@ def say(msg):
     print(msg, flush=True)
 
 
+_node_pool = {}
+
+
+def node_pool(hostname):
+    """这台机器自己的数据池名，必须在 wipe 之前读到并记住。
+
+    真机上各节点池名不必相同（data / tank 都有），套件只用一个 ND_POOL 的话，
+    在池名不同的那台上 pool_exists 为假，install 就会拿 --create-pool 去建一个
+    同名新池——落在那块已经被另一个池占着的盘上，zpool create 失败，节点停在
+    「清空了却没装回去」。所以 wipe 和 install 都按节点各自的池名来。"""
+    if hostname not in _node_pool:
+        out = ssh(hostname, "cat /var/lib/ndiskless/data-pool 2>/dev/null || "
+                            "sed -n 's/^NDISKLESS_POOL=//p' /etc/ndiskless/ndiskless.env 2>/dev/null").stdout.strip()
+        _node_pool[hostname] = out.splitlines()[0].strip() if out else POOL
+    return _node_pool[hostname]
+
+
 def wipe(hostname):
     """回到装机前的样子：清掉目录库、配置和 keepalived。留着旧库的话，测的就不是
     「新装一台」而是「重装一台」，而升级路径上的问题恰恰出在花名册里已经有谁的时候。
@@ -74,10 +91,12 @@ def wipe(hostname):
     回来，连同一份**过期的花名册**：已经拆掉的机器又出现在集群里，而且看起来在线。
     这不是产品缺陷（那份副本正是为了灾难恢复而存在的），但它意味着「删掉数据目录」
     不等于「把这台机器恢复成出厂状态」。"""
+    pool = node_pool(hostname)
     ssh(hostname, "systemctl stop ndiskless keepalived 2>/dev/null; "
                   "systemctl disable keepalived 2>/dev/null; "
                   "rm -rf /var/lib/ndiskless /etc/ndiskless; "
-                  f"rm -f /{POOL}/nd/db/*.db /{POOL}/nd/db/*.db-wal /{POOL}/nd/db/*.db-shm 2>/dev/null; "
+                  f"M=$(zfs get -H -o value mountpoint {pool}/nd/db 2>/dev/null); M=${{M:-/{pool}/nd/db}}; "
+                  "rm -f $M/*.db $M/*.db-wal $M/*.db-shm 2>/dev/null; "
                   "true")
 
 
@@ -87,9 +106,9 @@ def install(hostname, *, first, role=None, peer=None, node_addr=None, create_poo
             f"--bootstrap-password {shlex.quote(PASSWORD)}"]
     # 池还在就直接指过去；只有真的没有池时才建（第一次在空机器上跑）。
     if create_pool and not pool_exists(hostname):
-        args += [f"--create-pool {POOL}", f"--pool-disks {POOL_DISK}"]
+        args += [f"--create-pool {node_pool(hostname)}", f"--pool-disks {POOL_DISK}"]
     else:
-        args += [f"--pool {POOL}"]
+        args += [f"--pool {node_pool(hostname)}"]
     if not first:
         args += [f"--cluster-token {shlex.quote(TOKEN)}",
                  f"--ha-role {role}", f"--peer {peer}", f"--node-addr {node_addr}"]
@@ -107,7 +126,8 @@ def install(hostname, *, first, role=None, peer=None, node_addr=None, create_poo
 
 
 def pool_exists(hostname):
-    return ssh(hostname, f"zpool list -H -o name {POOL} 2>/dev/null").stdout.strip() == POOL
+    pool = node_pool(hostname)
+    return ssh(hostname, f"zpool list -H -o name {pool} 2>/dev/null").stdout.strip() == pool
 
 
 def jwt_of(hostname):

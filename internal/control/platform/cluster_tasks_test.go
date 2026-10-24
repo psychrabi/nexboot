@@ -125,6 +125,8 @@ func TestTasksCarryReadableTargetNames(t *testing.T) {
 		st.Reductions().Create(ctx, domain.Reduction{ID: cur, ConfigID: "win11-_default", Name: "@r1", DisplayName: "装完显卡驱动", Status: domain.ReductionStatusReady, CreatedAt: now}),
 		st.Groups().Create(ctx, domain.Group{ID: "g1", Name: "主播专区", StartIP: "10.0.0.10", ClientMax: 5, Netmask: "255.255.255.0", SystemImageID: "win11-", SystemConfigID: "win11-_default", SystemReductionID: cur}),
 		st.Terminals().Create(ctx, domain.Terminal{ID: "terminal-0050562EF65E", MAC: "0050562EF65E", Name: "主播-01", IP: "10.0.0.11", GroupID: "g1", State: domain.TerminalStateOffline}),
+		st.InstallSessions().Create(ctx, domain.InstallSession{ID: "iso-session", MAC: "001122334455", Token: "iso-token", ImageID: "iso_unpublished", Name: "Ubuntu 测试系统", Phase: "waiting"}),
+		st.HardwareProfiles().Create(ctx, domain.HardwareProfile{ID: "hwp-e1000", Name: "前台机型 · Intel E1000", Fingerprint: "8086:100f/1024/efi", CreatedAt: now, UpdatedAt: now}),
 	} {
 		if err != nil {
 			t.Fatal(err)
@@ -137,6 +139,8 @@ func TestTasksCarryReadableTargetNames(t *testing.T) {
 		{ID: "t-gone", Type: domain.TaskTypeDeleteConfig, TargetRef: "gone_default", Status: domain.TaskStatusSuccess, CreatedAt: now.Add(3 * time.Second)},
 		// 超管停机、数据盘发布的目标是 MAC，客户机 ID 是 terminal-<MAC>。
 		{ID: "t-super", Type: domain.TaskTypeSuperStop, TargetRef: "0050562EF65E", Status: domain.TaskStatusSuccess, CreatedAt: now.Add(4 * time.Second)},
+		{ID: "t-iso", Type: domain.TaskTypeInstallImage, TargetRef: "iso_unpublished", Status: domain.TaskStatusRunning, CreatedAt: now.Add(5 * time.Second)},
+		{ID: "t-model", Type: domain.TaskTypeModelAdapt, TargetRef: "hwp-e1000", Status: domain.TaskStatusRunning, CreatedAt: now.Add(6 * time.Second)},
 	} {
 		if err := st.Tasks().Create(ctx, task); err != nil {
 			t.Fatal(err)
@@ -153,7 +157,7 @@ func TestTasksCarryReadableTargetNames(t *testing.T) {
 		got[it.ID] = it.TargetName
 	}
 	want := map[string]string{"t-img": "Win11 电竞版", "t-cfg": "Win11 电竞版 / default",
-		"t-red": "Win11 电竞版 / default / 装完显卡驱动", "t-gone": "", "t-super": "主播-01"}
+		"t-red": "Win11 电竞版 / default / 装完显卡驱动", "t-gone": "", "t-super": "主播-01", "t-iso": "Ubuntu 测试系统", "t-model": "前台机型 · Intel E1000"}
 	for id, name := range want {
 		if got[id] != name {
 			t.Fatalf("%s 的名称 = %q，应为 %q（全部：%v）", id, got[id], name, got)

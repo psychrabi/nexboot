@@ -37,7 +37,7 @@ export function HACard() {
 
   const doSwitch = async () => {
     if (await run(() => api.plannedSwitch(),
-      '已发起计划切换：本机将重启为备机，虚 IP 会漂到一台备机', { errMsg: '切换未执行' })) {
+      '已发起计划切换：备机将接管服务和虚 IP，本机转为备机', { errMsg: '切换未执行' })) {
       setConfirmOn(false);
       // 服务会在底下重启，页面下次读取时显示新角色；等稳定后重载能重载的数据。
       settle.current = setTimeout(() => { reload(); repl.reload(); roster.reload(); }, 4000);
@@ -65,7 +65,7 @@ export function HACard() {
                   {ha.role === 'active' && (
                     <>
                       <button className="btn" style={{ padding: '2px 10px', marginLeft: 4 }} disabled={busy} onClick={() => setConfirmOn(true)}>计划切换</button>
-                      <Tip label="计划切换说明" text="维护本机（打补丁、重启、换硬件）前，先把主机交给一台备机：会等它把目录追平再切，追不平就不切，不丢改动。运行中的客户机会重启一次。"/>
+                      <Tip label="计划切换说明" text="维护本机前，把服务交给一台备机。最多等 3 分钟同步，追不平就取消切换。随后由备机接管服务和虚 IP，本机转为备机。在线普通客户机需要重新开机，超管机未保存的改动会丢失。"/>
                     </>
                   )}
                 </div>
@@ -139,8 +139,8 @@ export function HACard() {
           <button className="btn primary" disabled={busy} onClick={doSwitch}>{busy ? '切换中…' : '切换'}</button>
         </>}>
         <div className="hint">
-          先把目录同步追平（最多等 3 分钟，追不平则保持本机为主并放弃切换），然后本机重启为备机、
-          虚 IP 漂到一台备机。<b>运行中的普通客户机会重启一次</b>（约 2~4 分钟回到桌面），超管机未保存的会话会丢失——请选无人上课的时间。
+          最多等 3 分钟同步；追不平就取消切换，仍由本机服务。同步完成后，备机接管服务和虚 IP，本机转为备机。
+          <b>在线普通客户机需要重新开机</b>，超管机未保存的改动会丢失。请选无人使用时操作。
         </div>
       </Modal>
     </div>

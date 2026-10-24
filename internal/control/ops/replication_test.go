@@ -51,7 +51,26 @@ type fakeReplZFS struct {
 	datasetRecvErr error
 	// onRecvErr 在收流失败时改写本机状态：递归增量失败时，流里靠前的根和镜像已收下这一轮，
 	// 被顶替的配置则被 -F 回滚。
-	onRecvErr func()
+	onRecvErr         func()
+	receivedInventory *zfs.GUIDInventory
+	// clonesOf 是克隆自某数据集快照的卷（如本机客户机的盘）；有克隆的数据集 destroy 会被 zfs 拒绝。
+	clonesOf map[string][]string
+	// held 是改名进 "-held-" 暂存名的数据集。
+	held []string
+}
+
+func (f *fakeReplZFS) ListHeldCopies(_ context.Context, root string) ([]string, error) {
+	var out []string
+	for _, h := range f.held {
+		if !contains(f.destroyed, h) && strings.HasPrefix(h, root+"-held-") {
+			out = append(out, h)
+		}
+	}
+	return out, nil
+}
+
+func (f *fakeReplZFS) ListDependentClones(_ context.Context, dataset string) ([]string, error) {
+	return f.clonesOf[dataset], nil
 }
 
 func (f *fakeReplZFS) ListAsideCopies(_ context.Context, root string) ([]string, error) {
@@ -71,8 +90,18 @@ func (f *fakeReplZFS) ListGUIDs(_ context.Context, root string) (zfs.GUIDInvento
 	if err, ok := f.listErr[root]; ok {
 		return zfs.GUIDInventory{}, err
 	}
-	return f.guids[root], nil
+	if inv, ok := f.guids[root]; ok {
+		return inv, nil
+	}
+	for _, s := range f.siblings {
+		if s == root && !contains(f.destroyed, s) {
+			return zfs.GUIDInventory{Entries: []zfs.GUIDEntry{{Name: root, GUID: "empty-aside"}}}, nil
+		}
+	}
+	return zfs.GUIDInventory{}, nil
 }
+func (f *fakeReplZFS) WrittenSince(context.Context, string, string) (int64, error) { return 0, nil }
+
 func (f *fakeReplZFS) SnapshotRecursive(_ context.Context, root, name string) error {
 	f.snapshots = append(f.snapshots, root+"@"+name)
 	return nil
@@ -116,6 +145,9 @@ func (f *fakeReplZFS) ReceiveReplication(_ context.Context, root string, r io.Re
 		}
 		return err
 	}
+	if f.receivedInventory != nil {
+		f.guids[root] = *f.receivedInventory
+	}
 	return nil
 }
 func (f *fakeReplZFS) DetachMounts(_ context.Context, dataset string) error {
@@ -127,8 +159,25 @@ func (f *fakeReplZFS) Rename(_ context.Context, source, dataset string) error {
 		return f.renameErr
 	}
 	f.renamed = append(f.renamed, source+"->"+dataset)
+	if c, ok := f.clonesOf[source]; ok {
+		f.clonesOf[dataset] = c
+		delete(f.clonesOf, source)
+	}
+	if strings.Contains(dataset, "-held-") {
+		f.held = append(f.held, dataset)
+	}
 	if inv, ok := f.guids[source]; ok {
-		f.guids[dataset] = inv
+		entries := append([]zfs.GUIDEntry(nil), inv.Entries...)
+		for i := range entries {
+			e := &entries[i]
+			if e.Name == source || strings.HasPrefix(e.Name, source+"/") || strings.HasPrefix(e.Name, source+"@") {
+				e.Name = dataset + strings.TrimPrefix(e.Name, source)
+			}
+			if strings.HasPrefix(e.Origin, source+"/") || strings.HasPrefix(e.Origin, source+"@") {
+				e.Origin = dataset + strings.TrimPrefix(e.Origin, source)
+			}
+		}
+		f.guids[dataset] = zfs.GUIDInventory{Entries: entries}
 		delete(f.guids, source)
 	}
 	return nil
@@ -141,6 +190,11 @@ func (f *fakeReplZFS) ReceiveDataset(_ context.Context, dataset string, r io.Rea
 }
 
 func (f *fakeReplZFS) Destroy(_ context.Context, dataset string) error {
+	if len(f.clonesOf[dataset]) > 0 {
+		return storage.CommandError{Name: "zfs", Args: []string{"destroy", "-r", dataset}, Err: errFakeRepl,
+			Output: "cannot destroy '" + dataset + "': volume has dependent clones\nuse '-R' to destroy the following datasets:\n" +
+				strings.Join(f.clonesOf[dataset], "\n") + "\n"}
+	}
 	f.destroyed = append(f.destroyed, dataset)
 	delete(f.guids, dataset)
 	return nil
@@ -294,6 +348,26 @@ func TestPullOnceIncrementalAndState(t *testing.T) {
 }
 
 // 写入节点上的 promote 让增量收不进来时，备机自行整体重建。
+// addRebuildProof supplies real baseline snapshots and the catalogue a successful full receive installs.
+// Merely listing a volume, or recording a stream, cannot prove its moved-aside head is redundant.
+func addRebuildProof(z *fakeReplZFS, peer *fakeReplPeer) {
+	old := z.guids["tank/nd"]
+	for _, e := range append([]zfs.GUIDEntry(nil), old.Entries...) {
+		if strings.Contains(e.Name, "@") || !strings.HasPrefix(e.Name, "tank/nd/") || storage.ReservedCatalogueChild(strings.TrimPrefix(e.Name, "tank/nd/")) {
+			continue
+		}
+		guid := "shared-baseline-" + strings.TrimPrefix(e.Name, "tank/nd/")
+		old.Entries = append(old.Entries, zfs.GUIDEntry{Name: e.Name + "@0", GUID: guid, Created: 1})
+		peer.inv.Entries = append(peer.inv.Entries, zfs.GUIDEntry{Name: peer.inv.Root + strings.TrimPrefix(e.Name, "tank/nd") + "@0", GUID: guid, Created: 1})
+	}
+	z.guids["tank/nd"] = old
+	copied := zfs.GUIDInventory{Entries: append([]zfs.GUIDEntry(nil), peer.inv.Entries...)}
+	for i := range copied.Entries {
+		copied.Entries[i].Name = "tank/nd" + strings.TrimPrefix(copied.Entries[i].Name, peer.inv.Root)
+	}
+	z.receivedInventory = &copied
+}
+
 func TestPullOnceFallsBackToFullResync(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
@@ -314,6 +388,7 @@ func TestPullOnceFallsBackToFullResync(t *testing.T) {
 		{Name: "tank/nd@rep-2", GUID: "g2"},
 		{Name: "tank/nd/win11", GUID: "d2"},
 	}}}
+	addRebuildProof(z, peer)
 	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080"}
 
 	if err := rep.PullOnce(ctx); err != nil {
@@ -492,6 +567,7 @@ func TestPullOnceRepairsPartialReceive(t *testing.T) {
 		{Name: "pool2/nd/win11", GUID: "w2"},
 		{Name: "pool2/nd/win11_default", GUID: "d2"}, // 本机缺失
 	}}}
+	addRebuildProof(z, peer)
 	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080"}
 
 	if err := rep.PullOnce(ctx); err != nil {
@@ -883,6 +959,7 @@ func TestPullOnceStillRebuildsAStaleReplica(t *testing.T) {
 		{Name: "tank/nd@rep-5", GUID: "peer-1"},
 		{Name: "tank/nd/win11", GUID: "d2"},
 	}}}
+	addRebuildProof(z, peer)
 	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080"}
 
 	if err := rep.PullOnce(ctx); err != nil {
@@ -1167,6 +1244,7 @@ func TestPullOnceRebuildsALaggedReplicaWithoutSettingItAside(t *testing.T) {
 		{Name: "tank/nd@rep-1788000000000000009", GUID: "p9"},
 		{Name: "tank/nd/win11", GUID: "d2"},
 	}}}
+	addRebuildProof(z, peer)
 	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080"}
 	if err := rep.PullOnce(ctx); err != nil {
 		t.Fatalf("落后的副本应当照旧重建：%v", err)
@@ -1479,6 +1557,36 @@ func TestPullFollowsAConsistentWriterEvenWhenItHoldsLess(t *testing.T) {
 	}
 }
 
+// 写入者没追平就接任：库里记着、池里没有的配置，本机也没有（最后一轮里刚被替换，谁都没收到）。
+// 跟随删不掉本机任何一份；拦下只会让集群从此没有备份副本，所以照常跟随。
+func TestPullFollowsAnIncompleteWriterWhenThisNodeHoldsNoneOfTheMissing(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-1", GUID: "g1"},
+		{Name: "tank/nd/win11", GUID: "d1"},
+	}}}}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{
+		Root: "data/nd",
+		Entries: []zfs.GUIDEntry{
+			{Name: "data/nd@rep-1", GUID: "g1"},
+			{Name: "data/nd@rep-2", GUID: "g2"},
+			{Name: "data/nd/win11", GUID: "d1"},
+		},
+		Incomplete: []string{"win11_e2e-super"},
+	}}
+	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(),
+		Peer: peer, PeerURL: "http://a:8080"}
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatalf("本机没有缺的那些，跟随不会删掉任何东西：%v", err)
+	}
+	if len(z.received) == 0 {
+		t.Fatal("应当收流，否则集群一直没有备份副本")
+	}
+}
+
 // 增量 recv -F 会回滚本机多出的快照：多的是轮次标记无妨，是还原点就会丢数据，必须挪开保留。
 func TestPullOncePreservesRestorePointsAnIncrementalWouldRollBack(t *testing.T) {
 	ctx := context.Background()
@@ -1720,6 +1828,156 @@ func TestPullCatchesUpDatasetByDatasetWhenTheRecursiveRoundIsRefused(t *testing.
 	}
 	if fmt.Sprint(z.received[1:]) != "[tank/nd/img <- DATASET:/img tank/nd/cfg <- DATASET:/cfg tank/nd <- DATASET:]" {
 		t.Fatalf("received = %v", z.received)
+	}
+}
+
+// 写入者删掉的镜像在本机还是一台客户机的盘的克隆源：zfs 删不掉它，以前整轮追平失败、整份重建也失败。
+// 现在挪到目录外暂存，客户机的盘照常用，其余照常追平，不整份重建。
+func TestPullHoldsADroppedDatasetThatALocalClientDiskStillClones(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	sender := inv("data/nd",
+		[]string{"", "rep-1=r1", "rep-2=r2"},
+		[]string{"/img", "0=i0", "rep-1=i1", "rep-2=i2"},
+	)
+	local := inv("tank/nd",
+		[]string{"", "rep-1=r1"},
+		[]string{"/img", "0=i0", "rep-1=i1"},
+		[]string{"/old", "0=o0", "rep-1=o1"},
+	)
+	for i := range local.Entries {
+		if local.Entries[i].Name == "tank/nd@rep-1" {
+			local.Entries[i].Created = 1_000_000
+		}
+	}
+	z := &fakeReplZFS{
+		guids:    map[string]zfs.GUIDInventory{"tank/nd": local},
+		recvErrs: []error{errors.New("cannot destroy 'tank/nd/old': volume has dependent clones")},
+		clonesOf: map[string][]string{"tank/nd/old": {"tank/run/CLIENT-0E2EC1057E01"}},
+	}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "data/nd", Entries: sender.Entries}}
+	rep := &Replicator{Store: st, ZFS: z, Peer: peer, Gate: gate, Root: "tank/nd", PeerURL: "http://a:8080", Now: replTestClock()}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range z.renamed {
+		if strings.HasPrefix(r, "tank/nd->") {
+			t.Fatalf("不该整份重建目录: %v", z.renamed)
+		}
+	}
+	if len(z.held) != 1 || !contains(z.renamed, "tank/nd/old->"+z.held[0]) || !strings.HasPrefix(z.held[0], "tank/nd-held-") {
+		t.Fatalf("被克隆着的旧镜像应挪到目录外暂存: renamed=%v held=%v", z.renamed, z.held)
+	}
+	if contains(z.destroyed, z.held[0]) {
+		t.Fatalf("客户机还在用，暂存的那份不能删: %v", z.destroyed)
+	}
+	if len(peer.confirmed) != 1 || peer.confirmed[0] != "rep-2" {
+		t.Fatalf("这一轮其余部分应照常追平并确认: %v", peer.confirmed)
+	}
+
+	// 客户机放手（克隆删掉）后，下一轮把暂存删掉。
+	delete(z.clonesOf, z.held[0])
+	rep.pruneHeldCopies(ctx)
+	if !contains(z.destroyed, z.held[0]) {
+		t.Fatalf("客户机放手后应删掉暂存: %v", z.destroyed)
+	}
+}
+
+// 写入者删了又建同名镜像，旧那份还被本机客户机的盘克隆着：挪开旧的，按新数据集重收。
+func TestCatchUpHoldsAReplacedDatasetThatALocalClientDiskStillClones(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	sender := inv("data/nd",
+		[]string{"", "rep-1=r1", "rep-2=r2"},
+		[]string{"/img", "0=x0", "rep-2=x2"},
+	)
+	local := inv("tank/nd",
+		[]string{"", "rep-1=r1"},
+		[]string{"/img", "0=i0", "rep-1=i1"},
+	)
+	for i := range local.Entries {
+		if local.Entries[i].Name == "tank/nd@rep-1" {
+			local.Entries[i].Created = 1_000_000
+		}
+	}
+	z := &fakeReplZFS{
+		guids:    map[string]zfs.GUIDInventory{"tank/nd": local},
+		clonesOf: map[string][]string{"tank/nd/img": {"tank/run/CLIENT-0E2EC1057E01"}},
+	}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "data/nd", Entries: sender.Entries}}
+	rep := &Replicator{Store: st, ZFS: z, Peer: peer, Gate: gate, Root: "tank/nd", PeerURL: "http://a:8080", Now: replTestClock()}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(z.held) != 1 || !contains(z.renamed, "tank/nd/img->"+z.held[0]) {
+		t.Fatalf("旧镜像应挪开暂存: renamed=%v", z.renamed)
+	}
+	want := `[dataset "/img" from "" origin "" to "0" dataset "/img" from "0" origin "" to "rep-2" dataset "" from "rep-1" origin "" to "rep-2"]`
+	if got := fmt.Sprint(peer.streams); got != want {
+		t.Fatalf("应按新数据集重收: streams =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// 依赖者在目录里时不挪：那说明删除顺序有问题，挪走源会让目录里的克隆指向目录外。
+func TestDestroyOrHoldRefusesWhenTheCloneIsInTheCatalogue(t *testing.T) {
+	z := &fakeReplZFS{clonesOf: map[string][]string{"tank/nd/img": {"tank/nd/cfg"}}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd", Now: replTestClock()}
+	if held, err := rep.destroyOrHold(context.Background(), "tank/nd/img"); err == nil || held != "" {
+		t.Fatalf("目录内的依赖应照旧报错: held=%q err=%v", held, err)
+	}
+	if len(z.renamed) != 0 {
+		t.Fatalf("不该挪: %v", z.renamed)
+	}
+	// 没有克隆时直接删。
+	z.clonesOf = nil
+	if held, err := rep.destroyOrHold(context.Background(), "tank/nd/img"); err != nil || held != "" || !contains(z.destroyed, "tank/nd/img") {
+		t.Fatalf("held=%q err=%v destroyed=%v", held, err, z.destroyed)
+	}
+}
+
+// 写入者删了又建同名镜像：不先试递归流（zfs 会收到一半失败、留下认不出的半截状态而整份重建），直接逐个追平。
+func TestPullCatchesUpARecreatedDatasetWithoutTryingTheRecursiveRound(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	sender := inv("data/nd",
+		[]string{"", "rep-1=r1", "rep-2=r2"},
+		[]string{"/img", "0=x0", "rep-2=x2"},
+	)
+	local := inv("tank/nd",
+		[]string{"", "rep-1=r1"},
+		[]string{"/img", "0=i0", "rep-1=i1"},
+	)
+	for i := range local.Entries {
+		if local.Entries[i].Name == "tank/nd@rep-1" {
+			local.Entries[i].Created = 1_000_000 // 旧镜像的快照都早于这一轮
+		}
+	}
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd": local}}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "data/nd", Entries: sender.Entries}}
+	rep := &Replicator{Store: st, ZFS: z, Peer: peer, Gate: gate, Root: "tank/nd", PeerURL: "http://a:8080", Now: replTestClock()}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range z.renamed {
+		if strings.HasPrefix(r, "tank/nd->") {
+			t.Fatalf("不该整份重建目录: %v", z.renamed)
+		}
+	}
+	if fmt.Sprint(z.destroyed) != "[tank/nd/img]" {
+		t.Fatalf("只该删掉被替换的那个数据集：%v", z.destroyed)
+	}
+	want := `[dataset "/img" from "" origin "" to "0" dataset "/img" from "0" origin "" to "rep-2" dataset "" from "rep-1" origin "" to "rep-2"]`
+	if got := fmt.Sprint(peer.streams); got != want {
+		t.Fatalf("不该先试递归流，streams =\n%s\nwant\n%s", got, want)
 	}
 }
 
@@ -2040,5 +2298,353 @@ func TestPullRefusesAnEmptyWriterEvenWhenTheResumeTokenForcesARebuild(t *testing
 	}
 	if len(z.renamed) != 0 || len(z.destroyed) != 0 {
 		t.Fatalf("拒绝时不该动本机副本：renamed=%v destroyed=%v", z.renamed, z.destroyed)
+	}
+}
+
+// 升为写入者时可能还留着当备机时收到一半的流；写入者不会再续传它，它却挡着裁旧标记，要丢掉。
+func TestMarkOnceDiscardsAReceiveLeftFromStandbyDays(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		abortErr error
+	}{{"丢弃成功", nil}, {"丢弃失败也照常打标记", errors.New("dataset is busy")}} {
+		t.Run(tc.name, func(t *testing.T) {
+			z := &fakeReplZFS{dbCopyDir: t.TempDir(), resumeTok: "1-abc", resumeDS: "tank/nd/db", abortErr: tc.abortErr,
+				guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/win11", GUID: "1"}}}}}
+			rep := &Replicator{ZFS: z, Root: "tank/nd", Gate: ha.NewOpenGate(), Now: replTestClock(),
+				DBSnapshot: func(context.Context, string) error { return nil }}
+			marked, err := rep.MarkOnce(context.Background())
+			if err != nil || !marked || len(z.prunes) != 1 {
+				t.Fatalf("mark = %v, %v, prunes = %v", marked, err, z.prunes)
+			}
+			if tc.abortErr == nil && (!z.resumeAborted || z.abortedDS != "tank/nd/db") {
+				t.Fatalf("aborted = %v on %q，写入者要丢掉残留的半截接收", z.resumeAborted, z.abortedDS)
+			}
+		})
+	}
+}
+
+// 本机还有一次拉取在跑（接任前的追平）时，那份半截是它正在收的，不能丢。
+func TestMarkOnceLeavesAReceiveInFlightAlone(t *testing.T) {
+	z := &fakeReplZFS{dbCopyDir: t.TempDir(), resumeTok: "1-abc", resumeDS: "tank/nd/db",
+		guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/win11", GUID: "1"}}}}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd", Gate: ha.NewOpenGate(), Now: replTestClock(),
+		DBSnapshot: func(context.Context, string) error { return nil }}
+	release, err := rep.acquirePull(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if marked, err := rep.MarkOnce(context.Background()); err != nil || !marked {
+		t.Fatalf("mark = %v, %v", marked, err)
+	}
+	if z.resumeAborted {
+		t.Fatal("拉取还在跑，不能丢掉它正在收的流")
+	}
+}
+
+// fakeIdentityLayers 记下每次放身份层时本机已经销毁、收下了多少，用来断言先后。
+type fakeIdentityLayers struct {
+	z     *fakeReplZFS
+	calls []identityRelease
+}
+
+type identityRelease struct {
+	gone            []string
+	destroyedBefore int
+	receivedBefore  int
+}
+
+func (f *fakeIdentityLayers) ReleaseIdentityLayers(_ context.Context, gone []string) ([]string, error) {
+	f.calls = append(f.calls, identityRelease{append([]string(nil), gone...), len(f.z.destroyed), len(f.z.received)})
+	return nil, nil
+}
+
+func (f *fakeIdentityLayers) releasedBefore(t *testing.T, name string) identityRelease {
+	t.Helper()
+	for _, c := range f.calls {
+		if contains(c.gone, name) {
+			return c
+		}
+	}
+	t.Fatalf("没有为 %s 放过身份层：%+v", name, f.calls)
+	return identityRelease{}
+}
+
+// 身份层克隆自本机目录的快照；挪开的副本里还有它们的来源时删不掉，所以回收前先放掉空闲的身份层。
+func TestPruneReleasesIdentityLayersBeforeDestroyingAside(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	z := &fakeReplZFS{
+		guids:    map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd@rep-2", GUID: "g2"}}}},
+		siblings: []string{"tank/nd-rebuilding-100", "tank/nd-diverged-150"},
+	}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "tank/nd", Entries: []zfs.GUIDEntry{{Name: "tank/nd@rep-2", GUID: "g2"}}}}
+	layers := &fakeIdentityLayers{z: z}
+	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080", IdentityLayers: layers}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	call := layers.releasedBefore(t, "tank/nd-rebuilding-100")
+	if contains(z.destroyed[:call.destroyedBefore], "tank/nd-rebuilding-100") || !contains(z.destroyed, "tank/nd-rebuilding-100") {
+		t.Fatalf("应先放身份层再删副本：release=%+v destroyed=%v", call, z.destroyed)
+	}
+	for _, c := range layers.calls {
+		if contains(c.gone, "tank/nd-diverged-150") {
+			t.Fatalf("保住的分叉副本不回收，也不动钉在上面的身份层：%+v", layers.calls)
+		}
+	}
+}
+
+// 写入者删了还原点或镜像，增量流要在备机上删掉对应快照；身份层克隆自它们时收流失败，最后只能整份重建。
+func TestIncrementalRoundReleasesLayersPinnedToSnapshotsThePeerDeleted(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-5", GUID: "common", Created: 1000},
+		{Name: "tank/nd/vmdk_default@old", GUID: "deleted-by-peer", Created: 500},
+		{Name: "tank/nd/vmdk_default", GUID: "d1"},
+	}}}}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "tank/nd", Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-5", GUID: "common"},
+		{Name: "tank/nd@rep-11", GUID: "peer-newer"},
+		{Name: "tank/nd/vmdk_default", GUID: "d1"},
+	}}}
+	layers := &fakeIdentityLayers{z: z}
+	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080", IdentityLayers: layers}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if call := layers.releasedBefore(t, "tank/nd/vmdk_default@old"); call.receivedBefore != 0 {
+		t.Fatalf("应在收增量之前放身份层：%+v", call)
+	}
+}
+
+// 整份重建成功后删挪开的旧副本，旧副本里装着身份层的来源，同样要先放。
+func TestWholeRebuildReleasesIdentityLayersBeforeDroppingTheOldCopy(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("备机", "http://a:8080")
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd/win11", GUID: "d1"},
+	}}}}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "tank/nd", Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-5", GUID: "peer-1"},
+		{Name: "tank/nd/win11", GUID: "d2"},
+	}}}
+	layers := &fakeIdentityLayers{z: z}
+	addRebuildProof(z, peer)
+	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080", IdentityLayers: layers}
+
+	if err := rep.PullOnce(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if len(z.destroyed) != 1 || !strings.Contains(z.destroyed[0], "-rebuilding-") {
+		t.Fatalf("destroyed = %v", z.destroyed)
+	}
+	if call := layers.releasedBefore(t, z.destroyed[0]); call.destroyedBefore != 0 {
+		t.Fatalf("应先放身份层再删旧副本：%+v", call)
+	}
+}
+
+type unavailableIdentityLayers struct{ err error }
+
+func (f unavailableIdentityLayers) ReleaseIdentityLayers(context.Context, []string) ([]string, error) {
+	return nil, f.err
+}
+
+func TestAsideCleanupStopsWhenIdentityDependenciesCannotBeRead(t *testing.T) {
+	z := &fakeReplZFS{siblings: []string{"tank/nd-rebuilding-123"}}
+	failure := errors.New("cannot read actual sessions")
+	rep := &Replicator{ZFS: z, Root: "tank/nd", IdentityLayers: unavailableIdentityLayers{failure}}
+	if err := rep.dropAside(context.Background(), "tank/nd-rebuilding-123"); !errors.Is(err, failure) {
+		t.Fatalf("dependency read failure ignored: %v", err)
+	}
+	if len(z.destroyed) > 0 {
+		t.Fatalf("aside destroyed without safety checks: %v", z.destroyed)
+	}
+}
+
+func TestAsideCleanupRejectsAnyPathOutsideItsExactRebuildingRoot(t *testing.T) {
+	for _, name := range []string{"tank/nd-diverged-123", "other/nd-rebuilding-123", "tank/nd-rebuilding-123/config", "tank/nd-rebuilding-", "tank/nd-rebuilding-nope", "tank/nd"} {
+		z := &fakeReplZFS{}
+		rep := &Replicator{ZFS: z, Root: "tank/nd"}
+		if err := rep.dropAside(context.Background(), name); err == nil || len(z.destroyed) > 0 {
+			t.Errorf("invalid path accepted: %s %v %v", name, err, z.destroyed)
+		}
+	}
+}
+
+func TestIncrementalReceiveStopsWhenIdentityReleaseFails(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	gate := ha.NewOpenGate()
+	gate.Close("standby", "http://a:8080")
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd": {Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-5", GUID: "common", Created: 1000},
+		{Name: "tank/nd/vmdk_default@old", GUID: "deleted-by-peer", Created: 500},
+		{Name: "tank/nd/vmdk_default", GUID: "d1"},
+	}}}}
+	peer := &fakeReplPeer{inv: ha.ReplicationInventory{Root: "tank/nd", Entries: []zfs.GUIDEntry{
+		{Name: "tank/nd@rep-5", GUID: "common"}, {Name: "tank/nd@rep-11", GUID: "peer-newer"}, {Name: "tank/nd/vmdk_default", GUID: "d1"},
+	}}}
+	failure := errors.New("identity dependency query failed")
+	rep := &Replicator{Store: st, ZFS: z, Root: "tank/nd", Gate: gate, Now: replTestClock(), Peer: peer, PeerURL: "http://a:8080", IdentityLayers: unavailableIdentityLayers{failure}}
+	err := rep.PullOnce(ctx)
+	if !errors.Is(err, failure) || len(z.received) > 0 || len(z.renamed) > 0 {
+		t.Fatalf("unsafe receive/rebuild proceeded after dependency failure: %v received=%v renamed=%v", err, z.received, z.renamed)
+	}
+}
+
+func TestAsidePrunePreservesAnIndependentSavedImageAcrossRetries(t *testing.T) {
+	const aside = "tank/nd-rebuilding-42"
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{
+		aside:     {Entries: []zfs.GUIDEntry{{Name: aside, GUID: "root"}, {Name: aside + "/saved-image@0", GUID: "unique-new-image"}}},
+		"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/source@0", GUID: "original-source"}}},
+	}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd"}
+	for i := 0; i < 2; i++ {
+		if err := rep.dropAside(context.Background(), aside); err == nil {
+			t.Fatal("unique saved-image point must prevent whole-tree prune, including after a failed rename/restart")
+		}
+	}
+	if len(z.destroyed) > 0 {
+		t.Fatalf("saved image lost: %v", z.destroyed)
+	}
+}
+
+func TestAsidePruneRequiresCurrentGUIDInventoryAndIgnoresOnlyRoundMarkers(t *testing.T) {
+	const aside = "tank/nd-rebuilding-42"
+	for _, fail := range []bool{false, true} {
+		z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{
+			aside:     {Entries: []zfs.GUIDEntry{{Name: aside, GUID: "root"}, {Name: aside + "/saved@0", GUID: "same-point"}, {Name: aside + "/saved@rep-old", GUID: "old-round"}}},
+			"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/renamed@0", GUID: "same-point"}}},
+		}}
+		if fail {
+			z.listErr = map[string]error{"tank/nd": errors.New("inventory unavailable")}
+		}
+		rep := &Replicator{ZFS: z, Root: "tank/nd"}
+		err := rep.dropAside(context.Background(), aside)
+		if fail {
+			if err == nil || len(z.destroyed) > 0 {
+				t.Fatalf("pruned without current GUID evidence: %v %v", err, z.destroyed)
+			}
+		} else if err != nil || len(z.destroyed) != 1 {
+			t.Fatalf("copied business point and extra system marker should remain reclaimable: %v %v", err, z.destroyed)
+		}
+	}
+}
+
+func TestAsidePruneDoesNotUseAStaleNameAfterItWasPreserved(t *testing.T) {
+	const old = "tank/nd-rebuilding-42"
+	z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{"tank/nd-diverged-42": {Entries: []zfs.GUIDEntry{{Name: "tank/nd-diverged-42/saved@0", GUID: "unique"}}}}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd"}
+	if err := rep.dropAside(context.Background(), old); err != nil {
+		t.Fatal(err)
+	}
+	if len(z.destroyed) > 0 {
+		t.Fatalf("a stale enumeration still triggered destroy: %v", z.destroyed)
+	}
+}
+
+func TestAsidePruneUsesTheSameLockAsExplicitPreservation(t *testing.T) {
+	release, err := storage.HoldAsideCopies(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	z := &fakeReplZFS{siblings: []string{"tank/nd-rebuilding-42"}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd"}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	if err := rep.dropAside(ctx, "tank/nd-rebuilding-42"); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("prune bypassed preservation lock: %v", err)
+	}
+	if len(z.destroyed) > 0 {
+		t.Fatalf("prune raced explicit preservation: %v", z.destroyed)
+	}
+}
+
+func TestAsidePruneRejectsMissingBusinessGUIDAndInventoryReadErrors(t *testing.T) {
+	const aside = "tank/nd-rebuilding-42"
+	for _, which := range []string{"missing-guid", "old-read-error", "current-read-error"} {
+		t.Run(which, func(t *testing.T) {
+			z := &fakeReplZFS{guids: map[string]zfs.GUIDInventory{
+				aside:     {Entries: []zfs.GUIDEntry{{Name: aside + "/new-image@0", GUID: ""}}},
+				"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/source@0", GUID: ""}}},
+			}, listErr: map[string]error{}}
+			if which == "old-read-error" {
+				z.listErr[aside] = errors.New("old inventory unavailable")
+			}
+			if which == "current-read-error" {
+				z.listErr["tank/nd"] = errors.New("current inventory unavailable")
+			}
+			rep := &Replicator{ZFS: z, Root: "tank/nd"}
+			if err := rep.dropAside(context.Background(), aside); err == nil || len(z.destroyed) > 0 {
+				t.Fatalf("unknown GUID evidence accepted: %v %v", err, z.destroyed)
+			}
+		})
+	}
+}
+
+type headAwareReplZFS struct {
+	*fakeReplZFS
+	headWritten int64
+	headErr     error
+	headBases   []string
+}
+
+func (f *headAwareReplZFS) WrittenSince(_ context.Context, dataset, snapshot string) (int64, error) {
+	f.headBases = append(f.headBases, dataset+"@"+snapshot)
+	return f.headWritten, f.headErr
+}
+func TestAsidePruneProtectsHeadWritesBeyondTheLatestSharedSnapshot(t *testing.T) {
+	const aside = "tank/nd-rebuilding-42"
+	for _, kind := range []string{"written", "read-error", "clean"} {
+		t.Run(kind, func(t *testing.T) {
+			z := &headAwareReplZFS{fakeReplZFS: &fakeReplZFS{guids: map[string]zfs.GUIDInventory{
+				aside:     {Entries: []zfs.GUIDEntry{{Name: aside + "/saved", GUID: "volume"}, {Name: aside + "/saved@0", GUID: "shared", Created: 1}, {Name: aside + "/saved@rep-only-here", GUID: "private-round", Created: 2}}},
+				"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd/saved@0", GUID: "shared", Created: 1}}},
+			}}}
+			if kind == "written" {
+				z.headWritten = 4096
+			}
+			if kind == "read-error" {
+				z.headErr = errors.New("cannot read written@0")
+			}
+			rep := &Replicator{ZFS: z, Root: "tank/nd"}
+			err := rep.dropAside(context.Background(), aside)
+			if kind == "clean" {
+				if err != nil || len(z.destroyed) != 1 {
+					t.Fatalf("unchanged shared head not reclaimed: %v %v", err, z.destroyed)
+				}
+			} else if err == nil || len(z.destroyed) > 0 {
+				t.Fatalf("private head lost despite shared snapshot: %v %v", err, z.destroyed)
+			}
+			if len(z.headBases) != 1 || z.headBases[0] != aside+"/saved@0" {
+				t.Fatalf("must check relative to shared GUID, never private newer rep marker: %v", z.headBases)
+			}
+		})
+	}
+}
+
+func TestAsidePrunePreservesABusinessHeadWithoutAnySharedSnapshot(t *testing.T) {
+	const aside = "tank/nd-rebuilding-42"
+	z := &headAwareReplZFS{fakeReplZFS: &fakeReplZFS{guids: map[string]zfs.GUIDInventory{
+		aside:     {Entries: []zfs.GUIDEntry{{Name: aside + "/new-image", GUID: "private-volume"}, {Name: aside + "/new-image@rep-private", GUID: "private-round"}}},
+		"tank/nd": {Entries: []zfs.GUIDEntry{{Name: "tank/nd@rep-current", GUID: "other-round"}}},
+	}}}
+	rep := &Replicator{ZFS: z, Root: "tank/nd"}
+	if err := rep.dropAside(context.Background(), aside); err == nil || len(z.destroyed) > 0 {
+		t.Fatalf("head without shared baseline lost: %v %v", err, z.destroyed)
+	}
+	if len(z.headBases) > 0 {
+		t.Fatalf("private-only snapshot was treated as shared evidence: %v", z.headBases)
 	}
 }

@@ -293,28 +293,78 @@ func inspectLinux(mounts []mountedFS) []storage.InspectItem {
 	return append(items, iscsiBootItem(rootFS, mounts))
 }
 
-// iscsiBootItem 检查内核参数：仅装了 open-iscsi 不够，内核命令行带 iscsi_auto 时 initramfs 才会登录。
+// iscsiBootItem 检查 Ubuntu initramfs-tools 与 RHEL dracut 的实际启动参数。
 func iscsiBootItem(rootFS string, mounts []mountedFS) storage.InspectItem {
-	cfg, ok := lookupPath(rootFS, storage.LinuxGrubCfgPath)
+	roots := []string{rootFS}
 	for _, m := range mounts {
-		if ok {
-			break
-		}
-		// LVM 安装的 /boot 是独立分区，grub/grub.cfg 在其顶层。
 		if m.Root != rootFS {
-			cfg, ok = lookupPath(m.Root, "grub/grub.cfg")
+			roots = append(roots, m.Root)
 		}
 	}
-	if !ok {
-		return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthWarn,
-			Detail: "根分区和单独的 /boot 分区里都没有 grub/grub.cfg，无法确认开机时会连 iSCSI 系统盘；这种镜像暂不支持自动适配"}
+	var configs, kernelopts []string
+	for _, root := range roots {
+		for _, base := range []string{"boot", "."} {
+			for _, pattern := range []string{"grub/grub.cfg", "grub2/grub.cfg", "efi/EFI/*/grub.cfg", "EFI/*/grub.cfg", "loader/entries/*.conf"} {
+				paths, _ := filepath.Glob(filepath.Join(root, base, pattern))
+				for _, p := range paths {
+					if b, err := os.ReadFile(p); err == nil {
+						configs = append(configs, string(b))
+					}
+				}
+			}
+			for _, pattern := range []string{"grub2/grubenv", "efi/EFI/*/grubenv", "EFI/*/grubenv"} {
+				paths, _ := filepath.Glob(filepath.Join(root, base, pattern))
+				for _, p := range paths {
+					if b, err := os.ReadFile(p); err == nil {
+						for _, line := range strings.Split(string(b), "\n") {
+							if value, ok := strings.CutPrefix(line, "kernelopts="); ok {
+								kernelopts = append(kernelopts, value)
+							}
+						}
+					}
+				}
+			}
+		}
 	}
-	b, err := os.ReadFile(cfg)
-	if err == nil && slices.Contains(strings.Fields(string(b)), storage.LinuxKernelParam) {
-		return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthOK, Detail: "内核参数带 iscsi_auto，initramfs 开机时会连 iSCSI 系统盘"}
+	if len(configs) == 0 {
+		return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthWarn,
+			Detail: "请检查镜像的 GRUB 配置：根分区、独立启动分区和 EFI 分区未找到 grub.cfg 或 BLS 启动条目，无法确认 iSCSI 启动参数"}
+	}
+	for _, cfg := range configs {
+		for _, line := range strings.Split(cfg, "\n") {
+			fields := strings.Fields(line)
+			if comment := slices.Index(fields, "#"); comment >= 0 {
+				fields = fields[:comment]
+			}
+			if len(fields) < 2 {
+				continue
+			}
+			switch fields[0] {
+			case "linux", "linuxefi", "linux16", "options":
+			default:
+				continue
+			}
+			args := strings.Join(fields[1:], " ")
+			candidates := []string{args}
+			if slices.Contains(fields, "$kernelopts") || slices.Contains(fields, "${kernelopts}") {
+				candidates = nil
+				for _, opts := range kernelopts {
+					candidates = append(candidates, strings.ReplaceAll(strings.ReplaceAll(args, "${kernelopts}", opts), "$kernelopts", opts))
+				}
+			}
+			for _, candidate := range candidates {
+				params := strings.Fields(candidate)
+				if slices.Contains(params, storage.LinuxKernelParam) {
+					return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthOK, Detail: "启动条目含 iscsi_auto（initramfs-tools iSCSI 启动参数）"}
+				}
+				if slices.Contains(params, "rd.iscsi.firmware=1") && slices.Contains(params, "rd.neednet=1") {
+					return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthOK, Detail: "启动条目含 rd.iscsi.firmware=1 与 rd.neednet=1（dracut iBFT 启动参数）"}
+				}
+			}
+		}
 	}
 	return storage.InspectItem{Name: "iscsi_boot", Level: domain.HealthWarn,
-		Detail: "内核参数没有 iscsi_auto，开机会停在 initramfs、找不到根分区：请用原文件重新导入这个镜像，导入时会自动加上"}
+		Detail: "请检查镜像的 iSCSI 启动配置：Ubuntu 启动条目需要 iscsi_auto；RHEL 系需要 rd.iscsi.firmware=1 与 rd.neednet=1，当前未找到完整参数"}
 }
 
 // lookupPath 不区分大小写地解析以斜杠分隔的相对路径（NTFS 在 Linux 上挂载时大小写不定）。
@@ -341,6 +391,44 @@ func lookupPath(root, rel string) (string, bool) {
 		current = found
 	}
 	return current, true
+}
+
+// ensureDirFold 是 lookupPath 的写入版：逐级按不区分大小写复用已有目录，缺的才按 rel 的写法新建。
+// Windows 卷在 Linux 上（ntfs3）区分大小写；照字面 MkdirAll 会在 WINDOWS\system32 旁边再建一棵
+// Windows\System32，Windows 下两者同名，写进去的东西等于没写。
+func ensureDirFold(root, rel string) (string, error) {
+	current := root
+	for _, part := range strings.Split(filepath.ToSlash(rel), "/") {
+		if part == "" {
+			continue
+		}
+		next := filepath.Join(current, part)
+		if entries, err := os.ReadDir(current); err == nil {
+			for _, e := range entries {
+				if e.IsDir() && strings.EqualFold(e.Name(), part) {
+					next = filepath.Join(current, e.Name())
+					break
+				}
+			}
+		}
+		if err := os.MkdirAll(next, 0o755); err != nil {
+			return "", err
+		}
+		current = next
+	}
+	return current, nil
+}
+
+// fileFold 返回 dir 下与 name 不区分大小写同名的已有文件路径，没有则返回按 name 拼出的路径。
+func fileFold(dir, name string) string {
+	if entries, err := os.ReadDir(dir); err == nil {
+		for _, e := range entries {
+			if !e.IsDir() && strings.EqualFold(e.Name(), name) {
+				return filepath.Join(dir, e.Name())
+			}
+		}
+	}
+	return filepath.Join(dir, name)
 }
 
 func aggregateLevel(items []storage.InspectItem) domain.HealthLevel {

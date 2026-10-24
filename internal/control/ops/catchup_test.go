@@ -50,7 +50,7 @@ func TestCatchUpAfterASuperSaveSendsOnlyTheNewRestorePoint(t *testing.T) {
 		[]string{"/img", "0=i0", "rep-1=i1"},
 		[]string{"/cfg</img@0", "1=c1", "rep-1=c1r"},
 	)
-	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", 0)
+	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +71,7 @@ func TestCatchUpSendsANewConfigAsAClone(t *testing.T) {
 		[]string{"", "rep-1=r1"},
 		[]string{"/img", "0=i0", "rep-1=i1"},
 	)
-	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", 0)
+	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestCatchUpDeletesWhatTheWriterRemovedAndSkipsWhatIsNewer(t *testing.T) {
 		[]string{"/old</img@0", "0=o0", "rep-1=o1"},
 		[]string{"/old/child", "0=oc0", "rep-1=oc1"},
 	)
-	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", 0)
+	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -115,13 +115,55 @@ func TestCatchUpRefusesToRollBackRestorePointsWrittenHere(t *testing.T) {
 		[]string{"/img", "0=i0", "rep-1=i1", "mine=m1"},
 	)
 	base := local.Entries[1].Created // 本机 root@rep-1 的创建时间
-	_, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", base)
+	_, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", base)
 	if !errors.Is(err, errCatchUpDiverged) || !strings.Contains(err.Error(), "/img@mine") {
 		t.Fatalf("err = %v", err)
 	}
 }
 
-// 同名但无共同快照时不硬追，返回错误。
+// 写入者删掉又建了同名镜像（连同它的配置）：本机旧的那份带着共同根标记、之后没写过，
+// 只删这两个数据集按新数据集重收（克隆先删、源后删），其余照常增量，不整份重建。
+func TestCatchUpReplacesADatasetRecreatedUnderTheSameName(t *testing.T) {
+	sender := inv("data/nd",
+		[]string{"", "rep-1=r1", "rep-2=r2"},
+		[]string{"/keep", "0=k0", "rep-1=k1", "rep-2=k2"},
+		[]string{"/img", "0=x0", "rep-2=x2"},
+		[]string{"/img_default</img@0", "rep-2=y2"},
+	)
+	local := inv("tank/nd",
+		[]string{"", "rep-1=r1"},
+		[]string{"/keep", "0=k0", "rep-1=k1"},
+		[]string{"/img", "0=i0", "rep-1=i1"},
+		[]string{"/img_default</img@0", "rep-1=c1"},
+	)
+	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-1", "rep-2", 1_000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "destroy /img_default; destroy /img; incremental /keep rep-1→rep-2; full /img to 0; incremental /img 0→rep-2; " +
+		"clone /img_default from /img@0 to rep-2; incremental (根) rep-1→rep-2"
+	if got := steps(plan); got != want {
+		t.Fatalf("plan =\n%s\nwant\n%s", got, want)
+	}
+}
+
+// 旧数据集在共同标记之后本机自己打过还原点：不能当成写入者丢弃的东西删掉，按分叉处理。
+func TestCatchUpKeepsARecreatedDatasetThatHoldsLocalRestorePoints(t *testing.T) {
+	sender := inv("data/nd",
+		[]string{"", "rep-1=r1", "rep-2=r2"},
+		[]string{"/img", "0=x0", "rep-2=x2"},
+	)
+	local := inv("tank/nd",
+		[]string{"", "rep-1=r1"},
+		[]string{"/img", "0=i0", "rep-1=i1", "mine=m1"},
+	)
+	_, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-1", "rep-2", 103)
+	if !errors.Is(err, errCatchUpDiverged) {
+		t.Fatalf("应按分叉处理，err = %v", err)
+	}
+}
+
+// 同名但无共同快照、也不带共同根标记时不硬追，返回错误。
 func TestCatchUpGivesUpOnADatasetWithNothingInCommon(t *testing.T) {
 	sender := inv("data/nd",
 		[]string{"", "rep-1=r1", "rep-2=r2"},
@@ -131,7 +173,7 @@ func TestCatchUpGivesUpOnADatasetWithNothingInCommon(t *testing.T) {
 		[]string{"", "rep-1=r1"},
 		[]string{"/img", "0=i0", "rep-1=i1"},
 	)
-	if _, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", 0); err == nil || errors.Is(err, errCatchUpDiverged) {
+	if _, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", 0); err == nil || errors.Is(err, errCatchUpDiverged) {
 		t.Fatalf("应放弃逐个追（交给整份重建），err = %v", err)
 	}
 	_ = fmt.Sprint
@@ -150,7 +192,7 @@ func TestCatchUpReplacesAnEmptyShellDataset(t *testing.T) {
 		[]string{"/db"},
 		[]string{"/img", "0=i0", "rep-1=i1"},
 	)
-	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "rep-2", 0)
+	plan, err := planCatchUp(sender, "data/nd", local, "tank/nd", "", "rep-2", 0)
 	if err != nil {
 		t.Fatal(err)
 	}

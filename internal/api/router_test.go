@@ -23,6 +23,7 @@ import (
 	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/assets"
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
 	"github.com/tianwei/diskless/internal/control/ops"
 	"github.com/tianwei/diskless/internal/control/platform"
 	"github.com/tianwei/diskless/internal/domain"
@@ -75,8 +76,8 @@ func TestBootEndpoint(t *testing.T) {
 	service := &fakeBootService{script: "#!ipxe\n"}
 	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Boot: service})
 
-	// 多出的查询参数是 dnsmasq 启动 URL 一直在发的硬件画像参数，现在没人读，但旧启动 URL 必须照样能启动。
-	req := httptest.NewRequest(http.MethodGet, "/boot?mac=aa:bb&platform=efi&busid=01:00:8086:15b8&manufacturer=ASUS&product=PRIME", nil)
+	// 启动 URL 带的硬件参数交给机型归并；没带（老启动 URL）也照样能启动。
+	req := httptest.NewRequest(http.MethodGet, "/boot?mac=aa:bb&platform=efi&busid=01:80:86:15:b8&busloc=1024&manufacturer=ASUS&product=PRIME", nil)
 	rec := httptest.NewRecorder()
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusOK {
@@ -84,6 +85,9 @@ func TestBootEndpoint(t *testing.T) {
 	}
 	if service.mac != "aa:bb" || rec.Body.String() != "#!ipxe\n" {
 		t.Fatalf("mac=%q body=%q", service.mac, rec.Body.String())
+	}
+	if got := strings.Join(service.hardware, " "); got != "aa:bb efi 01:80:86:15:b8 1024 ASUS PRIME" {
+		t.Fatalf("hardware = %q", got)
 	}
 }
 
@@ -94,6 +98,23 @@ func TestBootChecksTheClientsFirmwareAgainstTheImage(t *testing.T) {
 	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot?mac=aa:bb&platform=efi", nil))
 	if rec.Code != http.StatusOK || strings.Join(service.checked, " ") != "aa:bb efi" {
 		t.Fatalf("status=%d checked=%v", rec.Code, service.checked)
+	}
+}
+
+func TestBootReturnsASCIIRejectForBIOSWithoutSanboot(t *testing.T) {
+	reject := "#!ipxe\necho Diskless boot blocked\nsleep 30\nexit\n"
+	service := &fakeBootService{script: "#!ipxe\nsanboot\n", rejectScript: reject, reject: true}
+	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Boot: service})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot?mac=aa:bb&platform=pcbios", nil))
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if got := rec.Body.String(); got != reject {
+		t.Fatalf("body = %q, want reject script", got)
+	}
+	if service.built {
+		t.Fatal("BIOS reject must not call BuildBootScript (would sanhook)")
 	}
 }
 
@@ -144,6 +165,19 @@ func TestBootEndpointErrors(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("unknown mac status = %d", rec.Code)
+	}
+}
+
+func TestBootEndpointMapsInvalidToBadRequest(t *testing.T) {
+	service := &fakeBootService{err: errs.Invalid("ISO 安装首期仅支持 UEFI，请在客户机固件中启用 UEFI 网络启动")}
+	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Boot: service})
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/boot?mac=aa:bb&platform=pcbios", nil))
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("Invalid boot error must be 400, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "仅支持 UEFI") {
+		t.Fatalf("body should carry the Invalid message, got %q", rec.Body.String())
 	}
 }
 
@@ -286,6 +320,31 @@ func TestBootDataDisksAsTextForShellScripts(t *testing.T) {
 	}
 }
 
+// 镜像里只烘焙启动器，开机时取这里的挂盘脚本运行；和取盘符一样只回答问自己的客户机。
+func TestBootMountScriptEndpoint(t *testing.T) {
+	service := &fakeBootService{mountScript: "# ndiskless:mount-disks\r\n$port = '8080'\r\n", registeredIP: "10.0.0.7"}
+	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Boot: service})
+
+	req := httptest.NewRequest(http.MethodGet, "/boot/mount-script?mac=aa:bb&format=text", nil)
+	req.RemoteAddr = "10.0.0.7:49152"
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || rec.Body.String() != service.mountScript || service.mac != "aa:bb" {
+		t.Fatalf("status=%d mac=%q body=%q", rec.Code, service.mac, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Fatalf("content type = %q", ct)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/boot/mount-script?mac=aa:bb&format=text", nil)
+	req.RemoteAddr = "10.0.0.9:49152"
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("别人来问 status = %d, want 404", rec.Code)
+	}
+}
+
 func TestBootNetConfigEndpoint(t *testing.T) {
 	service := &fakeBootService{net: control.NetConfig{Gateway: "192.168.50.1", DNS: []string{"223.5.5.5"}}}
 	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Boot: service})
@@ -350,7 +409,7 @@ func TestRuntimeEndpoint(t *testing.T) {
 }
 
 func TestRuntimeEndpointUsesSettingsService(t *testing.T) {
-	settings := &fakeSettingsService{view: platform.SystemSettingsView{ImportDir: "/data/imports", DefaultImportDir: "/var/lib/ndiskless/imports"}}
+	settings := &fakeSettingsService{view: platform.SystemSettingsView{ImportDir: "/data/imports"}}
 	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Runtime: RuntimeConfig{ImportDir: "/var/lib/ndiskless/imports"}, Settings: settings})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/runtime", nil)
@@ -368,8 +427,19 @@ func TestRuntimeEndpointUsesSettingsService(t *testing.T) {
 	}
 }
 
+func TestWindowsPolicySettingEndpoint(t *testing.T) {
+	service := &fakeSettingsService{view: platform.SystemSettingsView{EnforceWindowsPolicy: true}}
+	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Settings: service})
+	req := httptest.NewRequest(http.MethodPut, "/api/settings/windows-policy", bytes.NewBufferString(`{"enforce":false}`))
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	if rec.Code != http.StatusOK || service.view.EnforceWindowsPolicy || !strings.Contains(rec.Body.String(), `"enforce_windows_policy":false`) {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestSettingsEndpoints(t *testing.T) {
-	service := &fakeSettingsService{view: platform.SystemSettingsView{ImportDir: "/tank/imports", DefaultImportDir: "/var/lib/ndiskless/imports"}}
+	service := &fakeSettingsService{view: platform.SystemSettingsView{ImportDir: "/tank/imports"}}
 	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, Services{Settings: service})
 
 	req := httptest.NewRequest(http.MethodGet, "/api/settings", nil)
@@ -1361,6 +1431,16 @@ type fakeBootService struct {
 	registeredErr     error
 	failure           []string
 	checked           []string
+	hardware          []string
+	mountScript       string
+	rejectScript      string
+	reject            bool
+	built             bool
+}
+
+func (s *fakeBootService) MountScript(_ context.Context, mac string) (string, error) {
+	s.mac = mac
+	return s.mountScript, s.err
 }
 
 func (s *fakeBootService) RegisteredIP(_ context.Context, _ string) (string, error) {
@@ -1369,7 +1449,15 @@ func (s *fakeBootService) RegisteredIP(_ context.Context, _ string) (string, err
 
 func (s *fakeBootService) BuildBootScript(_ context.Context, mac string) (string, error) {
 	s.mac = mac
+	s.built = true
 	return s.script, s.err
+}
+
+func (s *fakeBootService) DisklessFirmwareReject(_ context.Context, mac, platform string) (string, bool, error) {
+	if s.reject {
+		return s.rejectScript, true, nil
+	}
+	return "", false, nil
 }
 
 func (s *fakeBootService) RecordBootFailure(_ context.Context, mac, stage, code, platform string) error {
@@ -1379,6 +1467,11 @@ func (s *fakeBootService) RecordBootFailure(_ context.Context, mac, stage, code,
 
 func (s *fakeBootService) CheckBootMode(_ context.Context, mac, platform string) error {
 	s.checked = []string{mac, platform}
+	return nil
+}
+
+func (s *fakeBootService) RecordHardware(_ context.Context, mac string, hints hwprofile.Hints) error {
+	s.hardware = []string{mac, hints.Platform, hints.BusID, hints.BusLoc, hints.Manufacturer, hints.Product}
 	return nil
 }
 
@@ -1972,6 +2065,11 @@ func (s *fakeSettingsService) Get(context.Context) (platform.SystemSettingsView,
 	return s.view, s.err
 }
 
+func (s *fakeSettingsService) SaveWindowsPolicy(_ context.Context, req platform.WindowsPolicyRequest) (platform.SystemSettingsView, error) {
+	s.view.EnforceWindowsPolicy = req.Enforce
+	return s.view, s.err
+}
+
 func (s *fakeSettingsService) Save(_ context.Context, req platform.SystemSettingsRequest) (platform.SystemSettingsView, error) {
 	s.saveReq = req
 	if s.err != nil {
@@ -1985,23 +2083,22 @@ func (s *fakeSettingsService) Save(_ context.Context, req platform.SystemSetting
 // handler 运行前返回 401（服务都是零值，走到就会 panic）。用来抓将来注册在认证组外的路由。
 func TestEveryAPIRouteRequiresAuth(t *testing.T) {
 	svc := Services{
-		Auth:        platform.AuthService{Secret: []byte("test-secret")},
-		Images:      assets.ImageService{},
-		Configs:     assets.ConfigService{},
-		Reductions:  assets.ReductionService{},
-		Groups:      assets.GroupService{},
-		GroupDisks:  assets.GroupDiskService{},
-		Terminals:   assets.TerminalService{},
-		Pools:       ops.PoolService{},
-		Users:       platform.UserService{},
-		Backups:     ops.BackupService{},
-		Settings:    platform.SystemSettingsService{},
-		Tasks:       assets.ImageService{},
-		Drivers:     adapt.DriverService{},
-		Adaptations: adapt.AdaptationService{},
-		Server:      platform.ServiceService{},
-		Audit:       platform.AuditService{},
-		Alarms:      platform.AlarmService{},
+		Auth:       platform.AuthService{Secret: []byte("test-secret")},
+		Images:     assets.ImageService{},
+		Configs:    assets.ConfigService{},
+		Reductions: assets.ReductionService{},
+		Groups:     assets.GroupService{},
+		GroupDisks: assets.GroupDiskService{},
+		Terminals:  assets.TerminalService{},
+		Pools:      ops.PoolService{},
+		Users:      platform.UserService{},
+		Backups:    ops.BackupService{},
+		Settings:   platform.SystemSettingsService{},
+		Tasks:      assets.ImageService{},
+		Drivers:    adapt.DriverService{},
+		Server:     platform.ServiceService{},
+		Audit:      platform.AuditService{},
+		Alarms:     platform.AlarmService{},
 	}
 	router := NewRouter(slog.New(slog.NewTextHandler(io.Discard, nil)), nil, svc)
 
@@ -2384,11 +2481,20 @@ func (emptyBootService) DataDiskLetters(context.Context, string) ([]control.Data
 func (emptyBootService) NetConfig(context.Context, string) (control.NetConfig, error) {
 	return control.NetConfig{}, control.ErrUnknownTerminal
 }
+func (emptyBootService) MountScript(context.Context, string) (string, error) {
+	return "", control.ErrUnknownTerminal
+}
 func (emptyBootService) RegisteredIP(context.Context, string) (string, error) { return "", nil }
 func (emptyBootService) RecordBootFailure(context.Context, string, string, string, string) error {
 	return control.ErrUnknownTerminal
 }
 func (emptyBootService) CheckBootMode(context.Context, string, string) error { return nil }
+func (emptyBootService) DisklessFirmwareReject(context.Context, string, string) (string, bool, error) {
+	return "", false, nil
+}
+func (emptyBootService) RecordHardware(context.Context, string, hwprofile.Hints) error {
+	return nil
+}
 
 // 认得这台机器，并报出它登记的地址。
 type fixedIPBootService struct {

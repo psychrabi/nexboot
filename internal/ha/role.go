@@ -82,6 +82,15 @@ type PeerStatus struct {
 	Mark string `json:"mark,omitempty"`
 	// Healthy 是本节点自身的健康检查结果。健康的主机可以收回 VIP 继续服务，不应被接任。
 	Healthy bool `json:"healthy,omitempty"`
+	// Lacks 列出本节点库里记着、池里却没有的数据集（MissingDataset.Ref）。接任方据此认出
+	// 「哪台都没有」的残留记录：每个应答的节点都缺的，让给谁都补不齐（见 settleTakeover）。
+	Lacks []string `json:"lacks,omitempty"`
+}
+
+// MissingDataset 是库里记着、池里却没有的一个对象：Ref 是数据集名（镜像/配置 ID），Label 给人看。
+type MissingDataset struct {
+	Ref   string
+	Label string
 }
 
 // PeerStatusClient 读取对端角色。守卫把出错视为对端已死：keepalived 只在它自己的检查也失败时才调用激活。
@@ -133,7 +142,7 @@ type Controller struct {
 	// Healthy 返回本节点自身健康检查结果，供上报给对端。
 	Healthy func(ctx context.Context) bool
 	// CatalogueIncomplete 列出复制来的 DB 副本里记录了、本节点池里却没有的对象（nil 或空表示完整）。
-	CatalogueIncomplete func(ctx context.Context) []string
+	CatalogueIncomplete func(ctx context.Context) []MissingDataset
 	// CatchUp 直接从对端自己的地址（不是 VIP，那时 VIP 正在本机）拉取目录，
 	// 直到本节点完整持有 target。见 takeover.go。
 	CatchUp func(ctx context.Context, from PeerStatusClient, target string) error
@@ -156,6 +165,11 @@ type Controller struct {
 	activating sync.Mutex
 	stateMu    sync.Mutex
 	takeover   TakeoverState
+	// lacks 缓存本节点上报给对端的「库里有、池里没有」清单：每次 status 都要打开库副本核对，
+	// 而对端每十几秒就来问一次。
+	lacksMu sync.Mutex
+	lacksAt time.Time
+	lacks   []string
 	// handoverTimer 在没人完成交接时重新打开写入者。
 	handoverTimer *time.Timer
 }
@@ -548,8 +562,71 @@ func (c *Controller) PlannedSwitch(ctx context.Context) error {
 			}
 			return fmt.Errorf("切换前同步未完成，已保持主机身份: %w", err)
 		}
+		// 排空看的是本机「发出去了」，备机收没收下要问它自己。没收下的备机拿到 VIP 会以落后为由
+		// 让出、VIP 再回来，来回漂十分钟；不如现在拒绝，让运维先修它的复制。
+		if err := c.standbysHold(ctx, c.mark(ctx)); err != nil {
+			if c.ResumeRounds != nil {
+				c.ResumeRounds()
+			}
+			if c.Gate != nil && c.State().Role == "active" {
+				c.Gate.Open()
+			}
+			return fmt.Errorf("切换前同步未完成，已保持主机身份: %w", err)
+		}
 	}
 	return c.standby(ctx, "planned switch", plannedSwitchAnswer)
+}
+
+// plannedSwitchConfirm 是计划切换确认备机已持有最后一轮的最长等待；plannedSwitchPoll 是询问间隔。
+var (
+	plannedSwitchConfirm = time.Minute
+	plannedSwitchPoll    = 2 * time.Second
+)
+
+// standbysHold 等每台能接 VIP 的健康备机自报持有 target（或更新），超时返回点名的错误。
+// 问不到的对端不等：它接不住 VIP。target 为空（不知道本机标记）时不核对。
+func (c *Controller) standbysHold(ctx context.Context, target string) error {
+	if target == "" || c.CatalogueMark == nil {
+		return nil
+	}
+	deadline := time.Now().Add(plannedSwitchConfirm)
+	for {
+		var probes []PeerStatusClient
+		if c.ClusterPeers != nil {
+			probes = c.ClusterPeers(ctx)
+		}
+		if len(probes) == 0 && c.Peer != nil {
+			probes = []PeerStatusClient{c.Peer}
+		}
+		var behind []string
+		for _, p := range probes {
+			pctx, cancel := context.WithTimeout(ctx, peerProbeTimeout)
+			st, err := p.Status(pctx)
+			cancel()
+			if err != nil || st.Role == "active" || !st.Healthy || (c.NodeID != "" && st.NodeID == c.NodeID) {
+				continue
+			}
+			if markNewer(target, st.Mark) {
+				who := "对端"
+				if st.NodeID != "" {
+					who = "节点 " + st.NodeID
+				}
+				behind = append(behind, fmt.Sprintf("%s（停在 %s）", who, markClock(st.Mark)))
+			}
+		}
+		if len(behind) == 0 {
+			return nil
+		}
+		if !time.Now().Before(deadline) {
+			return fmt.Errorf("备机未持有最后一轮（%s）：%s。它接任会因目录落后而拒绝，请先检查它的复制状态",
+				markClock(target), strings.Join(behind, "、"))
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(plannedSwitchPoll):
+		}
+	}
 }
 
 // APIStatus 是面向运维的 HA 视图（/api/ha）。

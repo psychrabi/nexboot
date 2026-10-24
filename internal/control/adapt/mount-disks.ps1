@@ -1,13 +1,17 @@
+# ndiskless:mount-disks
 <#
-  ndiskless 客户机启动脚本。由服务端在每次开机时合并进系统克隆盘的「本地 GPO
-  机器启动脚本」（随驱动适配注入时同样携带），每台客户机每次开机以 SYSTEM 运行：
+  ndiskless 客户机启动脚本。镜像里烘焙的启动器 mount-boot.ps1 每次开机向服务器取本脚本的
+  最新版运行（取不到就跑烘焙的副本），每台客户机每次开机以 SYSTEM 运行：
     1) 从当前 iSCSI 会话取服务端地址（能无盘开机则必可达）；
     2) GET /boot/net-config?mac= 恢复默认网关与 DNS —— C-1 在 sanhook 前清零了
        网关（防 Windows 对同网段 iSCSI 目标建坏路由），Windows 按 iBFT 把启动
        网卡配成静态且不再 DHCP，不补路由客户机就上不了网。只加路由、不动 IP
        配置，iSCSI 会话不受影响；同网段目标因最长前缀匹配永远直连，另加 /32
        直连路由双保险；
-    3) GET /boot/data-disks?mac= 拉取数据盘 LUN→盘符 映射，按 SCSI LUN 定位
+    3) 服务端开关打开时（默认），关闭自动更新、自动重启、睡眠和休眠：无盘客户机每次
+       开机都还原，自动更新会反复下载、装完自动重启，重启时 iSCSI 系统盘已断开，常停在
+       关机状态；睡眠前也会登出 iSCSI。先读后写，镜像里已关好时只读几个值；
+    4) GET /boot/data-disks?mac= 拉取数据盘 LUN→盘符 映射，按 SCSI LUN 定位
        iSCSI 数据盘并校正盘符（幂等）。
   管理台改配置后客户机下次开机即生效。任何失败只写日志、不阻塞启动。
   日志：C:\ndadapt\mount.log（每次开机覆盖，只反映最近一次）。
@@ -19,6 +23,8 @@ New-Item -ItemType Directory -Force -Path $work | Out-Null
 $logFile = Join-Path $work 'mount.log'
 "start $(Get-Date -Format o) as $(whoami)" | Out-File $logFile -Encoding utf8
 function Log($m) { $m | Out-File $logFile -Append -Encoding utf8 }
+# 启动器（mount-boot.ps1）设置：server = 开机时从服务器取的最新版，baked = 镜像里烘焙的副本。
+Log "script: $(if ($env:ND_MOUNT_SOURCE) { $env:ND_MOUNT_SOURCE } else { 'direct' })"
 
 # 数据盘 = 系统 iSCSI target 上 LUN>=1 的盘；返回其 Win32_DiskDrive（含 Index/SCSILogicalUnit）
 function Find-DataDisk($lun) {
@@ -36,34 +42,56 @@ function Get-DataPartition($diskIndex) {
 }
 
 try {
-  # 1) 服务端地址与本端地址：都取自当前 iSCSI 会话
-  $sessions = @(Get-CimInstance -Namespace root/wmi -ClassName MSiSCSIInitiator_SessionClass -ErrorAction SilentlyContinue |
-    ForEach-Object { $_.ConnectionInformation })
-  $addrs = @($sessions | ForEach-Object { $_.TargetAddress } | Where-Object { $_ } | Sort-Object -Unique)
-  $initAddrs = @($sessions | ForEach-Object { $_.InitiatorAddress } | Where-Object { $_ } | Sort-Object -Unique)
-  if (-not $addrs.Count) { Log 'no iscsi session address; skip'; exit 0 }
-
-  # 逐物理网卡 MAC 查询（服务端按启动网卡 MAC 记录终端，试到命中为止）
-  $macs = @(Get-CimInstance Win32_NetworkAdapter |
-    Where-Object { $_.PhysicalAdapter -and $_.MACAddress } |
-    ForEach-Object { $_.MACAddress } | Sort-Object -Unique)
+  # WMI and networking can start after gpsvc. One deadline covers every discovery and callback candidate.
+  $deadline = (Get-Date).AddSeconds(90)
+  $sharedDeadline = [DateTime]::MinValue
+  if ([DateTime]::TryParse($env:ND_MOUNT_DEADLINE, [ref]$sharedDeadline) -and $sharedDeadline -lt $deadline) { $deadline = $sharedDeadline }
+  function Request-Timeout {
+    [int][Math]::Min(5, [Math]::Floor(($deadline - (Get-Date)).TotalSeconds))
+  }
   $net = $null
   $items = $null
-  foreach ($addr in $addrs) {
-    foreach ($mac in $macs) {
-      try {
-        $net = Invoke-RestMethod -Uri "http://${addr}:${port}/boot/net-config?mac=${mac}" -TimeoutSec 5
-        try {
-          $resp = Invoke-RestMethod -Uri "http://${addr}:${port}/boot/data-disks?mac=${mac}" -TimeoutSec 5
-          $items = @($resp.items)
-        } catch { Log "data-disks fetch failed: $($_.Exception.Message)" }
-        Log "config from ${addr} mac=${mac}: net=$($net | ConvertTo-Json -Compress) disks=$($items | ConvertTo-Json -Compress)"
-        break
-      } catch { }
-    }
+  :retry for ($attempt = 1; $attempt -le 12; $attempt++) {
+    $timeout = Request-Timeout
+    if ($timeout -le 0) { break }
+    try {
+      $sessions = @(Get-CimInstance -Namespace root/wmi -ClassName MSiSCSIInitiator_SessionClass -OperationTimeoutSec $timeout -ErrorAction Stop |
+        ForEach-Object { $_.ConnectionInformation })
+      $addrs = @($sessions | ForEach-Object { $_.TargetAddress } | Where-Object { $_ } | Sort-Object -Unique)
+      $initAddrs = @($sessions | ForEach-Object { $_.InitiatorAddress } | Where-Object { $_ } | Sort-Object -Unique)
+      $timeout = Request-Timeout
+      if ($timeout -le 0) { break }
+      $macs = @(Get-CimInstance -ClassName Win32_NetworkAdapter -OperationTimeoutSec $timeout -ErrorAction Stop |
+        Where-Object { $_.PhysicalAdapter -and $_.MACAddress } |
+        ForEach-Object { $_.MACAddress } | Sort-Object -Unique)
+      Log "attempt ${attempt}: iscsi addresses=$($addrs.Count) physical macs=$($macs.Count)"
+      foreach ($addr in $addrs) {
+        foreach ($mac in $macs) {
+          $timeout = Request-Timeout
+          if ($timeout -le 0) { break retry }
+          try {
+            $net = Invoke-RestMethod -Uri "http://${addr}:${port}/boot/net-config?mac=${mac}" -TimeoutSec $timeout -ErrorAction Stop
+            Log "attempt ${attempt}: net-config accepted from ${addr} mac=${mac}"
+            break
+          } catch { Log "attempt ${attempt}: net-config ${addr} mac=${mac}: $($_.Exception.Message)" }
+        }
+        if ($null -ne $net) { break }
+      }
+    } catch { Log "attempt ${attempt}: discovery not ready: $($_.Exception.Message)" }
     if ($null -ne $net) { break }
+    $timeout = Request-Timeout
+    if ($timeout -le 0) { break }
+    Start-Sleep -Seconds ([Math]::Min(5, $timeout))
   }
-  if ($null -eq $net) { Log 'net-config api unreachable; skip all' ; exit 0 }
+  if ($null -eq $net) { Log 'net-config retry budget exhausted; startup result not reported; skip all'; exit 0 }
+  # Fetch data disks once after the successful callback; never repeat net-config for a disk failure.
+  $timeout = Request-Timeout
+  if ($timeout -gt 0) {
+    try {
+      $resp = Invoke-RestMethod -Uri "http://${addr}:${port}/boot/data-disks?mac=${mac}" -TimeoutSec $timeout -ErrorAction Stop
+      $items = @($resp.items)
+    } catch { Log "data-disks fetch failed: $($_.Exception.Message)" }
+  }
 
   # 2) 恢复网关/DNS（先于数据盘处理，让联网尽快就绪）
   $gw = "$($net.gateway)".Trim()
@@ -109,7 +137,37 @@ try {
     }
   } else { Log 'no gateway configured; skip net restore' }
 
-  # 3) 数据盘盘符校正
+  # 3) Windows 策略：放在数据盘之前，数据盘一步没配盘时会提前退出
+  if ($net.windows_policy) {
+    $t0 = Get-Date
+    $changed = @()
+    try {
+      $au = 'HKLM:\SOFTWARE\Policies\Microsoft\Windows\WindowsUpdate\AU'
+      foreach ($name in 'NoAutoUpdate', 'NoAutoRebootWithLoggedOnUsers') {
+        if ((Get-ItemProperty -Path $au -Name $name -ErrorAction SilentlyContinue).$name -ne 1) {
+          if (-not (Test-Path $au)) { New-Item -Path $au -Force | Out-Null }
+          Set-ItemProperty -Path $au -Name $name -Value 1 -Type DWord
+          $changed += $name
+        }
+      }
+      if ((Get-ItemProperty -Path 'HKLM:\SYSTEM\CurrentControlSet\Control\Power' -Name HibernateEnabled -ErrorAction SilentlyContinue).HibernateEnabled -ne 0) {
+        powercfg /hibernate off | Out-Null
+        $changed += 'hibernate'
+      }
+      # powercfg /query 的文字随系统语言变，只取十六进制值：最后两个是交流、直流的当前值
+      foreach ($s in @(@('SUB_SLEEP', 'STANDBYIDLE', 'standby-timeout'), @('SUB_DISK', 'DISKIDLE', 'disk-timeout'))) {
+        $hex = @(([regex]'0x[0-9a-fA-F]+').Matches((powercfg /query SCHEME_CURRENT $s[0] $s[1]) -join ' ') | ForEach-Object { $_.Value })
+        if ($hex.Count -lt 2 -or [int64]$hex[-2] -ne 0 -or [int64]$hex[-1] -ne 0) {
+          powercfg /change "$($s[2])-ac" 0 | Out-Null
+          powercfg /change "$($s[2])-dc" 0 | Out-Null
+          $changed += $s[2]
+        }
+      }
+    } catch { Log "policy: $($_.Exception.Message)" }
+    Log "policy: changed=[$($changed -join ',')] in $([int]((Get-Date) - $t0).TotalMilliseconds)ms"
+  } else { Log 'policy: keep windows defaults (server setting)' }
+
+  # 4) 数据盘盘符校正
   if ($null -eq $items) { Log 'data-disks api unreachable; skip disks'; exit 0 }
 
   # 目标映射 lun -> 盘符（服务端已校验，这里再兜底过滤一次）
@@ -143,23 +201,44 @@ try {
     if ($gd -and $gd.IsReadOnly) { Set-Disk -Number $gd.Number -IsReadOnly $false }
   }
 
-  # 两遍设置：先释放我们管理的、盘符不匹配的分区（避免 D↔E 互换互相占位），再赋值
-  foreach ($lun in @($found.Keys)) {
+  # 释放任何盘符之前检查外部占用；受管分区之间仍允许 D/E 互换。
+  $managedLetters = @(foreach ($lun in @($found.Keys)) {
     $part = Get-DataPartition $found[$lun]
-    if ($part -and $part.DriveLetter -and $part.DriveLetter -ne $targets[$lun]) {
-      try { $part | Remove-PartitionAccessPath -AccessPath "$($part.DriveLetter):\" }
-      catch { Log "lun ${lun}: free $($part.DriveLetter): failed: $($_.Exception.Message)" }
-    }
-  }
+    if ($part -and $part.DriveLetter) { [string]$part.DriveLetter }
+  })
+  $volumes = @(Get-Volume -ErrorAction Stop)
+  $letterConflict = $false
   foreach ($lun in @($found.Keys | Sort-Object)) {
     $target = $targets[$lun]
-    $part = Get-DataPartition $found[$lun]
-    if (-not $part) { Log "lun ${lun}: no data partition"; continue }
-    if ($part.DriveLetter -eq $target) { Log "lun ${lun}: already ${target}:"; continue }
-    try {
-      $part | Set-Partition -NewDriveLetter $target
-      Log "lun ${lun}: set ${target}:"
-    } catch { Log "lun ${lun}: set ${target}: failed: $($_.Exception.Message)" }
+    foreach ($volume in $volumes) {
+      if ([string]$volume.DriveLetter -eq $target -and $managedLetters -notcontains [string]$volume.DriveLetter) {
+        Log "WARNING: lun ${lun}: target ${target}: occupied by $($volume.DriveType) volume '$($volume.FileSystemLabel)' ($($volume.UniqueId))"
+        $letterConflict = $true
+      }
+    }
+  }
+  if ($letterConflict) {
+    Log 'WARNING: all data disk drive letters unchanged; resolve the occupied target and retry'
+  }
+  if (-not $letterConflict) {
+    # 两遍设置：先释放我们管理的、盘符不匹配的分区（避免 D↔E 互换互相占位），再赋值
+    foreach ($lun in @($found.Keys)) {
+      $part = Get-DataPartition $found[$lun]
+      if ($part -and $part.DriveLetter -and $part.DriveLetter -ne $targets[$lun]) {
+        try { $part | Remove-PartitionAccessPath -AccessPath "$($part.DriveLetter):\" }
+        catch { Log "lun ${lun}: free $($part.DriveLetter): failed: $($_.Exception.Message)" }
+      }
+    }
+    foreach ($lun in @($found.Keys | Sort-Object)) {
+      $target = $targets[$lun]
+      $part = Get-DataPartition $found[$lun]
+      if (-not $part) { Log "lun ${lun}: no data partition"; continue }
+      if ($part.DriveLetter -eq $target) { Log "lun ${lun}: already ${target}:"; continue }
+      try {
+        $part | Set-Partition -NewDriveLetter $target -ErrorAction Stop
+        Log "lun ${lun}: set ${target}:"
+      } catch { Log "lun ${lun}: set ${target}: failed: $($_.Exception.Message)" }
+    }
   }
 } catch {
   Log "exception: $($_.Exception.Message)"

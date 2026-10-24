@@ -56,19 +56,19 @@ var driverPackCodec = entityCodec[domain.DriverPack]{
 	table: "driver_packs",
 	columns: []string{
 		"id", "name", "category", "os_type", "arch", "version", "release_date",
-		"vendor", "signed", "hwids", "status", "recommended", "storage_path", "created_at",
+		"vendor", "signed", "hwids", "status", "storage_path", "created_at",
 	},
 	values: func(v domain.DriverPack) []any {
 		return []any{
 			v.ID, v.Name, string(v.Category), string(v.OSType), v.Arch, v.Version, v.ReleaseDate,
-			v.Vendor, v.Signed, stringsValue(v.HWIDs), string(v.Status), v.Recommended, v.StoragePath, timeValue(v.CreatedAt),
+			v.Vendor, v.Signed, stringsValue(v.HWIDs), string(v.Status), v.StoragePath, timeValue(v.CreatedAt),
 		}
 	},
 	scan: func(s rowScanner) (domain.DriverPack, error) {
 		var v domain.DriverPack
 		var category, osType, status, hwids, created string
 		if err := s.Scan(&v.ID, &v.Name, &category, &osType, &v.Arch, &v.Version, &v.ReleaseDate,
-			&v.Vendor, &v.Signed, &hwids, &status, &v.Recommended, &v.StoragePath, &created); err != nil {
+			&v.Vendor, &v.Signed, &hwids, &status, &v.StoragePath, &created); err != nil {
 			return v, err
 		}
 		var err error
@@ -80,37 +80,6 @@ var driverPackCodec = entityCodec[domain.DriverPack]{
 		v.OSType = domain.OSType(osType)
 		v.Status = domain.DriverPackStatus(status)
 		v.CreatedAt = t
-		return v, err
-	},
-}
-
-var driverBundleCodec = entityCodec[domain.DriverBundle]{
-	table:   "driver_bundles",
-	columns: []string{"id", "name", "os_type", "created_at"},
-	values: func(v domain.DriverBundle) []any {
-		return []any{v.ID, v.Name, string(v.OSType), timeValue(v.CreatedAt)}
-	},
-	scan: func(s rowScanner) (domain.DriverBundle, error) {
-		var v domain.DriverBundle
-		var osType, created string
-		if err := s.Scan(&v.ID, &v.Name, &osType, &created); err != nil {
-			return v, err
-		}
-		t, err := parseTime(created)
-		v.OSType, v.CreatedAt = domain.OSType(osType), t
-		return v, err
-	},
-}
-
-var driverBundlePackCodec = entityCodec[domain.DriverBundlePack]{
-	table:   "driver_bundle_packs",
-	columns: []string{"id", "bundle_id", "pack_id"},
-	values: func(v domain.DriverBundlePack) []any {
-		return []any{v.ID, v.BundleID, v.PackID}
-	},
-	scan: func(s rowScanner) (domain.DriverBundlePack, error) {
-		var v domain.DriverBundlePack
-		err := s.Scan(&v.ID, &v.BundleID, &v.PackID)
 		return v, err
 	},
 }

@@ -6,7 +6,7 @@ import { Modal, useConfirm } from '../overlay.jsx';
 import { Field, Select, TableState, Toggle, Tip } from '../primitives.jsx';
 import { api } from '../../lib/api.js';
 import { useResource, useMutation, usePolling } from '../../lib/hooks.js';
-import { fmtDateTime } from '../../lib/format.js';
+import { fmtDateTime, fmtVersion } from '../../lib/format.js';
 const { useState } = React;
 
 const SVC_STATUS = {
@@ -37,6 +37,9 @@ const NODE_ROLE = {
   active: { chip: "emerald", text: "主机" },
   standby: { chip: "amber", text: "备机" },
 };
+// 离线节点报不出当前角色，最后一次上报的「主机」已经过时，照显会和接任的主机重复。
+const roleOf = (n) => (n.online ? n.ha_state : "");
+const isPrimary = (n) => roleOf(n) === "active";
 
 function fmtSeen(iso) {
   if (!iso) return "—";
@@ -300,11 +303,17 @@ function nodeHint(node, view) {
 
 function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefresh, onForget }) {
   const [adopting, setAdopting] = useState(false);
+  const adoptions = React.useRef(new Map());
+  React.useEffect(() => {
+    for (const [address, entry] of adoptions.current) {
+      if (entry.state === "accepted" && candidateJoined(entry.candidate, nodes)) adoptions.current.delete(address);
+    }
+  }, [nodes]);
   // 虚 IP 只有主机报得准：它是「此刻谁在服务」的那个地址。
-  const vip = (nodes.find(n => n.ha_state === "active") || {}).portal_ip || "";
+  const vip = (nodes.find(isPrimary) || nodes.find(n => n.ha_state === "active") || {}).portal_ip || "";
   const byId = {};
   for (const m of matrix) byId[m.node_id] = m;
-  const ordered = [...nodes].sort((a, b) => (b.ha_state === "active") - (a.ha_state === "active"));
+  const ordered = [...nodes].sort((a, b) => isPrimary(b) - isPrimary(a));
   const faults = matrix.reduce((n, m) => n + (m.reachable ? (m.services || []).filter(s => !s.ok).length : 0), 0);
   const offline = nodes.filter(n => !n.online).length;
 
@@ -330,7 +339,7 @@ function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefres
           <button className="btn ghost icon" onClick={onRefresh} title="立即刷新" aria-label="立即刷新"><Icons.Refresh size={14}/></button>
         </div>
       </div>
-      {adopting && <AdoptNodes onClose={() => { setAdopting(false); onRefresh && onRefresh(); }}/>}
+      {adopting && <AdoptNodes clustered={!!vip} nodes={nodes} adoptions={adoptions} onRefresh={onRefresh} onClose={() => { setAdopting(false); onRefresh && onRefresh(); }}/>}
       <div style={{ overflowX: "auto" }}>
         <table className="t">
           <thead>
@@ -353,7 +362,7 @@ function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefres
               const m = byId[n.id] || {};
               const services = m.services || [];
               const bad = services.filter(s => !s.ok).length;
-              const primary = n.ha_state === "active";
+              const primary = isPrimary(n);
               const picked = n.id === selected;
               return (
                 <React.Fragment key={n.id}>
@@ -362,9 +371,9 @@ function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefres
                     boxShadow: picked ? "inset 2px 0 0 var(--accent)" : undefined }}>
                   <td className="mono">{n.ip || n.id}</td>
                   <td>
-                    <span className={`chip ${NODE_ROLE[n.ha_state]?.chip || ""}`}>
-                      {NODE_ROLE[n.ha_state]?.text || n.ha_state || "—"}
-                    </span>
+                    {n.online
+                      ? <span className={`chip ${NODE_ROLE[n.ha_state]?.chip || ""}`}>{NODE_ROLE[n.ha_state]?.text || n.ha_state || "—"}</span>
+                      : <span className="meta" title={NODE_ROLE[n.ha_state] ? `离线前为${NODE_ROLE[n.ha_state].text}` : "离线"}>—</span>}
 
                   </td>
                   {!n.online || !m.reachable
@@ -391,7 +400,7 @@ function ClusterNodes({ nodes, matrix, matrixReady, selected, onSelect, onRefres
                         : <span className="chip emerald"><span className="dot live"/>正常</span>}
                   </td>
                   <td className="meta">{fmtSeen(n.last_seen_at)}</td>
-                  <td className="mono meta">{m.host?.version || "—"}</td>
+                  <td className="mono meta" title={m.host?.version || undefined}>{fmtVersion(m.host?.version)}</td>
                   <td className="meta">{m.host?.uptime_sec ? fmtUptime(m.host.uptime_sec) : "—"}</td>
                   <td className="t-actions"><div>
                     {onForget && !n.online && (
@@ -427,23 +436,43 @@ function cellHint(svc, node) {
 
 // AdoptNodes 把同网段里尚未配置的机器拉进集群。不需要填任何字段：虚 IP 和集群令牌
 // 集群自己知道。可列出的节点没有数据池，拉错也不会毁掉数据。
-function AdoptNodes({ onClose }) {
+function candidateJoined(candidate, nodes) {
+  let host = "";
+  try { host = new URL(`http://${candidate.address}`).hostname; } catch { /* keep the node ID check */ }
+  return nodes.some(n => (candidate.node_id && n.id === candidate.node_id) || (host && n.ip === host));
+}
+
+function AdoptNodes({ clustered, nodes, adoptions, onRefresh, onClose }) {
   const store = useStore();
   const { busy, run } = useMutation(store.toast);
   const { data, loading, error, reload } = useResource(() => api.discoverNodes(), []);
-  const items = (data && data.items) || [];
+  const [, redraw] = useState(0);
+  const entryOf = c => [...adoptions.current.values()].find(e => e.candidate.address === c.address
+    || (c.node_id && e.candidate.node_id === c.node_id));
+  const candidates = [...((data && data.items) || [])];
+  for (const { candidate } of adoptions.current.values()) {
+    if (!candidates.some(c => c.address === candidate.address || (c.node_id && c.node_id === candidate.node_id))) candidates.push(candidate);
+  }
+  const items = candidates.filter(c => !candidateJoined(c, nodes));
+  const scan = () => { reload(); onRefresh?.(); };
+  usePolling(scan, { intervalMs: 2500, active: adoptions.current.size > 0 });
 
   const adopt = async (c) => {
-    if (await run(() => api.adoptNode({ address: c.address }),
-      `已受理：${c.address} 将重启为备机加入集群，随后到「存储池管理」给它建数据池`)) {
-      reload();
-    }
+    if (entryOf(c) || candidateJoined(c, nodes)) return;
+    adoptions.current.set(c.address, { candidate: c, state: "pending" });
+    redraw(v => v + 1);
+    const accepted = await run(() => api.adoptNode({ address: c.address }),
+      `已受理：${c.address} 将重启为备机加入集群，随后到「存储池管理」给它建数据池`);
+    if (accepted) adoptions.current.set(c.address, { candidate: c, state: "accepted" });
+    else adoptions.current.delete(c.address);
+    redraw(v => v + 1);
+    if (accepted) scan();
   };
 
   return (
     <Modal open onClose={onClose} title="添加节点" size="lg"
       footer={<>
-        <button className="btn" onClick={reload} disabled={busy || loading}>重新扫描</button>
+        <button className="btn" onClick={scan} disabled={busy || loading}>重新扫描</button>
         <button className="btn primary" onClick={onClose}>完成</button>
       </>}>
       <div data-testid="adopt-nodes" style={{ display: "grid", gap: 12 }}>
@@ -451,6 +480,13 @@ function AdoptNodes({ onClose }) {
           这里列出客户机网段里<b>已装好、还没配置过</b>的机器，点「加入集群」即可，不用填任何东西。
           加入后到「存储池管理」给它建数据池。建过池的机器不会出现在这里，只能用命令行加入。
         </div>
+        {/* 单机没有虚 IP 和令牌可下发，点了也只会失败，先把出路说清楚。 */}
+        {!clustered && (
+          <div className="row" style={{ gap: 12, padding: "10px 12px", borderRadius: 6, background: "var(--amber-soft)", border: "1px solid var(--amber)", fontSize: 13 }}>
+            <span style={{ flex: 1 }}>本机还没有组建集群，不能添加节点。请先到「系统参数 → 高可用」点「创建集群」设置虚 IP，再回来添加节点。</span>
+            <button className="btn primary" onClick={() => { onClose(); store.goto("system-params"); }}>前往系统参数</button>
+          </div>
+        )}
         {loading && <div className="hint">正在扫描客户机网段…</div>}
         {error && <div style={{ fontSize: 13, color: "var(--rose)" }}>扫描失败：{error}</div>}
         {!loading && !error && items.length === 0 && (
@@ -466,9 +502,9 @@ function AdoptNodes({ onClose }) {
                 <tr key={c.address}>
                   <td className="mono">{c.address}</td>
                   <td className="mono meta">{c.node_id}</td>
-                  <td className="meta">{c.version || "—"}</td>
+                  <td className="meta" title={c.version || undefined}>{fmtVersion(c.version)}</td>
                   <td style={{ textAlign: "right" }}>
-                    <button className="btn" disabled={busy} onClick={() => adopt(c)}>加入集群</button>
+                    {clustered && <button className="btn" disabled={busy || !!entryOf(c)} title={entryOf(c)?.state === "pending" ? "正在提交加入请求" : entryOf(c) ? "已受理，等待节点加入" : undefined} onClick={() => adopt(c)}>{entryOf(c) ? "加入中…" : "加入集群"}</button>}
                   </td>
                 </tr>
               ))}
@@ -491,7 +527,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
     );
   }
   const where = node.ip || node.id;
-  const role = NODE_ROLE[node.ha_state]?.text || node.ha_state || "";
+  const role = NODE_ROLE[roleOf(node)]?.text || roleOf(node) || "";
   const services = (view && view.services) || [];
   const bad = services.filter(s => s.ok === false).length;
   const unreachable = !node.online || !view || !view.reachable;
@@ -501,7 +537,7 @@ function NodeServices({ node, view, matrixReady, onAct, onLogs, busyKey }) {
       <div className="card-h">
         <div className="card-title">
           <Icons.Cog size={14}/> 无盘服务器 · <span className="mono">{where}</span>
-          {role && <span className={`chip ${NODE_ROLE[node.ha_state]?.chip || ""}`} style={{ marginLeft: 8 }}>{role}</span>}
+          {role && <span className={`chip ${NODE_ROLE[roleOf(node)]?.chip || ""}`} style={{ marginLeft: 8 }}>{role}</span>}
         </div>
         <span className={`chip ${pending ? "" : unreachable ? "rose" : bad ? "amber" : "emerald"}`}>
           {pending ? "读取中…" : unreachable ? (node.online ? "服务状态读取不到" : "不可达") : bad ? `${bad} 处异常` : "全部运行中"}

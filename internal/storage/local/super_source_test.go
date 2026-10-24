@@ -139,17 +139,3 @@ func TestSuperStopRefusesAMisalignedDataDisk(t *testing.T) {
 }
 
 // 开机前离线适配同样只能往本配置的克隆里写。
-func TestPrepareSuperAdaptationRefusesACloneOfAnotherConfig(t *testing.T) {
-	z := seedForeignSuperPool()
-	agent := New("server-a", z)
-
-	err := agent.PrepareSuperAdaptation(context.Background(), storage.SuperAdaptationReq{
-		MAC:         "aa:bb:cc:dd:ee:ff",
-		Source:      storage.ClientSource{ConfigID: "cfgB", SnapshotName: "0"},
-		AdaptScript: []byte("adapt"),
-	})
-	var foreign SuperCloneForeign
-	if !errors.As(err, &foreign) {
-		t.Fatalf("err = %v, want SuperCloneForeign", err)
-	}
-}

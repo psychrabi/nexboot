@@ -2,6 +2,7 @@ package store
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -29,6 +30,45 @@ func TestMigrationsApply(t *testing.T) {
 	}
 	if err := st.db.QueryRow("SELECT count(*) FROM client_clones").Scan(&n); err != nil {
 		t.Fatalf("client_clones table missing: %v", err)
+	}
+}
+
+func TestLegacyDriverRetirementPreservesUploadedPacks(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	old, err := os.ReadFile("migrations/0011_driver_center.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(strings.Split(string(old), "-- +goose Down")[0]); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`
+	 CREATE TABLE terminals(id TEXT PRIMARY KEY, pending_bundle_id TEXT, pending_bundle_at TEXT);
+	 INSERT INTO terminals VALUES('t-1','b-1','2026-10-07');
+	 INSERT INTO driver_packs(id,name,category,os_type,status,storage_path,created_at) VALUES('p-1','Intel','nic','windows','enabled','packs/p-1.zip','2026-10-07');
+	 INSERT INTO driver_bundles VALUES('b-1','old','windows','2026-10-07');
+	 INSERT INTO driver_bundle_packs VALUES('bp-1','b-1','p-1');`); err != nil {
+		t.Fatal(err)
+	}
+	up, err := os.ReadFile("migrations/0055_retire_driver_bundles.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(strings.Split(string(up), "-- +goose Down")[0]); err != nil {
+		t.Fatal(err)
+	}
+	var path string
+	if err := db.QueryRow("SELECT storage_path FROM driver_packs WHERE id='p-1'").Scan(&path); err != nil || path != "packs/p-1.zip" {
+		t.Fatalf("上传包必须保留: %q %v", path, err)
+	}
+	var count int
+	if err := db.QueryRow("SELECT count(*) FROM sqlite_master WHERE name IN ('driver_bundles','driver_bundle_packs')").Scan(&count); err != nil || count != 0 {
+		t.Fatalf("旧驱动集表没有撤下: %d %v", count, err)
 	}
 }
 
@@ -231,6 +271,26 @@ func TestSystemSettingsRepoUpsert(t *testing.T) {
 	}
 	if got.ImportDir != "/data/imports" {
 		t.Fatalf("settings = %#v", got)
+	}
+}
+
+// 「保留 Windows 默认设置」默认是否：从未保存过和只保存了别的设置时，都要按「管」处理。
+func TestSystemSettingsKeepWindowsDefaultsRoundTrip(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	if err := st.SystemSettings().Upsert(ctx, domain.SystemSettings{ID: domain.SystemSettingsDefaultID, ImportDir: "/tank/imports"}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID)
+	if got.KeepWindowsDefaults {
+		t.Fatal("默认应为否")
+	}
+	got.KeepWindowsDefaults = true
+	if err := st.SystemSettings().Upsert(ctx, got); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = st.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID); !got.KeepWindowsDefaults {
+		t.Fatalf("没存上：%#v", got)
 	}
 }
 
@@ -776,5 +836,73 @@ func TestStatusRefreshDoesNotLookLikeACatalogueChange(t *testing.T) {
 	}
 	if st.Revision() == before {
 		t.Fatal("告警级别变了必须计入")
+	}
+}
+
+func TestBootFailureRecoveryCannotDeleteAReplacedFailure(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	old := domain.BootFailure{MAC: "001122334455", Stage: domain.BootStageWindows, ImageID: "old", ReductionID: "old-point", At: time.Date(2026, 10, 19, 9, 0, 0, 0, time.UTC)}
+	if err := st.BootFailures().Upsert(ctx, old); err != nil {
+		t.Fatal(err)
+	}
+	newer := old
+	newer.Stage = domain.BootStageSanhook
+	newer.Code = "0x1234" // Even equal timestamps must not authorize deletion of a replaced row.
+	if err := st.BootFailures().Upsert(ctx, newer); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := st.BootFailures().DeleteIfUnchanged(ctx, old)
+	if err != nil || removed {
+		t.Fatalf("stale recovery deleted newer explicit failure: %v %v", removed, err)
+	}
+	rows, _ := st.BootFailures().List(ctx)
+	if len(rows) != 1 || rows[0].Stage != domain.BootStageSanhook {
+		t.Fatalf("new failure lost: %+v", rows)
+	}
+	removed, err = st.BootFailures().DeleteIfUnchanged(ctx, newer)
+	if err != nil || !removed {
+		t.Fatalf("matching failure could not be removed: %v %v", removed, err)
+	}
+	rows, _ = st.BootFailures().List(ctx)
+	if len(rows) != 0 {
+		t.Fatalf("matching failure still present: %+v", rows)
+	}
+}
+
+func TestTerminalBootSuccessCannotOverwriteAChangedBoot(t *testing.T) {
+	ctx := context.Background()
+	st := newTestStore(t)
+	// Reuse the concrete store fixture's minimal catalogue/terminal relationship.
+	for _, err := range []error{
+		st.Images().Create(ctx, domain.Image{ID: "i", Name: "i", OSType: domain.OSTypeWindows, State: domain.ImageStateNormal}),
+		st.Configs().Create(ctx, domain.Config{ID: "c", ImageID: "i", Name: "c"}),
+		st.Reductions().Create(ctx, domain.Reduction{ID: "r", ConfigID: "c", Name: "@0", Status: domain.ReductionStatusReady}),
+		st.Groups().Create(ctx, domain.Group{ID: "g", Name: "g", ClientMax: 1, SystemImageID: "i", SystemConfigID: "c", SystemReductionID: "r"}),
+	} {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	now := time.Now().UTC()
+	old := now.Add(-time.Hour)
+	before := domain.Terminal{ID: "t", MAC: "001122334455", GroupID: "g", State: domain.TerminalStateOffline, LastBootAt: &old}
+	if err := st.Terminals().Create(ctx, before); err != nil {
+		t.Fatal(err)
+	}
+	after := before
+	after.LastBootAt = &now
+	after.LastBootOKAt = &now
+	after.LastBootReductionID = "verified"
+	changed := before
+	changed.LastBootOKAt = &now
+	if err := st.Terminals().Update(ctx, changed); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := st.Terminals().UpdateBootIfUnchanged(ctx, before, after); err != nil || ok {
+		t.Fatalf("stale success accepted %v %v", ok, err)
+	}
+	if ok, err := st.Terminals().UpdateBootIfUnchanged(ctx, changed, after); err != nil || !ok {
+		t.Fatalf("exact success rejected %v %v", ok, err)
 	}
 }

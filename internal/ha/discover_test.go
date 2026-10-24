@@ -3,8 +3,10 @@ package ha
 import (
 	"context"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 )
 
@@ -91,5 +93,22 @@ func TestSubnetCandidatesStaysInsideOneMachineRoom(t *testing.T) {
 	}
 	if n := len(SubnetCandidates("不是网段", "8080", nil)); n != 0 {
 		t.Fatalf("解析不了的网段应当返回空，得到 %d", n)
+	}
+}
+
+// 本机还是单机时没有虚 IP 和令牌：直接拒绝并说清先去哪里建集群，不能把空值发给对方，换回一句对不上的报错。
+func TestAdoptNodeRefusesBeforeTheClusterExists(t *testing.T) {
+	called := false
+	target := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { called = true }))
+	defer target.Close()
+	u, _ := url.Parse(target.URL)
+	for _, d := range []Discovery{{}, {VIP: "192.168.10.3"}} {
+		err := d.AdoptNode(context.Background(), u.Hostname()+":"+u.Port())
+		if !errors.Is(err, ErrNotClustered) || !strings.Contains(err.Error(), "系统参数") {
+			t.Fatalf("err = %v", err)
+		}
+	}
+	if called {
+		t.Fatal("本机未建集群时不应向对方发请求")
 	}
 }

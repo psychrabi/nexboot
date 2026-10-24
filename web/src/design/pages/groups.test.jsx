@@ -40,6 +40,7 @@ function stubApi(overrides = {}) {
     listAlarms: async () => list([]),
     getNetwork: async () => NETWORK,
     listClusterNodes: async () => list([]),
+    failingModels: async () => ({}),
   };
   for (const [name, fn] of Object.entries({ ...base, ...overrides })) {
     vi.spyOn(api, name).mockImplementation(fn);
@@ -257,6 +258,35 @@ describe('分组页', () => {
     expect(card.textContent).toMatch(/续租|断线|掉线/);
   });
 
+  it('组内有终端在运行时不能改系统镜像，点名运行中的机器且不保存', async () => {
+    const user = userEvent.setup();
+    const updateGroup = vi.fn(async () => ({}));
+    stubApi({
+      listGroups: async () => list([
+        { ID: 'g-1', Name: '教学一班', StartIP: '192.168.50.100', ClientMax: 10, Gateway: '192.168.50.1', Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' },
+      ]),
+      listImages: async () => list([...IMAGES, { ID: 'win2', Name: 'win2', OSType: 'windows', State: 'normal', Purpose: 'system', CreatedAt: '2026-08-20T10:00:00Z' }]),
+      listConfigs: async (img) => list(img === 'win2' ? [{ ID: 'win2_default', ImageID: 'win2', Name: 'default' }] : CONFIGS),
+      listTerminals: async () => list([
+        { ID: 't1', Name: '01号机', MAC: 'AABBCCDDEE01', GroupID: 'g-1', State: 'online' },
+        { ID: 't2', Name: '02号机', MAC: 'AABBCCDDEE02', GroupID: 'g-1', State: 'offline' },
+      ]),
+      updateGroup,
+    });
+    renderPage();
+    await screen.findByText('教学一班');
+    await user.click(screen.getByRole('button', { name: /编辑/ }));
+    await user.selectOptions(await screen.findByLabelText('系统镜像'), 'win2');
+    await waitFor(() => expect(api.listConfigs).toHaveBeenCalledWith('win2'));
+    await user.click(screen.getByRole('button', { name: '保存' }));
+
+    const msg = await screen.findByText(/台终端正在运行/);
+    expect(msg.textContent).toContain('01号机');
+    expect(msg.textContent).not.toContain('02号机');
+    expect(msg.textContent).toMatch(/请先关机/);
+    expect(updateGroup).not.toHaveBeenCalled();
+  });
+
   // 数据盘在新建 / 编辑弹窗里一起设置，不用建完分组再单独配一遍。
   describe('数据盘随分组一起设置', () => {
     const DATA_CONFIGS = { games: [{ ID: 'games_default', ImageID: 'games', Name: 'default' }] };
@@ -360,5 +390,34 @@ describe('分组页', () => {
       expect(createGroup).toHaveBeenCalledTimes(1);
       expect(updateGroup).toHaveBeenCalled();
     });
+  });
+
+  it('只有机型开机失败才在分组卡片提示，点击进入该机型', async () => {
+    const group = id => ({ ID: id, Name: id === 'g-1' ? '教学一班' : '美术教室', StartIP: '192.168.50.100', ClientMax: 10, Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' });
+    stubApi({
+      listGroups: async () => list([group('g-1'), group('g-2')]),
+      failingModels: async () => ({ 'g-1': [{ profile_id: 'h-1', profile_name: 'VMware E1000', config_id: 'isharedisk_default', terminals: 2 }] }),
+    });
+    renderPage();
+    const card = (await screen.findByText('教学一班')).closest('.card');
+    const hint = await within(card).findByRole('button', { name: /1 种机型开机失败/ });
+    expect(within((screen.getByText('美术教室')).closest('.card')).queryByText(/机型/)).toBeNull();
+    expect(screen.queryByText(/未适配/)).toBeNull();
+    expect(hint).toBeTruthy();
+  });
+  it('分组里还有终端时，删除只说明原因，不给确认按钮', async () => {
+    const deleteGroup = vi.fn();
+    stubApi({
+      deleteGroup,
+      listGroups: async () => list([{ ID: 'g-1', Name: '教学一班', StartIP: '192.168.50.100', ClientMax: 10, Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' }]),
+      listTerminals: async () => list([{ ID: 't1', Name: '01', MAC: 'AA', GroupID: 'g-1', State: 'offline' }]),
+    });
+    renderPage();
+    await screen.findByText('教学一班');
+    await userEvent.click(screen.getByRole('button', { name: '删除分组 教学一班' }));
+    expect(await screen.findByText(/还有 1 台终端/)).toBeTruthy();
+    expect(screen.queryByRole('button', { name: '确认' })).toBeNull();
+    await userEvent.click(screen.getByRole('button', { name: '知道了' }));
+    expect(deleteGroup).not.toHaveBeenCalled();
   });
 });

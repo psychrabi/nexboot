@@ -22,8 +22,11 @@ import (
 	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/assets"
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/identity"
 	"github.com/tianwei/diskless/internal/control/network"
 	"github.com/tianwei/diskless/internal/control/ops"
+	"github.com/tianwei/diskless/internal/control/pe"
 	"github.com/tianwei/diskless/internal/control/platform"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/ha"
@@ -36,10 +39,16 @@ type BootScriptService interface {
 	DataDiskLetters(context.Context, string) ([]control.DataDiskLetter, error)
 	// NetConfig 提供同一脚本开机后恢复的分组网关/DNS（C-1 要求它们不进 iBFT），免认证。
 	NetConfig(context.Context, string) (control.NetConfig, error)
+	// MountScript 是镜像里烘焙的启动器开机时取的挂盘脚本正文，免认证。
+	MountScript(context.Context, string) (string, error)
 	// RecordBootFailure 记下客户机 iPXE 脚本放弃时上报的内容。
 	RecordBootFailure(ctx context.Context, mac, stage, code, platform string) error
 	// CheckBootMode 在客户机固件启动不了要下发的镜像时，提前记一条失败。
 	CheckBootMode(ctx context.Context, mac, platform string) error
+	// DisklessFirmwareReject 在 BIOS 开不了 UEFI-only 无盘镜像时返回 ASCII 提示脚本（不 sanboot）。
+	DisklessFirmwareReject(ctx context.Context, mac, platform string) (script string, reject bool, err error)
+	// RecordHardware 把 /boot 链接上的硬件参数归并成机型挂到客户机上。
+	RecordHardware(ctx context.Context, mac string, hints hwprofile.Hints) error
 	// RegisteredIP 是产品自己分配给该 MAC 的地址（还没有时为空）。无盘客户机拿到盘之前没有任何秘密，
 	// 来源地址是 /boot 系列区分「问自己」和「问邻居」的唯一不由调用方自称的依据。
 	RegisteredIP(context.Context, string) (string, error)
@@ -159,6 +168,7 @@ type BackupService interface {
 type SettingsService interface {
 	Get(context.Context) (platform.SystemSettingsView, error)
 	Save(context.Context, platform.SystemSettingsRequest) (platform.SystemSettingsView, error)
+	SaveWindowsPolicy(context.Context, platform.WindowsPolicyRequest) (platform.SystemSettingsView, error)
 }
 
 // NetworkService 支撑客户机网络页：哪块网卡面向机房、分组能否不在其网段内，以及可达性探测。
@@ -174,25 +184,51 @@ type TaskService interface {
 	ListTasks(context.Context, assets.TaskListQuery) (assets.TaskListResult, error)
 }
 
-type AdaptationService interface {
-	InjectDriver(ctx context.Context, terminalID, bundleID string, overwrite bool) (adapt.InjectResult, error)
-	CheckResult(ctx context.Context, terminalID string) (adapt.InjectResultView, error)
+// PESessionService 管理客户机进 WinPE 的会话：建自检会话、按令牌供文件、收回报。
+type TerminalIdentityService interface {
+	Get(context.Context, string) (identity.View, error)
+	StartCapture(context.Context, string) (pe.StartResult, error)
+}
+type ModelAdaptationService interface {
+	Start(context.Context, string, pe.ModelAdaptRequest) (pe.StartResult, error)
+}
+
+type PESessionService interface {
+	StartProbe(ctx context.Context, terminalID string, req pe.ProbeRequest) (pe.StartResult, error)
+	SessionByToken(ctx context.Context, token string) (domain.PESession, domain.Terminal, error)
+	File(ctx context.Context, token, name, platform string) (pe.PEFile, error)
+	MarkBooted(ctx context.Context, token string) error
+	Complete(ctx context.Context, token string, result pe.PEResult) error
+	SaveLog(ctx context.Context, token, name string, r io.Reader) error
+	TaskLog(ctx context.Context, taskID, name string) (pe.PEFile, error)
+}
+
+// WinPEService 管理适配环境：镜像自带 WinRE 的提取、BCD 与 ADK 包的上传。
+type WinPEService interface {
+	List(context.Context) (pe.EnvView, error)
+	ExtractForImage(context.Context, string) (pe.ExtractResult, error)
+	UploadBCD(context.Context, []byte) (domain.WinPEEnv, error)
+	UploadADK(context.Context, io.Reader) (domain.WinPEEnv, error)
+	Delete(context.Context, string) error
 }
 
 type DriverService interface {
 	UploadPack(context.Context, adapt.UploadDriverPackRequest) (adapt.DriverPackItem, error)
 	ListPacks(context.Context) (adapt.DriverPackListResult, error)
 	SetPackStatus(context.Context, string, domain.DriverPackStatus) (domain.DriverPack, error)
-	SetRecommended(context.Context, string) (domain.DriverPack, error)
 	DeletePack(context.Context, string) error
-	CreateBundle(context.Context, adapt.DriverBundleRequest) (adapt.DriverBundleItem, error)
-	ListBundles(context.Context) (adapt.DriverBundleListResult, error)
-	DeleteBundle(context.Context, string) error
-	BundleArchive(context.Context, string) (string, []byte, error)
 }
 
+// RuntimeConfig.ImportDir 是本机生效的导入目录（存储池上的 imports）；没有存储池时为空，ImportDirError 说明原因。
 type RuntimeConfig struct {
-	ImportDir string `json:"import_dir"`
+	ImportDir      string `json:"import_dir"`
+	ImportDirError string `json:"import_dir_error,omitempty"`
+}
+
+// LegacyImportService 列出旧导入目录里留下的文件（只读），并按操作者要求逐个移入导入目录。
+type LegacyImportService interface {
+	List(context.Context) (assets.LegacyImportList, error)
+	Move(context.Context, assets.MoveLegacyImportRequest) (assets.LegacyImportFile, error)
 }
 
 type ServerService interface {
@@ -297,6 +333,7 @@ type Services struct {
 	Auth             AuthService
 	Images           ImageImportService
 	Uploads          UploadService
+	LegacyImports    LegacyImportService
 	Configs          ConfigService
 	Reductions       ReductionService
 	Groups           GroupService
@@ -310,7 +347,13 @@ type Services struct {
 	Network          NetworkService
 	Tasks            TaskService
 	Drivers          DriverService
-	Adaptations      AdaptationService
+	WinPE            WinPEService
+	Identity         TerminalIdentityService
+	ModelAdapt       ModelAdaptationService
+	PE               PESessionService
+	Install          InstallationService
+	LocalTaskLog     func(context.Context, string, string) (pe.PEFile, error)
+	Models           ModelService
 	Server           ServerService
 	// ClusterNodes 为选择器列出节点花名册；为 nil 时隐藏端点（单机没得选）。
 	ClusterNodes func(context.Context) (ops.NodeListResult, error)
@@ -497,6 +540,11 @@ func NewRouter(logger *slog.Logger, assets fs.FS, services ...Services) http.Han
 			return nodeTaskList{Items: items}, err
 		}))
 	}
+	if svc.LocalTaskLog != nil {
+		r.Get("/internal/node/tasks/{id}/logs/{name}", nodeGuard(svc.ClusterToken, taskLogHandler(svc.LocalTaskLog)))
+	} else if svc.PE != nil {
+		r.Get("/internal/node/tasks/{id}/logs/{name}", nodeGuard(svc.ClusterToken, taskLogHandler(svc.PE.TaskLog)))
+	}
 	if svc.NodeServices != nil {
 		r.Get("/internal/node/services", nodeEndpoint(svc.ClusterToken, svc.NodeServices))
 		if svc.NodeBackup != nil {
@@ -572,6 +620,18 @@ func NewRouter(logger *slog.Logger, assets fs.FS, services ...Services) http.Han
 		r.Get("/boot/failed", bootFailedHandler(svc, svc.Boot, svc.Auth, svc.BootPeerCheckOff, logger))
 		r.Get("/boot/data-disks", dataDisksHandler(svc, svc.Boot, svc.Auth, svc.BootPeerCheckOff, logger))
 		r.Get("/boot/net-config", netConfigHandler(svc, svc.Boot, svc.Auth, svc.BootPeerCheckOff, logger))
+		r.Get("/boot/mount-script", mountScriptHandler(svc, svc.Boot, svc.Auth, svc.BootPeerCheckOff, logger))
+	}
+	if svc.PE != nil {
+		// WinPE 取文件与回报：令牌是会话凭据，来源地址按客户机登记的 IP 核对（与 /boot 同一道门）。
+		r.Get("/boot/pe/{token}/*", peFileHandler(svc.PE, svc.BootPeerCheckOff, logger))
+		r.Get("/boot/pe/{token}/failed", peFailedHandler(svc.PE, svc.BootPeerCheckOff, logger))
+		r.Post("/boot/pe/{token}/booted", peBootedHandler(svc.PE, svc.BootPeerCheckOff, logger))
+		r.Post("/boot/pe/{token}/result", peResultHandler(svc.PE, svc.BootPeerCheckOff, logger))
+		r.Post("/boot/pe/{token}/log/{name}", peLogHandler(svc.PE, svc.BootPeerCheckOff, logger))
+	}
+	if svc.Install != nil {
+		mountInstallationPublic(r, svc.Install, svc.BootPeerCheckOff, logger)
 	}
 	if svc.Auth != nil {
 		r.Post("/api/login", loginHandler(svc.Auth, svc.Audit))
@@ -594,6 +654,9 @@ func NewRouter(logger *slog.Logger, assets fs.FS, services ...Services) http.Han
 }
 
 func registerAPIRoutes(r chi.Router, svc Services, tickets *exportTickets) {
+	if svc.Install != nil {
+		mountInstallationAdmin(r, svc.Install)
+	}
 	r.Get("/api/runtime", runtimeHandler(svc.Runtime, svc.Settings))
 	if svc.Audit != nil {
 		r.Get("/api/logs", logsHandler(svc.Audit))
@@ -609,6 +672,10 @@ func registerAPIRoutes(r chi.Router, svc Services, tickets *exportTickets) {
 		r.Get("/api/images/uploads/{id}", handleID(svc.Uploads.Status, notFound("上传会话不存在")))
 		r.Patch("/api/images/uploads/{id}", uploadChunkHandler(svc.Uploads))
 		r.Delete("/api/images/uploads/{id}", handleErrID(svc.Uploads.Abort))
+	}
+	if svc.LegacyImports != nil {
+		r.Get("/api/imports/legacy", handle(svc.LegacyImports.List))
+		r.Post("/api/imports/legacy/move", handleIn(svc.LegacyImports.Move, status(http.StatusAccepted)))
 	}
 	// 不挂在 svc.Server 下：集群存储是存储问题，概览页不论有没有接服务管理都需要它。
 	if svc.ClusterPools != nil {
@@ -805,26 +872,54 @@ func registerAPIRoutes(r chi.Router, svc Services, tickets *exportTickets) {
 	if svc.Settings != nil {
 		r.Get("/api/settings", handle(svc.Settings.Get))
 		r.Put("/api/settings", handleIn(svc.Settings.Save))
+		r.Put("/api/settings/windows-policy", handleIn(svc.Settings.SaveWindowsPolicy))
 	}
 	if svc.Tasks != nil {
 		r.Get("/api/tasks", activeTasksHandler(svc.Tasks))
 		r.Get("/api/tasks/history", tasksHistoryHandler(svc.Tasks))
 		r.Get("/api/tasks/{id}", handleID(svc.Tasks.GetTask, notFound("任务不存在")))
 	}
-	if svc.Adaptations != nil {
-		r.Post("/api/terminals/{id}/inject-driver", injectDriverHandler(svc.Adaptations))
-		r.Get("/api/terminals/{id}/inject-result", handleID(svc.Adaptations.CheckResult, notFound("终端不存在")))
+	if svc.Identity != nil {
+		r.Get("/api/terminals/{id}/identity", handleID(svc.Identity.Get))
+		r.Post("/api/terminals/{id}/identity-capture", handleID(svc.Identity.StartCapture, status(http.StatusAccepted)))
+	}
+	if svc.ModelAdapt != nil {
+		r.Post("/api/terminals/{id}/model-adapt", handleIDIn(svc.ModelAdapt.Start, status(http.StatusAccepted)))
+	}
+	if svc.PE != nil {
+		r.Post("/api/terminals/{id}/pe-probe", handleIDIn(svc.PE.StartProbe, status(http.StatusAccepted)))
+		read := svc.PE.TaskLog
+		if tasks, ok := svc.Tasks.(interface {
+			TaskLog(context.Context, string, string) (pe.PEFile, error)
+		}); ok {
+			read = tasks.TaskLog
+		}
+		r.Get("/api/tasks/{id}/logs/{name}", taskLogHandler(read))
+	}
+	if svc.Models != nil {
+		if service, ok := svc.Models.(interface {
+			ForReduction(context.Context, string) ([]hwprofile.View, error)
+		}); ok {
+			r.Get("/api/reductions/{id}/models", handleID(service.ForReduction))
+		}
+		r.Get("/api/models", handle(svc.Models.List))
+		r.Get("/api/models/failing", handle(svc.Models.FailingByGroup))
+		r.Get("/api/models/{id}", handleID(svc.Models.Get, notFound("机型不存在")))
+		r.Put("/api/models/{id}", handleErrIDIn(svc.Models.Rename))
+		r.Get("/api/terminals/{id}/model", handleID(svc.Models.ForTerminalID, notFound("终端不存在")))
+	}
+	if svc.WinPE != nil {
+		r.Get("/api/winpe", handle(svc.WinPE.List))
+		r.Post("/api/winpe/bcd", uploadBCDHandler(svc.WinPE))
+		r.Post("/api/winpe/adk", uploadADKHandler(svc.WinPE))
+		r.Delete("/api/winpe/{id}", handleErrID(svc.WinPE.Delete))
+		r.Post("/api/images/{id}/winpe", handleID(svc.WinPE.ExtractForImage, status(http.StatusAccepted)))
 	}
 	if svc.Drivers != nil {
 		r.Get("/api/driver-packs", handle(svc.Drivers.ListPacks))
 		r.Post("/api/driver-packs", uploadDriverPackHandler(svc.Drivers))
 		r.Post("/api/driver-packs/{id}/status", driverPackStatusHandler(svc.Drivers))
-		r.Post("/api/driver-packs/{id}/recommend", handleID(svc.Drivers.SetRecommended))
 		r.Delete("/api/driver-packs/{id}", handleErrID(svc.Drivers.DeletePack))
-		r.Get("/api/driver-bundles", handle(svc.Drivers.ListBundles))
-		r.Post("/api/driver-bundles", handleIn(svc.Drivers.CreateBundle, status(http.StatusCreated)))
-		r.Get("/api/driver-bundles/{id}/archive", driverBundleArchiveHandler(svc.Drivers))
-		r.Delete("/api/driver-bundles/{id}", handleErrID(svc.Drivers.DeleteBundle))
 	}
 }
 
@@ -971,16 +1066,6 @@ func listPoolsHandler(service PoolService) http.HandlerFunc {
 	})
 }
 
-func injectDriverHandler(service AdaptationService) http.HandlerFunc {
-	type injectRequest struct {
-		BundleID  string `json:"bundle_id"`
-		Overwrite bool   `json:"overwrite"`
-	}
-	return handleIDIn(func(ctx context.Context, id string, req injectRequest) (adapt.InjectResult, error) {
-		return service.InjectDriver(ctx, id, req.BundleID, req.Overwrite)
-	}, notFound("终端或驱动集不存在"))
-}
-
 func driverPackStatusHandler(service DriverService) http.HandlerFunc {
 	return handleIDIn(func(ctx context.Context, id string, req driverPackStatusRequest) (domain.DriverPack, error) {
 		return service.SetPackStatus(ctx, id, req.Status)
@@ -1063,16 +1148,34 @@ func bootHandler(clusterToken string, service BootScriptService, auth AuthServic
 			http.Error(w, "unknown mac", http.StatusNotFound)
 			return
 		}
+		hints := hwprofile.Hints{Platform: q.Get("platform"), BusID: q.Get("busid"), BusLoc: q.Get("busloc"), Manufacturer: q.Get("manufacturer"), Product: q.Get("product")}
+		if err := service.RecordHardware(r.Context(), mac, hints); err != nil && !errors.Is(err, control.ErrUnknownTerminal) {
+			logger.Warn("could not record the client's hardware", "mac", mac, "error", err)
+		}
+		platform := q.Get("platform")
+		if script, reject, err := service.DisklessFirmwareReject(r.Context(), mac, platform); err != nil {
+			if errors.Is(err, control.ErrUnknownTerminal) {
+				http.Error(w, "unknown mac", http.StatusNotFound)
+				return
+			}
+			if writeError(w, err) {
+				return
+			}
+		} else if reject {
+			// 200 + iPXE echo：BIOS VGA 才能读到原因；勿 sanhook（会卡在 Booting from SAN）。
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+			_, _ = w.Write([]byte(script))
+			return
+		}
 		script, err := service.BuildBootScript(r.Context(), mac)
 		if errors.Is(err, control.ErrUnknownTerminal) {
 			http.Error(w, "unknown mac", http.StatusNotFound)
 			return
 		}
-		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+		if writeError(w, err) {
 			return
 		}
-		if err := service.CheckBootMode(r.Context(), mac, q.Get("platform")); err != nil {
+		if err := service.CheckBootMode(r.Context(), mac, platform); err != nil {
 			logger.Warn("could not check the client's firmware against its image", "mac", mac, "error", err)
 		}
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
@@ -1176,6 +1279,18 @@ func dataDisksHandler(svc Services, service BootScriptService, auth AuthService,
 
 func netConfigHandler(svc Services, service BootScriptService, auth AuthService, peerCheckOff bool, logger *slog.Logger) http.HandlerFunc {
 	return bootMACHandler(svc, service, auth, peerCheckOff, logger, service.NetConfig)
+}
+
+// mountScriptText 是挂盘脚本正文；启动器带 format=text 取，直接写成脚本文件运行。
+type mountScriptText string
+
+func (t mountScriptText) plainText() string { return string(t) }
+
+func mountScriptHandler(svc Services, service BootScriptService, auth AuthService, peerCheckOff bool, logger *slog.Logger) http.HandlerFunc {
+	return bootMACHandler(svc, service, auth, peerCheckOff, logger, func(ctx context.Context, mac string) (mountScriptText, error) {
+		script, err := service.MountScript(ctx, mac)
+		return mountScriptText(script), err
+	})
 }
 
 func loginHandler(service AuthService, audit AuditService) http.HandlerFunc {
@@ -1378,7 +1493,7 @@ func runtimeHandler(cfg RuntimeConfig, settings SettingsService) http.HandlerFun
 			if writeError(w, err) {
 				return
 			}
-			resp.ImportDir = view.ImportDir
+			resp.ImportDir, resp.ImportDirError = view.ImportDir, view.ImportDirError
 		}
 		writeJSON(w, http.StatusOK, resp)
 	}
@@ -1510,18 +1625,6 @@ type driverPackStatusRequest struct {
 	Status domain.DriverPackStatus `json:"status"`
 }
 
-func driverBundleArchiveHandler(service DriverService) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		name, data, err := service.BundleArchive(r.Context(), chi.URLParam(r, "id"))
-		if writeError(w, err) {
-			return
-		}
-		w.Header().Set("Content-Type", "application/zip")
-		w.Header().Set("Content-Disposition", contentDisposition(name))
-		_, _ = w.Write(data)
-	}
-}
-
 // contentDisposition 生成下载文件名。HTTP 头是 latin-1，中文包名会变乱码；RFC 6266 的 filename*
 // 携带百分号编码的真名，去掉非 ASCII 的 filename 作为不认 filename* 时的回退。
 func contentDisposition(name string) string {
@@ -1552,6 +1655,20 @@ func (w *statusWriter) WriteHeader(status int) {
 	w.ResponseWriter.WriteHeader(status)
 }
 
+func redactSessionPath(requestPath string) string {
+	for _, prefix := range []string{"/install/", "/boot/pe/"} {
+		if strings.HasPrefix(requestPath, prefix) {
+			parts := strings.SplitN(strings.TrimPrefix(requestPath, prefix), "/", 2)
+			redacted := prefix + "[redacted]"
+			if len(parts) == 2 {
+				redacted += "/" + parts[1]
+			}
+			return redacted
+		}
+	}
+	return requestPath
+}
+
 func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -1560,7 +1677,7 @@ func requestLogger(logger *slog.Logger) func(http.Handler) http.Handler {
 			next.ServeHTTP(sw, r)
 			logger.Info("http request",
 				"method", r.Method,
-				"path", r.URL.Path,
+				"path", redactSessionPath(r.URL.Path),
 				"status", sw.status,
 				"duration_ms", time.Since(start).Milliseconds(),
 			)
@@ -1615,7 +1732,7 @@ func gateMiddleware(gate *ha.Gate) func(http.Handler) http.Handler {
 			// /boot 本身要建克隆、导出 LUN，是写操作，只有写入者能做。下面两个是纯读：客户机开机后向承载它的
 			// 节点要网关/DNS 和盘符，而集群里多数客户机的盘由备机供。一并当写挡掉的话，客户机有盘没网络配置，
 			// 随后没有 iSCSI 会话、克隆被回收，界面一直显示离线。
-			if r.URL.Path == "/boot" || r.URL.Path == "/boot/failed" {
+			if r.URL.Path == "/boot" || r.URL.Path == "/boot/failed" || strings.HasPrefix(r.URL.Path, "/boot/pe/") && strings.HasSuffix(r.URL.Path, "/failed") {
 				mutating = true
 			}
 			if !mutating {
@@ -1654,9 +1771,16 @@ func adoptNodeHandler(adopt func(ctx context.Context, addr string) error) http.H
 			http.Error(w, "请指明要纳管的节点地址", http.StatusBadRequest)
 			return
 		}
-		if err := adopt(req.Context(), strings.TrimSpace(body.Address)); err != nil {
+		addr := strings.TrimSpace(body.Address)
+		// 地址是「主机:端口」（发现列表给的就是这个形式）。只填 IP 拨出去会落到 80 端口，
+		// 报成「节点未响应」会让人去查网络，而错的是输入。
+		if host, port, err := net.SplitHostPort(addr); err != nil || host == "" || !validPort(port) {
+			http.Error(w, "节点地址要写成「IP:端口」，如 192.168.10.5:8080", http.StatusBadRequest)
+			return
+		}
+		if err := adopt(req.Context(), addr); err != nil {
 			code := http.StatusBadGateway
-			if errors.Is(err, ha.ErrNotAdoptable) {
+			if errors.Is(err, ha.ErrNotAdoptable) || errors.Is(err, ha.ErrNotClustered) {
 				code = http.StatusConflict
 			}
 			http.Error(w, err.Error(), code)
@@ -1668,6 +1792,11 @@ func adoptNodeHandler(adopt func(ctx context.Context, addr string) error) http.H
 			"detail": "已受理：该节点将重启为备机加入集群，随后可在本控制台给它建数据池",
 		})
 	}
+}
+
+func validPort(port string) bool {
+	n, err := strconv.Atoi(port)
+	return err == nil && n > 0 && n <= 65535
 }
 
 func standby(svc Services) bool { return svc.Gate != nil && svc.Gate.Allow() != nil }

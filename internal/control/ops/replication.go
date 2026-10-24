@@ -31,6 +31,7 @@ import (
 // ReplicationZFS 是复制器用到的那部分 ZFS 客户端。
 type ReplicationZFS interface {
 	ListGUIDs(ctx context.Context, root string) (zfs.GUIDInventory, error)
+	WrittenSince(ctx context.Context, dataset, snapshot string) (int64, error)
 	SnapshotRecursive(ctx context.Context, root, name string) error
 	PruneSnapshotsExcept(ctx context.Context, root, prefix string, keep int, pinned []string) error
 	ReceiveReplication(ctx context.Context, root string, r io.Reader) error
@@ -45,6 +46,10 @@ type ReplicationZFS interface {
 	DetachMounts(ctx context.Context, dataset string) error
 	// ListAsideCopies 列出之前各轮挪开的 "-rebuilding-"/"-diverged-" 兄弟数据集，最新的在最后。
 	ListAsideCopies(ctx context.Context, root string) ([]string, error)
+	// ListHeldCopies 列出之前各轮挪到目录外暂存的 "<root>-held-" 数据集（见 destroyOrHold），最旧的在前。
+	ListHeldCopies(ctx context.Context, root string) ([]string, error)
+	// ListDependentClones 列出克隆自 dataset 某个快照的卷。
+	ListDependentClones(ctx context.Context, dataset string) ([]string, error)
 	// ResumeToken 返回 root 下持有半截接收流的数据集及其续传令牌。
 	ResumeToken(ctx context.Context, root string) (dataset, token string, err error)
 	// AbortResume 丢弃半截接收流，否则续不动的令牌会被永远重试。
@@ -71,6 +76,9 @@ const replicationMarkersKept = 3
 // 超过后不再为可能不回来的节点占空间，回来时整体重建。
 const markerPinWindow = 24 * time.Hour
 
+// IdentityLayerReleaser is shared with the storage RPC boundary.
+type IdentityLayerReleaser = storage.IdentityLayerReleaser
+
 type Replicator struct {
 	Store store.Store
 	ZFS   ReplicationZFS
@@ -90,8 +98,10 @@ type Replicator struct {
 	DBRevision func() uint64
 	// DBSnapshot 把在用数据库写到指定路径（store.Snapshot），在打标记前执行，使库行与数据集落在同一个 txg。
 	DBSnapshot func(ctx context.Context, path string) error
-	Now        func() time.Time
-	Logger     *slog.Logger
+	// IdentityLayers 放掉钉在待删数据上的空闲身份层；为 nil 时不处理（单机测试）。
+	IdentityLayers IdentityLayerReleaser
+	Now            func() time.Time
+	Logger         *slog.Logger
 
 	lastFingerprint string
 	// markMu 串行化打标记：周期循环和计划切换的排空都会打，
@@ -107,6 +117,8 @@ type Replicator struct {
 	HoldsVIP func() bool
 	// InventoryTimeout 限制单次目录清单请求；零值用默认值。
 	InventoryTimeout time.Duration
+	// heldSeq 让同一轮里挪开的几份暂存名字不撞（时钟可能不走）。拉取是单飞的，不用锁。
+	heldSeq int64
 }
 
 // defaultInventoryTimeout 远长于健康对端列目录所需，又远短于一次挂起请求会拖掉的一轮。
@@ -120,6 +132,17 @@ func (r *Replicator) acquirePull(ctx context.Context) (func(), error) {
 		return func() { <-r.pulling }, nil
 	case <-ctx.Done():
 		return nil, fmt.Errorf("另一次目录拉取还没结束：%w", ctx.Err())
+	}
+}
+
+// tryAcquirePull 不等待地占用拉取槽位；正有拉取在跑时返回 false。
+func (r *Replicator) tryAcquirePull() (func(), bool) {
+	r.pullingOnce.Do(func() { r.pulling = make(chan struct{}, 1) })
+	select {
+	case r.pulling <- struct{}{}:
+		return func() { <-r.pulling }, true
+	default:
+		return nil, false
 	}
 }
 
@@ -196,11 +219,20 @@ func (r *Replicator) mark(ctx context.Context, force bool) (string, error) {
 	}(); err != nil {
 		return "", err
 	}
-	// 裁旧标记只是清理，失败不算本轮失败：常见原因是备机正用 `zfs send` 读那个快照，
-	// destroy 报 "dataset is busy"。若当作致命错误，计划切换的排空轮会失败并被拒绝。
-	// 这轮没删掉的下一轮再删。
+	// 当备机时收到一半的流，升为写入者后不会再续传，它却依赖某个旧标记，挡着下面的裁剪。
+	// 本机还有拉取在跑（接任前的追平）时那是它正在收的，留给下一轮。
+	if release, ok := r.tryAcquirePull(); ok {
+		if dataset, token, err := r.ZFS.ResumeToken(ctx, r.Root); err == nil && token != "" {
+			if err := r.ZFS.AbortResume(ctx, dataset); err != nil {
+				r.logf("丢不掉当备机时收到一半的复制流，它依赖的旧复制标记会删不掉", "dataset", dataset, "error", err)
+			}
+		}
+		release()
+	}
+	// 裁旧标记只是清理，失败不算本轮失败：备机正用 `zfs send` 读那个快照时 destroy 报 "dataset is busy"。
+	// 若当作致命错误，计划切换的排空轮会失败并被拒绝。这轮没删掉的下一轮再删，原因见 error。
 	if err := r.ZFS.PruneSnapshotsExcept(ctx, r.Root, storage.ReplicationSnapshotPrefix, replicationMarkersKept, r.pinnedMarkers(ctx)); err != nil {
-		r.logf("旧的复制标记这轮没删掉（多半是备机正在读它），下一轮再试", "error", err)
+		r.logf("有旧的复制标记这轮没删掉，下一轮再试", "error", err)
 	}
 	r.lastFingerprint = fingerprint
 	return name, nil
@@ -311,6 +343,7 @@ func (r *Replicator) pull(ctx context.Context) error {
 			keep = 0
 		}
 		r.pruneAsideCopies(ctx, keep)
+		r.pruneHeldCopies(ctx)
 	}()
 	// forceRebuild：半截状态废不掉，副本无法再增量，拿到对端目标标记后整体重建。
 	forceRebuild := false
@@ -347,11 +380,16 @@ func (r *Replicator) pull(ctx context.Context) error {
 	}
 	// 不跟随不自洽的写入者：库里记着、池里却没有的数据集，recv -F 会把它从本机也删掉。
 	// 判据是写入者自洽与否而非「会不会删本机的东西」，合法删除会连库行一起删（见 ImageService.DeleteImage）。
-	if len(peerInv.Incomplete) > 0 {
+	// 本机也没有的那些不用拦：跟随删不掉本机任何一份，拦下只会让集群一直没有备份副本
+	// （常见于写入者没追平就接任：最后一轮里刚被替换的配置两边都没收到）。
+	if held := heldLocally(peerInv.Incomplete, local, r.Root); len(held) > 0 {
 		return fmt.Errorf("对端 %s 的目录与它自己的数据库对不上（库里还记着 %s，池里已经没有），"+
 			"跟随它会把这些数据集从本机一并删掉：本轮不复制。"+
 			"请先在对端处理这处不一致（这些是已经没有数据的残留记录，到「镜像管理」里删掉即可），"+
-			"或把目录完整的那台切换为主机", r.PeerURL, strings.Join(peerInv.Incomplete, "、"))
+			"或把目录完整的那台切换为主机", r.PeerURL, strings.Join(held, "、"))
+	} else if len(peerInv.Incomplete) > 0 {
+		r.logf("following a writer whose database lists datasets nobody holds; this node has none of them either",
+			"missing", strings.Join(peerInv.Incomplete, "、"))
 	}
 	// 空对端永不覆盖非空副本：刚装好就抢到 VRRP 的空节点会让一次 recv -F 删光全部数据。
 	// 对端变空也可能是合法删光了镜像，这里分不清，所以报错里两种都说；主机再导入镜像后下一轮自愈。
@@ -448,6 +486,22 @@ func (r *Replicator) pull(ctx context.Context) error {
 		} else {
 			r.logf("local-only snapshots are the peer's own deletions and round markers; rolling them back",
 				"local_only", len(own), "example", own[0], "base", base, "target", target)
+			if err := r.releaseIdentityLayers(ctx, own); err != nil {
+				return err
+			}
+		}
+	}
+	// 写入者删掉又建了同名数据集：递归增量流 zfs 会收到一半才失败（"cannot open …/recv-…"），
+	// 半截状态里那个数据集连共同根标记都没了，逐个追平也认不出，只能整份重建。认得出就直接逐个追平。
+	if base != "" && recreatedUnderSameName(peerInv, local, r.Root, base, target) {
+		if cerr := r.catchUp(ctx, peerInv, base, target); cerr == nil {
+			r.logf("a dataset was recreated under the same name; caught up dataset by dataset", "base", base, "target", target)
+			r.confirm(ctx, target)
+			synced = true
+			r.recordState(ctx, target, divergence)
+			return nil
+		} else {
+			r.logf("catching up a recreated dataset failed; trying the recursive round", "base", base, "error", cerr.Error())
 		}
 	}
 	if err := r.receiveRound(ctx, base, target); err != nil {
@@ -517,7 +571,7 @@ func (r *Replicator) dropStaleRecvTemps(ctx context.Context, peerInv ha.Replicat
 			continue
 		}
 		_ = r.ZFS.DetachMounts(ctx, e.Name)
-		if err := r.ZFS.Destroy(ctx, e.Name); err != nil {
+		if _, err := r.destroyOrHold(ctx, e.Name); err != nil {
 			r.logf("could not remove a temporary dataset left by an interrupted receive", "dataset", e.Name, "error", err)
 			continue
 		}
@@ -525,6 +579,58 @@ func (r *Replicator) dropStaleRecvTemps(ctx context.Context, peerInv ha.Replicat
 		dropped = true
 	}
 	return dropped
+}
+
+// destroyOrHold 删掉写入者已经不要的本机数据集。本机还有客户机的盘克隆自它时 zfs 删不掉：
+// 这时改名挪到目录外（<root>-held-<纳秒>）暂存，客户机的盘照常用，这一轮其余部分照常追平，
+// 客户机放手后由 pruneHeldCopies 删掉。不用 promote：那会把它的快照（含复制标记）搬进客户机克隆，
+// 克隆回收时连同带走，且改变客户机盘的身份。只在依赖者全都在目录外时才挪：目录内的依赖说明
+// 追平的删除顺序有问题，挪走源会让目录里留下源在目录外的克隆，那样宁可照旧报错。
+// 返回挪去的名字；直接删掉或本就不存在时为 ""。
+func (r *Replicator) destroyOrHold(ctx context.Context, dataset string) (string, error) {
+	err := r.ZFS.Destroy(ctx, dataset)
+	if err == nil || zfs.IsNotExist(err) {
+		return "", nil
+	}
+	if !zfs.HasDependentClones(err) {
+		return "", err
+	}
+	deps, lerr := r.ZFS.ListDependentClones(ctx, dataset)
+	if lerr != nil || len(deps) == 0 {
+		return "", err // 找不到依赖者就不知道挪开是否安全
+	}
+	for _, d := range deps {
+		if d == r.Root || strings.HasPrefix(d, r.Root+"/") {
+			return "", fmt.Errorf("%w（依赖它的 %s 还在目录里）", err, d)
+		}
+	}
+	r.heldSeq++
+	held := fmt.Sprintf("%s-held-%d", r.Root, r.Now().UTC().UnixNano()+r.heldSeq)
+	if rerr := r.ZFS.Rename(ctx, dataset, held); rerr != nil {
+		return "", fmt.Errorf("%w；挪到目录外也失败: %v", err, rerr)
+	}
+	_ = r.ZFS.DetachMounts(ctx, held) // 卷没有挂载点；文件系统的显式挂载点不随改名走
+	r.logf("a dataset the writer dropped still backs a client disk here; moved it out of the catalogue until the client lets go",
+		"dataset", dataset, "held_as", held, "clones", strings.Join(deps, "、"))
+	return held, nil
+}
+
+// pruneHeldCopies 删掉客户机已经放手的暂存数据集；还被克隆着的留到下一轮。
+func (r *Replicator) pruneHeldCopies(ctx context.Context) {
+	held, err := r.ZFS.ListHeldCopies(ctx, r.Root)
+	if err != nil {
+		return
+	}
+	for _, name := range held {
+		err := r.ZFS.Destroy(ctx, name)
+		switch {
+		case err == nil:
+			r.logf("removed a held dataset once no client disk used it any more", "held", name)
+		case zfs.HasDependentClones(err), zfs.IsNotExist(err):
+		default:
+			r.logf("could not remove a held dataset; retrying next round", "held", name, "error", err)
+		}
+	}
 }
 
 // asideCopiesKept 是没同步成时保留的重建残留副本数。每次失败的重建都会留下一份，不回收会把池写满，
@@ -545,7 +651,7 @@ func (r *Replicator) rebuildWhole(ctx context.Context, target string) error {
 	return r.rebuildPreserving(ctx, target)
 }
 
-// pruneAsideCopies 回收较旧的重建残留副本。尽力而为：删不掉只占空间，不影响正确性。
+// pruneAsideCopies 回收较旧且没有独有业务还原点的重建残留。检查失败或删不掉时保留并等待后续重试。
 func (r *Replicator) pruneAsideCopies(ctx context.Context, keep int) {
 	all, err := r.ZFS.ListAsideCopies(ctx, r.Root)
 	if err != nil {
@@ -562,12 +668,116 @@ func (r *Replicator) pruneAsideCopies(ctx context.Context, keep int) {
 		return
 	}
 	for _, old := range aside[:len(aside)-keep] {
-		if err := r.ZFS.Destroy(ctx, old); err != nil {
+		if err := r.dropAside(ctx, old); err != nil {
 			r.logf("旧的挪开副本没能回收（占着空间，不影响正确性）", "aside", old, "error", err)
 			continue
 		}
 		r.logf("回收了上一轮留下的挪开副本", "aside", old)
 	}
+}
+
+// dropAside 与显式历史清理互斥；重新核对业务GUID后，只清理可再生的重建残留和空闲身份层。
+func (r *Replicator) dropAside(ctx context.Context, aside string) error {
+	suffix, ok := strings.CutPrefix(aside, r.Root+"-rebuilding-")
+	if !ok || suffix == "" || strings.Trim(suffix, "0123456789") != "" {
+		return fmt.Errorf("拒绝清理非重建残留目录：%s", aside)
+	}
+	unlock, err := storage.HoldAsideCopies(ctx)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	// Re-read under the same lock as explicit cleanup: its old name may now be a preserved diverged tree.
+	old, err := r.ZFS.ListGUIDs(ctx, aside)
+	if zfs.IsNotExist(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	if len(old.Entries) == 0 {
+		return nil
+	}
+	current, err := r.ZFS.ListGUIDs(ctx, r.Root)
+	if err != nil {
+		return err
+	}
+	present := map[string]bool{}
+	for _, e := range current.Entries {
+		if strings.Contains(e.Name, "@") && e.GUID != "" && e.GUID != "-" {
+			present[e.GUID] = true
+		}
+	}
+	shared := map[string]zfs.GUIDEntry{}
+	for _, e := range old.Entries {
+		ds, snap, isSnapshot := strings.Cut(e.Name, "@")
+		if !isSnapshot {
+			continue
+		}
+		if !storage.SystemSnapshot(snap) && !present[e.GUID] {
+			return fmt.Errorf("请先核对旧副本 %s 中独有的还原点 %s，再明确删除对应镜像；自动回收已保留该副本", aside, e.Name)
+		}
+		if present[e.GUID] {
+			prev, ok := shared[ds]
+			if !ok || e.Created > prev.Created || e.Created == prev.Created && e.Name > prev.Name {
+				shared[ds] = e
+			}
+		}
+	}
+	// A shared snapshot is not proof that its live head has no private writes.
+	for _, e := range old.Entries {
+		if strings.Contains(e.Name, "@") || !strings.HasPrefix(e.Name, aside+"/") {
+			continue
+		}
+		rel := strings.TrimPrefix(e.Name, aside+"/")
+		if storage.ReservedCatalogueChild(strings.Split(rel, "/")[0]) {
+			continue
+		}
+		base, ok := shared[e.Name]
+		if !ok {
+			return fmt.Errorf("请先核对旧副本业务卷 %s：没有可证明与当前目录相同的共享快照，自动回收已保留", e.Name)
+		}
+		_, snap, _ := strings.Cut(base.Name, "@")
+		written, err := r.ZFS.WrittenSince(ctx, e.Name, snap)
+		if err != nil {
+			return err
+		}
+		if written != 0 {
+			return fmt.Errorf("请先核对旧副本业务卷 %s：相对共享快照 %s 还有独有写入，自动回收已保留", e.Name, base.Name)
+		}
+	}
+	if err := r.releaseIdentityLayers(ctx, []string{aside}); err != nil {
+		return err
+	}
+	return r.ZFS.Destroy(ctx, aside)
+}
+
+// releaseIdentityLayers refuses destructive work when dependency/session checks fail or matching layers are busy.
+func (r *Replicator) releaseIdentityLayers(ctx context.Context, gone []string) error {
+	if r.IdentityLayers == nil || len(gone) == 0 {
+		return nil
+	}
+	// The catalogue root is a filesystem container, never an identity layer's zvol source.
+	// Keep child snapshots (including rep-*): an identity layer can still pin those.
+	sources := make([]string, 0, len(gone))
+	for _, source := range gone {
+		if dataset, snap, ok := strings.Cut(source, "@"); ok && dataset == r.Root && snap != "" {
+			continue
+		}
+		sources = append(sources, source)
+	}
+	if len(sources) == 0 {
+		return nil
+	}
+	released, err := r.IdentityLayers.ReleaseIdentityLayers(ctx, sources)
+	if err != nil {
+		r.logf("could not release identity layers pinned to data about to be removed", "error", err)
+		return err
+	}
+	if len(released) > 0 {
+		r.logf("released identity layers pinned to data about to be removed; they are rebuilt on next boot", "macs", released)
+	}
+	return nil
 }
 
 // rebuildPreserving 先挪开旧副本、接收、成功后才删旧副本，失败则改回原名。
@@ -598,7 +808,7 @@ func (r *Replicator) rebuildPreserving(ctx context.Context, target string) error
 		}
 		return err
 	}
-	if err := r.ZFS.Destroy(ctx, aside); err != nil {
+	if err := r.dropAside(ctx, aside); err != nil {
 		// 重建已成功，残留只占空间；记日志免得无人察觉。
 		r.logf("rebuilt copy is in place but the old one could not be removed",
 			"leftover", aside, "error", err)
@@ -694,6 +904,23 @@ func datasetsComplete(peerInv ha.ReplicationInventory, local zfs.GUIDInventory, 
 		}
 	}
 	return true
+}
+
+// heldLocally 返回 names（目录内相对名）里本机副本还持有的那些。
+func heldLocally(names []string, local zfs.GUIDInventory, root string) []string {
+	have := map[string]bool{}
+	for _, e := range local.Entries {
+		if !strings.Contains(e.Name, "@") {
+			have[e.Name] = true
+		}
+	}
+	var held []string
+	for _, n := range names {
+		if have[root+"/"+n] {
+			held = append(held, n)
+		}
+	}
+	return held
 }
 
 // latestMarker 返回容器本身最新的复制标记，即列表中最后一个（zfs 按创建顺序列出）。

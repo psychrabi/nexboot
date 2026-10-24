@@ -574,3 +574,62 @@ func TestPeerIsServingIgnoresAnAnswerFromItself(t *testing.T) {
 		t.Fatal("把自己当成了在服务的对端")
 	}
 }
+
+// 排空只说明主机发出去了。备机自报的标记没到最后一轮（比如接收一直失败），它拿到 VIP 会以落后为由让出，
+// VIP 来回漂；计划切换要当场拒绝并点名，仍保持主机身份、重新开闸、恢复打轮次。
+func TestPlannedSwitchRefusesWhileAHealthyStandbyLacksTheFinalRound(t *testing.T) {
+	defer func(d, p time.Duration) { plannedSwitchConfirm, plannedSwitchPoll = d, p }(plannedSwitchConfirm, plannedSwitchPoll)
+	plannedSwitchConfirm, plannedSwitchPoll = 50*time.Millisecond, 10*time.Millisecond
+	c, exits := newTestController(t)
+	_ = WriteRoleState(c.RoleFile, RoleState{Role: "active", Epoch: 5})
+	final := "rep-1788329600000000000"
+	c.CatalogueMark = func(context.Context) string { return final }
+	c.SyncBeforeSwitch = func(context.Context) error { return nil }
+	resumed := false
+	c.ResumeRounds = func() { resumed = true }
+	c.ClusterPeers = func(context.Context) []PeerStatusClient {
+		return []PeerStatusClient{
+			fakePeerStatus{status: PeerStatus{NodeID: "n3", Role: "standby", Healthy: true, Mark: "rep-1788329500000000000"}},
+			fakePeerStatus{status: PeerStatus{NodeID: "n5", Role: "standby", Healthy: true, Mark: final}},
+			fakePeerStatus{status: PeerStatus{NodeID: "n9", Role: "standby", Healthy: false, Mark: "rep-1"}}, // 接不住 VIP，不等
+		}
+	}
+	err := c.PlannedSwitch(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "节点 n3") || strings.Contains(err.Error(), "n5") || strings.Contains(err.Error(), "n9") {
+		t.Fatalf("应只点名落后的健康备机 n3：%v", err)
+	}
+	if !strings.Contains(err.Error(), "已保持主机身份") {
+		t.Fatalf("理由要说清本机仍是主机：%v", err)
+	}
+	if rs, _ := ReadRoleState(c.RoleFile); rs.Role != "active" || len(*exits) != 0 {
+		t.Fatalf("拒绝后必须仍是主机且不重启：%+v exits=%v", rs, *exits)
+	}
+	if err := c.Gate.Allow(); err != nil || !resumed {
+		t.Fatalf("拒绝后要重新开闸并恢复打轮次：gate=%v resumed=%v", err, resumed)
+	}
+}
+
+// 备机都自报持有最后一轮：照常退位。
+func TestPlannedSwitchStepsDownOnceStandbysHoldTheFinalRound(t *testing.T) {
+	c, _ := newTestController(t)
+	restarted := make(chan struct{})
+	c.Exit = func(int) { close(restarted) }
+	_ = WriteRoleState(c.RoleFile, RoleState{Role: "active", Epoch: 5})
+	final := "rep-1788329600000000000"
+	c.CatalogueMark = func(context.Context) string { return final }
+	c.SyncBeforeSwitch = func(context.Context) error { return nil }
+	c.ClusterPeers = func(context.Context) []PeerStatusClient {
+		return []PeerStatusClient{fakePeerStatus{status: PeerStatus{NodeID: "n3", Role: "standby", Healthy: true, Mark: "rep-1788329600000000001"}}}
+	}
+	if err := c.PlannedSwitch(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if rs, _ := ReadRoleState(c.RoleFile); rs.Role != "standby" {
+		t.Fatalf("备机已追平应退位：%+v", rs)
+	}
+	select {
+	case <-restarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("退位后应重启")
+	}
+}

@@ -35,3 +35,19 @@ func HoldCatalogueContext(ctx context.Context) (release func(), err error) {
 	}
 	return catalogueChanges.Unlock, nil
 }
+
+// asideCopies serializes explicit historical cleanup with automatic whole-tree pruning.
+// It is independent of catalogueChanges: callers may already hold ChangeCatalogue.
+var asideCopies sync.Mutex
+
+// HoldAsideCopies protects aside inspection, preservation renames, and whole-tree pruning as one operation.
+func HoldAsideCopies(ctx context.Context) (release func(), err error) {
+	for !asideCopies.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(20 * time.Millisecond):
+		}
+	}
+	return asideCopies.Unlock, nil
+}

@@ -13,6 +13,7 @@ import (
 	"github.com/tianwei/diskless/internal/control/errs"
 	"github.com/tianwei/diskless/internal/dhcp"
 	"github.com/tianwei/diskless/internal/domain"
+	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/store"
 )
 
@@ -170,6 +171,11 @@ func (s GroupService) Update(ctx context.Context, id string, req GroupRequest) (
 			return domain.Group{}, err
 		}
 	}
+	if group.SystemImageID != current.SystemImageID || group.SystemConfigID != current.SystemConfigID {
+		if err := refuseSystemChangeWhileRunning(ctx, s.Store, id); err != nil {
+			return domain.Group{}, err
+		}
+	}
 	groups, err := s.Store.Groups().List(ctx)
 	if err != nil {
 		return domain.Group{}, err
@@ -222,6 +228,30 @@ func (s GroupService) Update(ctx context.Context, id string, req GroupRequest) (
 		return domain.Group{}, err
 	}
 	return group, nil
+}
+
+// refuseSystemChangeWhileRunning 拒绝在组内有机器运行时换系统镜像或配置：运行中的机器仍在用开机时的系统盘，
+// 控制台却会显示新镜像，与实际不符。「运行中」与 refuseAddressChangeWhileRunning 相同，指有 iSCSI 会话。
+func refuseSystemChangeWhileRunning(ctx context.Context, st store.Store, groupID string) error {
+	terminals, err := st.Terminals().List(ctx)
+	if err != nil {
+		return err
+	}
+	var running []string
+	for _, terminal := range terminals {
+		if terminal.GroupID != groupID || terminal.State != domain.TerminalStateOnline {
+			continue
+		}
+		who := terminal.Name
+		if who == "" {
+			who = terminal.MAC
+		}
+		running = append(running, who)
+	}
+	if len(running) == 0 {
+		return nil
+	}
+	return errs.Conflict(fmt.Sprintf("分组内有 %d 台终端正在运行（%s），请先关机后再修改系统镜像/配置", len(running), strings.Join(running, "、")))
 }
 
 // GroupNetworkRequest 是分组编辑中的网络部分，供预览使用。
@@ -719,13 +749,30 @@ func buildDHCPConfigs(ctx context.Context, st store.Store) ([]dhcp.GroupConfig, 
 	if err != nil {
 		return nil, err
 	}
+	sessions, err := st.InstallSessions().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	installing := map[string]bool{}
+	for _, v := range sessions {
+		if v.Active() && v.Phase != "preparing" {
+			installing[storage.NormalizeMAC(v.MAC)] = true
+		}
+	}
 	byGroup := make(map[string][]domain.Terminal)
 	for _, terminal := range terminals {
-		byGroup[terminal.GroupID] = append(byGroup[terminal.GroupID], terminal)
+		if !installing[storage.NormalizeMAC(terminal.MAC)] {
+			byGroup[terminal.GroupID] = append(byGroup[terminal.GroupID], terminal)
+		}
 	}
 	out := make([]dhcp.GroupConfig, 0, len(groups))
 	for _, group := range groups {
 		out = append(out, dhcp.GroupConfig{Group: group, Terminals: byGroup[group.ID]})
+	}
+	for _, v := range sessions {
+		if v.Active() && v.Phase != "preparing" {
+			out = append(out, dhcp.GroupConfig{Group: domain.Group{ID: v.ID, Name: "ISO 安装 " + v.Name, StartIP: v.IP, ClientMax: 1, Gateway: v.Gateway, Netmask: v.Netmask, DNS1: v.DNS1}, Terminals: []domain.Terminal{{MAC: v.MAC, IP: v.IP}}})
+		}
 	}
 	return out, nil
 }

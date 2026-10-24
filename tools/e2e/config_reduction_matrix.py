@@ -10,7 +10,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from ndapi import (BASE, IMPORT_DIR, POOL, call, cfg_by_name, check, configs,  # noqa: E402
-                   reductions, section, ssh, summary, task_of)
+                   reductions, section, skip, ssh, summary, task_of)
 
 IMG = "probe"
 
@@ -179,6 +179,47 @@ check("H5", "导入后的镜像只有 @0，没有残留快照", snaps_of("probe-
 time.sleep(10)
 delete_image("probe-exp")
 ssh(f"rm -f {EXP}")
+
+section("H' 还原点导出到服务器目录（盘对盘，不经浏览器）")
+# 1cf51a3：还原点也能直接落到本节点导入目录，结果写明落在哪台；同名文件已在时必须拒绝，
+# 否则两次导出会互相截断，留下一个看似可导入的残缺文件。
+
+
+def wait_task(tid, timeout=300):
+    for _ in range(timeout):
+        st, t = call("GET", f"/api/tasks/{tid}")
+        if st == 200 and isinstance(t, dict) and t.get("Status") in ("success", "failed"):
+            return t
+        time.sleep(1)
+    return {}
+
+
+check("H6", "还原点不存在 404", call("POST", "/api/reductions/ghost/export")[0] == 404)
+ssh(f"rm -f {IMPORT_DIR}/probe-*.zfs")
+st, res = call("POST", f"/api/reductions/{RA}/export")
+res = res if isinstance(res, dict) else {}
+DIR_EXP = res.get("path", "")
+check("H7", "受理导出，落点在导入目录且以镜像名-还原点名命名、写明节点",
+      st == 202 and DIR_EXP.startswith(IMPORT_DIR.rstrip("/") + "/probe-") and DIR_EXP.endswith(".zfs") and bool(res.get("node")),
+      f"HTTP {st} {str(res)[:160]}")
+t = wait_task(res.get("task_id", "")) if res.get("task_id") else {}
+size = ssh(f"stat -c %s {DIR_EXP} 2>/dev/null || echo 0").strip() if DIR_EXP else "0"
+check("H8", "导出任务成功，文件非空", t.get("Status") == "success" and size.isdigit() and int(size) > 0,
+      f"{t.get('Status')} {(t.get('Error') or '')[:120]} size={size}")
+check("H9", "导出用的临时克隆已清理", "EXPORT-" not in ssh(f"zfs list -H -o name | grep '^{POOL}/run/' || true"))
+st, body = call("POST", f"/api/reductions/{RA}/export")
+check("H10", "同名导出文件已存在时 409 并点名文件，不覆盖", st == 409 and "已存在" in str(body), f"HTTP {st} {str(body)[:160]}")
+delete_image("probe-dirx")
+if DIR_EXP:
+    call("POST", "/api/images/import", {"name": "probe-dirx", "source_path": DIR_EXP, "os_type": "linux"})
+    t = task_of("task-import_image")
+    check("H11", "导出到目录的文件能重新导入，且只有 @0", t.get("Status") == "success" and snaps_of("probe-dirx") == ["0"],
+          (t.get("Error") or "")[:120] + " " + str(snaps_of("probe-dirx")))
+    time.sleep(10)
+    delete_image("probe-dirx")
+    ssh(f"rm -f {DIR_EXP}")
+else:
+    skip("H11", "导出到目录的文件能重新导入", "H7 没有拿到导出路径")
 
 section("I 另存为新镜像（完整复制）")
 delete_image("probe-copy")

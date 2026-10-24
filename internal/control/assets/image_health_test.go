@@ -22,7 +22,7 @@ func TestImportImageAutoTriggersHealthCheck(t *testing.T) {
 		PartitionStyle: "gpt",
 		Items:          []storage.InspectItem{{Name: "bcd", Level: domain.HealthWarn, Detail: "BCD 缺失"}},
 	}}
-	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake, Now: func() time.Time { return now }}
 
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
@@ -57,7 +57,7 @@ func TestRunHealthCheckOverwritesPreviousReport(t *testing.T) {
 	st := newImageTestStore(t)
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	fake := &fakeImageStorage{now: now, inspectReport: storage.InspectReport{Level: domain.HealthBlock, Items: []storage.InspectItem{{Name: "msiscsi", Level: domain.HealthBlock, Detail: "msiscsi.sys 缺失"}}}}
-	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake, Now: func() time.Time { return now }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestRunHealthCheckStoresTheNICsTheImageHasDriversFor(t *testing.T) {
 	st := newImageTestStore(t)
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
 	fake := &fakeImageStorage{now: now}
-	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake, Now: func() time.Time { return now }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
 	}
@@ -106,7 +106,7 @@ func TestRunHealthCheckRefusesADataDiskAndDropsItsStaleReport(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake := &fakeImageStorage{now: now}
-	_, err := ImageService{Store: st, Storage: fake}.RunHealthCheck(ctx, "steam")
+	_, err := ImageService{ImportDir: testImportDir, Store: st, Storage: fake}.RunHealthCheck(ctx, "steam")
 	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "Steam 游戏库") {
 		t.Fatalf("err = %v", err)
 	}
@@ -128,7 +128,7 @@ func TestSetPurposeToDataDropsTheHealthReport(t *testing.T) {
 	if err := st.ImageHealthReports().Create(ctx, domain.ImageHealthReport{ID: "health-games", ImageID: "games", Level: domain.HealthBlock, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := (ImageService{Store: st}).SetPurpose(ctx, "games", SetPurposeRequest{Purpose: string(domain.ImagePurposeData)}); err != nil {
+	if _, err := (ImageService{ImportDir: testImportDir, Store: st}).SetPurpose(ctx, "games", SetPurposeRequest{Purpose: string(domain.ImagePurposeData)}); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.ImageHealthReports().GetByImage(ctx, "games"); !errs.IsNotFound(err) {
@@ -140,7 +140,7 @@ func TestGetHealthReturnsReportAndMissing(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	service := ImageService{Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
 	}

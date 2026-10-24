@@ -22,7 +22,7 @@ func TestImageServiceImportImageWritesDBAndTask(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Date(2026, 6, 29, 12, 0, 0, 0, time.UTC)
-	service := ImageService{Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
 
 	result, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows})
 	if err != nil {
@@ -65,7 +65,7 @@ func TestImageServiceImportImageRecordsItsTargetWhileRunning(t *testing.T) {
 		}
 		midRunRef = tasks[0].TargetRef
 	}}
-	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake, Now: func() time.Time { return now }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
 	}
@@ -116,7 +116,7 @@ func TestImageServiceImportImageReportsProgressDuringImport(t *testing.T) {
 		midRunMessage = task[0].Message
 		midRunStatus = task[0].Status
 	}}
-	service := ImageService{Store: st, Storage: storage, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: storage, Now: func() time.Time { return now }}
 
 	result, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows})
 	if err != nil {
@@ -144,7 +144,7 @@ func TestImageServiceRejectsDuplicateName(t *testing.T) {
 	if err := st.Images().Create(ctx, domain.Image{ID: "img-1", Name: "win11", OSType: domain.OSTypeWindows, State: domain.ImageStateNormal, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
-	service := ImageService{Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows})
 	if !errors.Is(err, ErrImageExists) {
@@ -156,7 +156,7 @@ func TestImageServiceMarksTaskFailed(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
-	service := ImageService{Store: st, Storage: &fakeImageStorage{err: errors.New("zfs failed"), now: now}, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{err: errors.New("zfs failed"), now: now}, Now: func() time.Time { return now }}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows})
 	if err == nil {
@@ -185,7 +185,7 @@ func TestImageServiceRollsBackStorageWhenDBTxFails(t *testing.T) {
 		t.Fatal(err)
 	}
 	storage := &fakeImageStorage{now: now}
-	service := ImageService{Store: st, Storage: storage, Now: func() time.Time { return now }}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: storage, Now: func() time.Time { return now }}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows})
 	if err == nil {
@@ -201,7 +201,7 @@ func TestImageServiceRollsBackStorageWhenDBTxFails(t *testing.T) {
 
 func TestImageServiceRejectsImportSourcePathOutsideImportDir(t *testing.T) {
 	ctx := context.Background()
-	service := ImageService{Store: newImageTestStore(t), Storage: &fakeImageStorage{}}
+	service := ImageService{ImportDir: testImportDir, Store: newImageTestStore(t), Storage: &fakeImageStorage{}}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/tmp/import.zfs", OSType: domain.OSTypeWindows})
 	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "请把文件放到导入目录 /var/lib/ndiskless/imports 下") {
@@ -293,7 +293,7 @@ func TestImageServiceKeepsImportImageNameAsTyped(t *testing.T) {
 
 func TestImageServiceRejectsImportSourcePathWithInvalidExtension(t *testing.T) {
 	ctx := context.Background()
-	service := ImageService{Store: newImageTestStore(t), Storage: &fakeImageStorage{}}
+	service := ImageService{ImportDir: testImportDir, Store: newImageTestStore(t), Storage: &fakeImageStorage{}}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/import.iso", OSType: domain.OSTypeWindows})
 	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "不支持 import.iso") {
@@ -304,7 +304,7 @@ func TestImageServiceRejectsImportSourcePathWithInvalidExtension(t *testing.T) {
 func TestImageServiceRejectsInvalidOSTypeBeforeStorage(t *testing.T) {
 	ctx := context.Background()
 	storage := &fakeImageStorage{}
-	service := ImageService{Store: newImageTestStore(t), Storage: storage}
+	service := ImageService{ImportDir: testImportDir, Store: newImageTestStore(t), Storage: storage}
 
 	_, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: "plan9"})
 	if err == nil || !strings.Contains(err.Error(), "invalid os_type") {
@@ -348,7 +348,7 @@ func TestImageServiceDeleteRejectsImageWithConfigs(t *testing.T) {
 	if err := st.Groups().Create(ctx, group); err != nil {
 		t.Fatal(err)
 	}
-	service := ImageService{Store: st, Storage: &fakeImageStorage{}}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{}}
 
 	err := service.DeleteImage(ctx, img.ID)
 	if !errors.Is(err, ErrImageInUse) {
@@ -376,7 +376,7 @@ func TestImageServiceDeleteRefusesWhileAStandbyReceivesIt(t *testing.T) {
 	img, cfg := seedImageWithConfig(t, st)
 	fake := &fakeImageStorage{}
 	var asked []string
-	service := ImageService{Store: st, Storage: fake, Replicating: func(ids ...string) []string {
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake, Replicating: func(ids ...string) []string {
 		asked = ids
 		return []string{"192.168.10.5"}
 	}}
@@ -397,7 +397,7 @@ func TestImageServiceDeleteTranslatesABusyPool(t *testing.T) {
 	img, _ := seedImageWithConfig(t, st)
 	fake := &fakeImageStorage{err: storage.CommandError{Name: "zfs", Args: []string{"destroy", "-r", "tank/nd/ubuntu-vmdk"},
 		Output: "cannot destroy snapshot tank/nd/ubuntu-vmdk@rep-17: dataset is busy"}}
-	service := ImageService{Store: st, Storage: fake}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: fake}
 	err := service.DeleteImage(context.Background(), img.ID)
 	if !errors.Is(err, errs.ErrConflict) || strings.Contains(err.Error(), "cannot destroy") || !strings.Contains(err.Error(), "ubuntu-vmdk") {
 		t.Fatalf("err = %v", err)
@@ -424,7 +424,7 @@ func TestImageServiceDeleteRemovesStorageAndDB(t *testing.T) {
 		t.Fatal(err)
 	}
 	storage := &fakeImageStorage{}
-	service := ImageService{Store: st, Storage: storage}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: storage}
 
 	if err := service.DeleteImage(ctx, img.ID); err != nil {
 		t.Fatal(err)
@@ -459,7 +459,7 @@ func TestImageServiceGetImageIncludesConfigs(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	detail, err := (ImageService{Store: st, Storage: &fakeImageStorage{}}).GetImage(ctx, img.ID)
+	detail, err := (ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{}}).GetImage(ctx, img.ID)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -498,7 +498,7 @@ func TestImageServiceListImagesReportsRealUsage(t *testing.T) {
 		"CLIENT-AABBCCDDEEFF": {Size: 80 << 30, Used: 5 << 30},
 		"ubuntu":              {Size: 40 << 30, Used: 6 << 30},
 	}}
-	service := ImageService{Store: st, Storage: &fakeImageStorage{space: space}}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{space: space}}
 
 	result, err := service.ListImages(ctx)
 	if err != nil {
@@ -528,7 +528,7 @@ func TestImageServiceListImagesSurvivesUsageFailure(t *testing.T) {
 	if err := st.Images().Create(ctx, domain.Image{ID: "win11", Name: "win11", OSType: domain.OSTypeWindows, Size: 80 << 30, State: domain.ImageStateNormal}); err != nil {
 		t.Fatal(err)
 	}
-	service := ImageService{Store: st, Storage: &fakeImageStorage{spaceErr: errors.New("zfs list failed")}}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{spaceErr: errors.New("zfs list failed")}}
 
 	result, err := service.ListImages(ctx)
 	if err != nil {
@@ -599,7 +599,7 @@ func TestImageServiceImportImageRefusesSourceLargerThanPoolAvailable(t *testing.
 }
 
 func TestImageServiceListImagesReturnsEmptyArray(t *testing.T) {
-	result, err := (ImageService{Store: newImageTestStore(t), Storage: &fakeImageStorage{}}).ListImages(context.Background())
+	result, err := (ImageService{ImportDir: testImportDir, Store: newImageTestStore(t), Storage: &fakeImageStorage{}}).ListImages(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -758,7 +758,7 @@ func TestImageServiceRecordsBakedVersionOnlyWhenInjected(t *testing.T) {
 			ctx := context.Background()
 			st := newImageTestStore(t)
 			agent := &fakeImageStorage{now: time.Now().UTC(), scriptInjected: tc.injected}
-			service := ImageService{
+			service := ImageService{ImportDir: testImportDir,
 				Store: st, Storage: agent,
 				MountScriptBake: func(domain.OSType) ([]byte, string) { return []byte("# script"), "v1-abc" },
 			}
@@ -786,7 +786,7 @@ func TestImportImageBakesTheScriptForItsOS(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	agent := &fakeImageStorage{now: time.Now().UTC(), scriptInjected: true}
-	service := ImageService{Store: st, Storage: agent,
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: agent,
 		MountScriptBake: func(os domain.OSType) ([]byte, string) { return []byte("# " + string(os)), "v-" + string(os) }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{
 		Name: "ubuntu", SourcePath: "/var/lib/ndiskless/imports/ubuntu.zfs", OSType: domain.OSTypeLinux,
@@ -837,7 +837,7 @@ func TestImageServiceDeleteWorksWhenAConfigWasPromotedOverIt(t *testing.T) {
 	}
 	// promote 之后池的报告：镜像挂在配置下面。
 	agent := &fakeImageStorage{dependents: map[string][]string{cfg.ID: {"tank/" + img.ID}}}
-	service := ImageService{Store: st, Storage: agent}
+	service := ImageService{ImportDir: testImportDir, Store: st, Storage: agent}
 
 	if err := service.DeleteImage(ctx, img.ID); err != nil {
 		t.Fatalf("delete refused: %v", err)
@@ -956,16 +956,16 @@ func TestImportOfANameAlreadyBeingImportedIsRefusedAtSubmit(t *testing.T) {
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
 	slow, entered, release := blockingImport(now)
-	svc := ImageService{Store: st, Storage: slow, Async: true, Now: func() time.Time { return now }}
+	svc := ImageService{ImportDir: testImportDir, Store: st, Storage: slow, Async: true, Now: func() time.Time { return now }}
 	first, err := svc.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/a.zfs", OSType: domain.OSTypeWindows})
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-entered
 
-	other := ImageService{Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
+	other := ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}, Now: func() time.Time { return now }}
 	_, err = other.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/b.zfs", OSType: domain.OSTypeWindows})
-	_, saveErr := (ImageService{Store: seedRestorePointInto(t, st), Storage: &copyingImageStorage{}}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "win11"})
+	_, saveErr := (ImageService{ImportDir: testImportDir, Store: seedRestorePointInto(t, st), Storage: &copyingImageStorage{}}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "win11"})
 	close(release)
 	waitTaskDone(t, st, first.TaskID)
 	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "win11") || !strings.Contains(err.Error(), "正在导入") {
@@ -985,13 +985,13 @@ func TestImportsWhoseNamesFoldToTheSameIDAreRefused(t *testing.T) {
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
 	slow, entered, release := blockingImport(now)
-	svc := ImageService{Store: st, Storage: slow, Async: true, Now: func() time.Time { return now }}
+	svc := ImageService{ImportDir: testImportDir, Store: st, Storage: slow, Async: true, Now: func() time.Time { return now }}
 	first, err := svc.ImportImage(ctx, ImportImageRequest{Name: "教学一班", SourcePath: "/var/lib/ndiskless/imports/a.zfs", OSType: domain.OSTypeWindows})
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	_, err = (ImageService{Store: st, Storage: &fakeImageStorage{now: now}}).ImportImage(ctx, ImportImageRequest{Name: "教学二班", SourcePath: "/var/lib/ndiskless/imports/b.zfs", OSType: domain.OSTypeWindows})
+	_, err = (ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}}).ImportImage(ctx, ImportImageRequest{Name: "教学二班", SourcePath: "/var/lib/ndiskless/imports/b.zfs", OSType: domain.OSTypeWindows})
 	close(release)
 	waitTaskDone(t, st, first.TaskID)
 	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "教学一班") {
@@ -1005,10 +1005,13 @@ func TestFailedImportReleasesTheName(t *testing.T) {
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
 	req := ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/a.zfs", OSType: domain.OSTypeWindows}
-	if _, err := (ImageService{Store: st, Storage: &fakeImageStorage{now: now, err: errors.New("zfs failed")}}).ImportImage(ctx, req); err == nil {
+	if _, err := (ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now, err: errors.New("zfs failed")}}).ImportImage(ctx, req); err == nil {
 		t.Fatal("导入应失败")
 	}
-	if _, err := (ImageService{Store: st, Storage: &fakeImageStorage{now: now}}).ImportImage(ctx, req); err != nil {
+	if _, err := (ImageService{ImportDir: testImportDir, Store: st, Storage: &fakeImageStorage{now: now}}).ImportImage(ctx, req); err != nil {
 		t.Fatalf("失败后应能重导: %v", err)
 	}
 }
+
+// testImportDir 是测试里的导入目录；实际运行时由存储池的 imports 目录解析得到。
+const testImportDir = "/var/lib/ndiskless/imports"

@@ -43,6 +43,22 @@ describe('确认对话框', () => {
     quiet.mockRestore();
   });
 
+  // 明知操作会失败时只告诉原因：只有「知道了」，没有确认按钮，点了兑现为 false。
+  it('notice 只给「知道了」，没有确认按钮', async () => {
+    const done = vi.fn();
+    function Blocked() {
+      const { ask } = useConfirm();
+      return <button onClick={async () => done(await ask({ message: '还在使用，删不了', notice: true }))}>删除</button>;
+    }
+    render(<ConfirmProvider><Blocked/></ConfirmProvider>);
+    await userEvent.click(screen.getByText('删除'));
+    await screen.findByText('还在使用，删不了');
+    expect(screen.queryByText('确认')).toBeNull();
+    expect(screen.queryByText('取消')).toBeNull();
+    await userEvent.click(screen.getByText('知道了'));
+    await waitFor(() => expect(done).toHaveBeenCalledWith(false));
+  });
+
   it('typeToConfirm 未输对时按钮不可点', async () => {
     const done = vi.fn();
     function Danger() {

@@ -2,7 +2,8 @@ import React from 'react';
 import { render, screen, within } from '@testing-library/react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
-import { StoreProvider } from '../store.jsx';
+import { StoreProvider, useStore } from '../store.jsx';
+import userEvent from '@testing-library/user-event';
 import { ConfirmProvider } from '../overlay.jsx';
 import { PageOverview } from './overview.jsx';
 
@@ -137,4 +138,19 @@ describe('总览页的集群口径', () => {
     const row = within(card).getByText(/10\.0\.0\.4/).closest('div');
     expect(row.parentElement.textContent).toMatch(/2 台/);
   });
+});
+
+
+it('初始化引导支持ISO安装和文件导入，创建镜像进入现有镜像页', async () => {
+  stubApi();
+  function RouteProbe() {
+    const store = useStore();
+    return <output data-testid="guide-route">{store.route.page}</output>;
+  }
+  render(<StoreProvider><ConfirmProvider><PageOverview/><RouteProbe/></ConfirmProvider></StoreProvider>);
+  const step = (await screen.findByText('创建系统镜像')).parentElement.parentElement;
+  expect(step.textContent).toMatch(/ISO.*安装/);
+  expect(step.textContent).toMatch(/镜像文件.*导入|导入.*镜像文件/);
+  await userEvent.click(within(step).getByRole('button', { name: '去创建' }));
+  expect(screen.getByTestId('guide-route').textContent).toBe('images');
 });

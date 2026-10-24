@@ -4,14 +4,17 @@ import { Icons } from '../icons.jsx';
 import { useStore } from '../store.jsx';
 import { Modal, useConfirm } from '../overlay.jsx';
 import { Field, Select, TableState, SearchBox, SegFilter, Pager } from '../primitives.jsx';
-import { api } from '../../lib/api.js';
-import { redName, fmtCap } from '../../lib/format.js';
+import { api, downloadRaw } from '../../lib/api.js';
+import { redName, fmtCap, normMac, fmtMac } from '../../lib/format.js';
 import { useResource, useMutation, usePolling, usePaged } from '../../lib/hooks.js';
+import { InstallationDetails, InstallationPhase } from '../installation.jsx';
 const { useState, useEffect, useRef } = React;
 
 const STATE = {
   online:  { t: "在线", c: "emerald", dot: "live" },
   offline: { t: "离线", c: "",        dot: "idle" },
+  // ISO 安装借用期间开机走安装，在线离线会随安装阶段来回跳，统一显示安装中。
+  installing: { t: "安装中", c: "cyan", dot: "cyan" },
 };
 // 只有在线、离线两种：没连过的（旧数据里的 unknown）就是离线。
 const stateOf = (t) => (t?.State === "online" ? "online" : "offline");
@@ -54,9 +57,6 @@ const ipInGroupPool = (ip, group) => {
   if (n === null || start === null || !(group && group.ClientMax)) return true;
   return n >= start && n <= start + group.ClientMax - 1;
 };
-// 后端存规范化 MAC（无分隔符、大写，如 525400AABBCC）；显示时插回冒号，搜索时去掉。
-const normMac = (s) => String(s || "").replace(/[:\-.\s]/g, "").toUpperCase();
-const fmtMac = (s) => normMac(s).match(/.{1,2}/g)?.join(":") || (s || "");
 const pad2 = (n) => String(n).padStart(2, "0");
 const fmtTime = (iso) => {
   if (!iso) return "—";
@@ -64,15 +64,6 @@ const fmtTime = (iso) => {
   if (isNaN(d)) return "—";
   return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 };
-
-async function downloadRaw(res, filename) {
-  const blob = await res.blob();
-  const url = URL.createObjectURL(blob);
-  const a = document.createElement("a");
-  a.href = url; a.download = filename;
-  document.body.appendChild(a); a.click(); a.remove();
-  URL.revokeObjectURL(url);
-}
 
 function PageTerminals() {
   const store = useStore();
@@ -86,26 +77,29 @@ function PageTerminals() {
   const [selectedIds, setSelectedIds] = useState([]);
   const [detailId, setDetailId] = useState(null);
   const [editId, setEditId] = useState(null);
-  const [modal, setModal] = useState(null); // add | bulk-group | stopSuper | injectDriver
+  const [modal, setModal] = useState(null); // add | bulk-group | stopSuper
   const [form, setForm] = useState({});
   const fileRef = useRef(null);
 
   // 分开 settle：分组、镜像信息获取失败不能清空客户机列表。
   const { data, loading, error, reload: load } = useResource(async () => {
-    const [tr, gr, ir, br, nr] = await Promise.allSettled([api.listTerminals(), api.listGroups(), api.listImages(), api.listDriverBundles(), api.listClusterNodes()]);
+    const [tr, gr, ir, nr, sr] = await Promise.allSettled([api.listTerminals(), api.listGroups(), api.listImages(), api.listClusterNodes(), api.listInstallations()]);
     if (tr.status === "rejected") throw tr.reason;
     return {
       terminals: (tr.value && tr.value.items) || [],
       groups: gr.status === "fulfilled" ? (gr.value && gr.value.items) || [] : [],
       images: ir.status === "fulfilled" ? (ir.value && ir.value.items) || [] : [],
-      bundles: br.status === "fulfilled" ? (br.value && br.value.items) || [] : [],
       nodes: nr.status === "fulfilled" ? (nr.value && nr.value.items) || [] : [],
+      installs: sr.status === "fulfilled" ? ((sr.value && sr.value.items) || []).filter(v => !["ready", "cancelled"].includes(v.phase)) : [],
     };
   }, []);
   const terminals = (data && data.terminals) || [];
+  const installByMac = Object.fromEntries(((data && data.installs) || []).map(v => [normMac(v.mac), v]));
+  const installOf = (t) => installByMac[normMac(t.MAC)] || null;
+  const stateKey = (t) => (installOf(t) ? "installing" : stateOf(t));
+  const installLock = (t) => installOf(t) && `正在安装镜像「${installOf(t).name}」，安装结束或放弃后可操作`;
   const groups = (data && data.groups) || [];
   const images = (data && data.images) || [];
-  const bundles = (data && data.bundles) || [];
   const nodes = (data && data.nodes) || [];
   // 机器慢时先看盘在哪台；放置自动分摊后猜不出来，所以多节点才显示这一列。
   const clustered = nodes.length > 1;
@@ -125,7 +119,6 @@ function PageTerminals() {
 
   const groupById = Object.fromEntries(groups.map(g => [g.ID, g]));
   const imageById = Object.fromEntries(images.map(i => [i.ID, i]));
-  const bundleNameById = Object.fromEntries(bundles.map(b => [b.bundle.ID, b.bundle.Name]));
   const imageNameOf = (groupId) => {
     const g = groupById[groupId];
     return (g && imageById[g.SystemImageID] && imageById[g.SystemImageID].Name) || "—";
@@ -133,14 +126,15 @@ function PageTerminals() {
 
   const filtered = terminals.filter(t =>
     (groupFilter === "all" || t.GroupID === groupFilter) &&
-    (stateFilter === "all" || stateOf(t) === stateFilter) &&
+    (stateFilter === "all" || stateKey(t) === stateFilter) &&
     (!search ||
       terminalTitle(t).toLowerCase().includes(search.toLowerCase()) ||
       t.ID.toLowerCase().includes(search.toLowerCase()) ||
       normMac(t.MAC).includes(normMac(search)) ||
       (t.IP || "").includes(search))
   );
-  const stateCount = terminals.reduce((m, t) => ({ ...m, [stateOf(t)]: (m[stateOf(t)] || 0) + 1 }), {});
+  const stateCount = terminals.reduce((m, t) => ({ ...m, [stateKey(t)]: (m[stateKey(t)] || 0) + 1 }), {});
+  useEffect(() => { if (route.params.terminalId) setDetailId(route.params.terminalId); }, [route.params.terminalId]);
   const detail = terminals.find(t => t.ID === detailId) || null;
   const editing = terminals.find(t => t.ID === editId) || null;
 
@@ -286,6 +280,7 @@ function PageTerminals() {
     { id: "all", label: "全部", n: terminals.length },
     { id: "online", label: "在线", n: stateCount.online || 0 },
     { id: "offline", label: "离线", n: stateCount.offline || 0 },
+    ...(stateCount.installing || stateFilter === "installing" ? [{ id: "installing", label: "安装中", n: stateCount.installing || 0 }] : []),
   ];
   const filterActive = filtered.length !== terminals.length;
 
@@ -345,9 +340,9 @@ function PageTerminals() {
                   </div>
                   <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(150px, 1fr))", gap: 8 }}>
                     {cells.map(t => {
-                      const st = STATE[stateOf(t)];
+                      const st = STATE[stateKey(t)];
                       return (
-                        <div key={t.ID} className={`tmcell s-${t.State}`}
+                        <div key={t.ID} className={`tmcell s-${installOf(t) ? "installing" : t.State}`}
                              onClick={(e) => { if (e.shiftKey) toggleSel(t.ID); else openDetail(t); }}
                              style={{ borderColor: detailId === t.ID ? "var(--cyan)" : selectedIds.includes(t.ID) ? "var(--violet)" : undefined,
                                       boxShadow: (detailId === t.ID || selectedIds.includes(t.ID)) ? `0 0 0 1px ${selectedIds.includes(t.ID) ? "var(--violet)" : "var(--cyan)"}` : undefined }}>
@@ -355,7 +350,6 @@ function PageTerminals() {
                             <span className={`dot ${st.dot}`}/>
                             <span className="tmname" title={terminalTitle(t)}>{terminalTitle(t)}</span>
                             {t.IsSuper && <span className="chip violet" style={{ padding: "0 6px" }} title="超管机">SU</span>}
-                            {t.IsSuper && t.PendingBundleID && <span className="chip amber" style={{ padding: "0 5px" }} title={`已注入 ${bundleNameById[t.PendingBundleID] || t.PendingBundleID}，尚未固化`}><Icons.Clock size={10}/></span>}
                           </div>
                           <div className="tmip">{t.IP || "—"}</div>
                           <div className="tmfoot">
@@ -381,7 +375,8 @@ function PageTerminals() {
             </tr></thead>
             <tbody>
               {visible.map(t => {
-                const st = STATE[stateOf(t)];
+                const st = STATE[stateKey(t)];
+                const locked = installLock(t);
                 return (
                   <tr key={t.ID}>
                     <td><input type="checkbox" checked={selectedIds.includes(t.ID)} onChange={() => toggleSel(t.ID)} onClick={e => e.stopPropagation()}/></td>
@@ -389,7 +384,6 @@ function PageTerminals() {
                     <td onClick={() => openDetail(t)} style={{ cursor: "pointer" }} title="查看详情"><div style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <span style={{ fontWeight: 600 }}>{terminalTitle(t)}</span>
                       {t.IsSuper && <span className="chip violet" style={{ padding: "0 6px" }}>超管</span>}
-                      {t.IsSuper && t.PendingBundleID && <span className="chip amber" style={{ padding: "0 6px" }} title={`已注入 ${bundleNameById[t.PendingBundleID] || t.PendingBundleID}，尚未固化`}>驱动待固化</span>}
                     </div></td>
                     <td className="mono muted" style={{ fontSize: 12 }}>{fmtMac(t.MAC)}</td>
                     <td className="mono">{t.IP || "—"}</td>
@@ -401,8 +395,8 @@ function PageTerminals() {
                     <td className="mono muted" style={{ fontSize: 12 }}>{fmtTime(t.LastHeartbeatAt)}</td>
                     <td className="t-actions"><div>
                       <button className="btn" style={{ padding: "3px 8px" }} onClick={() => openDetail(t)}>详情</button>
-                      <button className="btn" style={{ padding: "3px 8px" }} onClick={() => openEdit(t)}>编辑</button>
-                      <button className="btn ghost icon danger" onClick={() => deleteOne(t)} title="删除终端" aria-label={`删除终端 ${terminalTitle(t)}`}><Icons.Trash size={12}/></button>
+                      <button className="btn" style={{ padding: "3px 8px" }} disabled={!!locked} title={locked || undefined} onClick={() => openEdit(t)}>编辑</button>
+                      <button className="btn ghost icon danger" disabled={!!locked} onClick={() => deleteOne(t)} title={locked || "删除终端"} aria-label={`删除终端 ${terminalTitle(t)}`}><Icons.Trash size={12}/></button>
                     </div></td>
                   </tr>
                 );
@@ -416,10 +410,10 @@ function PageTerminals() {
         </div>
       )}
 
-      {detail && <TerminalDetail t={detail} group={groupById[detail.GroupID]} images={images} bundleNameById={bundleNameById}
+      {detail && <TerminalDetail key={detail.ID} t={detail} group={groupById[detail.GroupID]} images={images}
+        install={installOf(detail)} onInstallChanged={load}
         imageName={imageNameOf(detail.GroupID)} onClose={() => setDetailId(null)} onDelete={() => deleteOne(detail)}
-        onSuper={(en) => setSuper(detail, en)} onStopSuper={() => openStopSuper(detail)} onPublish={(d) => openPublish(detail, d)}
-        gotoDrivers={() => goto("drivers", { tab: "cure" })}/>}
+        onSuper={(en) => setSuper(detail, en)} onStopSuper={() => openStopSuper(detail)} onPublish={(d) => openPublish(detail, d)}/>}
 
       {editing && <TerminalEdit t={editing} groups={groups} busy={busy} onClose={() => setEditId(null)} onSave={saveEdit}/>}
 
@@ -494,8 +488,8 @@ function PageTerminals() {
 }
 
 // 详情和编辑是两个独立弹窗，互不切换，弹窗内容不会在用户眼前整体替换。
-function TerminalModalTitle({ t }) {
-  const st = STATE[stateOf(t)];
+function TerminalModalTitle({ t, installing }) {
+  const st = STATE[installing ? "installing" : stateOf(t)];
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
       <span className={`dot ${st.dot}`}/>
@@ -556,8 +550,21 @@ function TerminalEdit({ t, groups, busy, onClose, onSave }) {
   );
 }
 
-function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, onDelete, onSuper, onStopSuper, onPublish, gotoDrivers }) {
-  const st = STATE[stateOf(t)];
+function TerminalDetail({ t, group, images, imageName, install, onInstallChanged, onClose, onDelete, onSuper, onStopSuper, onPublish }) {
+  const modelRes = useResource(() => api.terminalModel(t.ID), [t.ID]);
+  const identityRes = useResource(() => api.terminalIdentity(t.ID), [t.ID]);
+  usePolling(modelRes.reload, { intervalMs: 5000 });
+  usePolling(identityRes.reload, { intervalMs: 5000 });
+  const next = identityRes.data?.next_boot;
+  // 安装列表读不到时仍以启动预期为准，冲突操作照样锁住。
+  const installID = install?.id || (next?.kind === 'install' ? next.install_id : '');
+  const installing = !!installID;
+  const [installOpen, setInstallOpen] = useState(false);
+  const st = STATE[installing ? "installing" : stateOf(t)];
+  const hasWindowsPoint = !t.IsSuper && !['linux', 'super', 'unconfigured'].includes(next?.reason) && !!modelRes.data?.config_id && !!modelRes.data?.reduction_id;
+  const maintenanceTarget = ['winpe', 'wait'].includes(next?.kind) && (next.mode === 'adapt' || next.reason === 'pending_adapt');
+  const systemImageID = next?.image_id || (maintenanceTarget ? '' : group?.SystemImageID);
+  const systemConfigID = next?.config_id || (maintenanceTarget ? '' : group?.SystemConfigID);
   const { data: diskData, loading: disksLoading } = useResource(
     () => (group?.ID ? api.listGroupDisks(group.ID) : Promise.resolve({ items: [] })),
     [group?.ID],
@@ -570,42 +577,48 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
   );
   const superDisks = (superDiskData && superDiskData.items) || [];
   const imageNameById = (id) => images.find(i => i.ID === id)?.Name || id || "—";
-  // 配置、还原点原始 ID 带纳秒后缀，换成名称显示，查不到就显示 ID。
+  // 以实际启动目标取业务名称；维护目标缺失时不冒用分组配置。
   const { data: nameData } = useResource(async () => {
-    if (!group?.SystemImageID) return null;
+    if (!systemImageID) return null;
     const [cfgs, reds] = await Promise.allSettled([
-      api.listConfigs(group.SystemImageID),
-      group.SystemConfigID ? api.listReductions(group.SystemConfigID) : Promise.resolve(null),
+      api.listConfigs(systemImageID),
+      systemConfigID ? api.listReductions(systemConfigID) : Promise.resolve(null),
     ]);
     const items = (r) => (r.status === "fulfilled" && r.value && r.value.items) || [];
     return {
       configs: Object.fromEntries(items(cfgs).map(c => [c.ID, c.Name])),
       reductions: Object.fromEntries(items(reds).map(rp => [rp.ID, redName(rp)])),
+      current: items(cfgs).find(c => c.ID === systemConfigID)?.DefaultReductionID,
+      latest: items(reds).filter(r => r.Status === 'ready').sort((a, b) => (Date.parse(b.CreatedAt) || 0) - (Date.parse(a.CreatedAt) || 0))[0]?.ID,
     };
-  }, [group?.SystemImageID, group?.SystemConfigID]);
+  }, [systemImageID, systemConfigID, next?.reduction_id]);
   const running = t.State === "online";
-  const configLabel = (nameData?.configs || {})[group?.SystemConfigID] || group?.SystemConfigID || "—";
-  const reductionLabel = (nameData?.reductions || {})[group?.SystemReductionID] || group?.SystemReductionID || "—";
+  const configLabel = (nameData?.configs || {})[systemConfigID] || (systemConfigID ? '配置名称读取不到' : '—');
+  const reductionID = next?.reduction_id || (!maintenanceTarget && ((t.IsSuper ? nameData?.latest : nameData?.current) || group?.SystemReductionID));
+  const reductionLabel = (nameData?.reductions || {})[reductionID] || (reductionID ? '还原点名称读取不到' : '—');
 
-  return (
-    <Modal open onClose={onClose} size="xl" title={<TerminalModalTitle t={t}/>}
+  const locked = running || installing;
+
+  return <Modal open onClose={onClose} size="xl" title={<TerminalModalTitle t={t} installing={installing}/>}
       footer={<>
         {/* 机器在跑的时候这些都做不了，直接禁用并说明什么时候能做。 */}
-        {running && <span className="hint" style={{ marginRight: "auto" }}>{t.IsSuper ? "终端运行中，关机后可取消超管或保存还原点" : "终端运行中，关机后可设为超管"}</span>}
+        {installing ? <span className="hint" style={{ marginRight: "auto" }}>正在安装镜像，安装结束或放弃后可设为超管或删除</span>
+          : running && <span className="hint" style={{ marginRight: "auto" }}>{t.IsSuper ? "终端运行中，关机后可取消超管或保存还原点" : "终端运行中，关机后可设为超管"}</span>}
         {t.IsSuper
           ? <>
-              <button className="btn" disabled={running} onClick={() => onSuper(false)}>取消超管</button>
-              <button className="btn primary" disabled={running} onClick={onStopSuper}><Icons.Snapshot size={12}/> 关机后存还原点</button>
+              <button className="btn" disabled={locked} onClick={() => onSuper(false)}>取消超管</button>
+              <button className="btn primary" disabled={locked} onClick={onStopSuper}><Icons.Snapshot size={12}/> 关机后存还原点</button>
             </>
-          : <button className="btn" disabled={running} onClick={() => onSuper(true)}>设为超管</button>}
-        <button className="btn danger" onClick={onDelete}>删除</button>
+          : <button className="btn" disabled={locked} onClick={() => onSuper(true)}>设为超管</button>}
+        <button className="btn danger" disabled={installing} onClick={onDelete}>删除</button>
       </>}>
         <div style={{ display: "flex", flexDirection: "column", gap: 14 }}>
-          {t.IsSuper && t.PendingBundleID && (
-            <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 13, color: "var(--fg-mute)" }}>
-              <span className="chip amber"><Icons.Clock size={11}/> 驱动固化会话进行中</span>
-              <span>已注入「{bundleNameById[t.PendingBundleID] || t.PendingBundleID}」，尚未固化</span>
-              <span className="row" style={{ color: "var(--cyan)", cursor: "pointer", gap: 2 }} onClick={gotoDrivers}>去驱动管理处理<Icons.Chevron size={11}/></span>
+          {installing && (
+            <div className="card" style={{ padding: 10, display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--cyan-soft)", borderColor: "oklch(0.55 0.1 200 / 0.4)" }}>
+              <span style={{ fontWeight: 600, minWidth: 0, overflowWrap: "anywhere" }}>{install ? `正在用于安装镜像「${install.name}」` : "正在用于 ISO 安装"}</span>
+              {install && <InstallationPhase session={install}/>}
+              {install?.message && <span className="meta" style={{ minWidth: 0, overflowWrap: "anywhere" }}>{install.message}</span>}
+              <button className="btn" style={{ marginLeft: "auto" }} onClick={() => setInstallOpen(true)}>查看安装</button>
             </div>
           )}
           <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(240px, 1fr))", gap: 14 }}>
@@ -625,9 +638,11 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
             </DetailSection>
           </div>
           <DetailSection title="系统盘" icon={<Icons.Layers size={12}/>}>
-            <DetailKV k="系统镜像" v={imageName || "—"}/>
+            {installing && <div className="hint" style={{ marginBottom: 4 }}>安装期间开机不使用分组的系统盘；下面是安装结束后恢复使用的系统盘。</div>}
+            <DetailKV k={maintenanceTarget ? '适配目标镜像' : '系统镜像'} v={images.find(i => i.ID === systemImageID)?.Name || (maintenanceTarget ? '目标名称读取不到' : imageName || '—')}/>
             <DetailKV k="启动配置" v={configLabel}/>
             <DetailKV k="默认还原点" v={reductionLabel}/>
+            <TerminalModelInfo t={t} modelRes={modelRes} identityRes={identityRes} hasWindowsPoint={hasWindowsPoint} maintenanceTarget={maintenanceTarget}/>
           </DetailSection>
           <DetailSection title="数据盘" icon={<Icons.Disk size={12}/>}>
             {t.IsSuper && <div className="hint" style={{ marginBottom: 8 }}>数据盘可在线发布，无需关机。发布期间该磁盘短暂脱机，客户机下次开机生效。</div>}
@@ -662,8 +677,64 @@ function TerminalDetail({ t, group, images, bundleNameById, imageName, onClose, 
             </div>
           </DetailSection>
         </div>
-    </Modal>
-  );
+        {installOpen && <InstallationDetails id={installID} onClose={() => setInstallOpen(false)} onChanged={onInstallChanged}/>}
+    </Modal>;
+}
+
+// 与安装服务按阶段下发的开机脚本一一对应。
+const INSTALL_NEXT_BOOT = {
+  preparing: '服务器正在准备安装资源，准备好后再开机。',
+  waiting: '进入 ISO 安装程序，系统装到服务器新建的安装盘。',
+  installing: '安装进行中，请勿重启；中途重启不会回到安装程序，需在安装详情里处理。',
+  initializing: '从新装好的系统盘启动，完成首次初始化。',
+  installed: '等待安装保存完成，此时开机不会启动任何系统。',
+  saving: '等待安装保存完成，此时开机不会启动任何系统。',
+  verifying: '启动新镜像做开机验证，验证成功后发布镜像。',
+  cancelling: '正在清理安装资源，此时开机不会启动任何系统。',
+  failed: '安装失败，开机不会启动任何系统；请在安装详情里重试或放弃。',
+};
+
+function nextBootText(next) {
+  if (next?.kind === 'install') return INSTALL_NEXT_BOOT[next.reason] || '正在 ISO 安装，开机按安装进度处理。';
+  if (next?.kind === 'wait') return next.reason === 'finalizing'
+    ? '等待服务器保存适配结果；任务成功后再开机验证 Windows。'
+    : '服务器正在准备维护任务，请等待准备完成后再开机。';
+  if (next?.kind === 'winpe') {
+    if (next.state === 'booted') return '已进入维护环境，请等待处理完成并自动关机；任务成功后再开机验证 Windows。';
+    if (next.reason === 'automatic_identity') return '首次开机会进入维护环境完成启动准备；自动关机且任务成功后，再开机验证 Windows。';
+    if (next.mode === 'probe' || next.reason === 'pending_probe') return '开机进入维护环境进行启动网卡检测，完成后自动关机。';
+    return next.mode === 'adapt' || next.reason === 'pending_adapt'
+      ? '开机进入维护环境做完整适配，完成后自动关机；任务成功后再开机验证 Windows。'
+      : '开机进入维护环境完成客户机启动准备，完成后自动关机；任务成功后再开机验证 Windows。';
+  }
+  if (next?.kind === 'system') {
+    if (next.reason === 'unverified') return '尝试启动 Windows。';
+    if (next.reason === 'linux') return '直接启动 Linux。';
+    if (next.reason === 'automatic_template') return '自动生成网卡配置后启动 Windows。';
+    if (next.reason === 'super') return '启动超管环境，使用最新可用还原点。';
+    return '直接启动 Windows。';
+  }
+  if (next?.reason === 'unconfigured') return '尚未配置启动系统，请检查分组的系统镜像与配置。';
+  if (next?.reason === 'unverified') return '尚未确认该机型在当前还原点上的开机情况，请查看机型记录。';
+  return '下一次启动行为尚未确认，请刷新启动信息。';
+}
+
+function TerminalModelInfo({ t, modelRes, identityRes, hasWindowsPoint, maintenanceTarget }) {
+  const store = useStore();
+  const model = modelRes.data;
+  const next = identityRes.data?.next_boot;
+  const maintenance = ['wait', 'winpe'].includes(next?.kind) || !!next?.task_id || model?.status === 'adapting';
+  const samePoint = hasWindowsPoint && (!maintenanceTarget || (next?.config_id && next?.reduction_id))
+    && !(next?.config_id && model?.config_id && next.config_id !== model.config_id)
+    && !(next?.reduction_id && model?.reduction_id && next.reduction_id !== model.reduction_id);
+  // 只说本机在当前点上的开机结果；适配记录、沿用记录都不代表本机开过机。
+  const evidence = model?.boot_verified_at ? '本机已开机成功'
+    : model?.failure ? ({ windows: '上次未收到 Windows 成功回报', template: '网卡模板两次没进系统', sanhook: '上次连接系统盘失败', sanboot: '上次引导系统盘失败', boot_mode: '启动模式与镜像不匹配' }[model.failure.stage] || '上次启动失败')
+    : '本机在当前还原点上还没有开机成功的回报';
+  return <>
+    <DetailKV k="机型" v={modelRes.error ? <span role="alert" className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>{modelRes.error} <button className="btn" onClick={modelRes.reload}>重试机型</button></span> : model?.profile_id ? <span className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end', fontFamily: 'var(--font-ui)' }}><span>{model.profile_name}</span>{samePoint && <span className="meta" title={model.failure ? `${model.failure.code || ''} ${fmtTime(model.failure.at)}` : undefined}>{evidence}</span>}{hasWindowsPoint && model.status === 'failed' && <button className="btn primary" disabled={maintenance || identityRes.loading || !!identityRes.error} title={maintenance ? '已有维护任务，请等待任务结束' : undefined} onClick={() => store.goto('models', { filterProfileId: model.profile_id, filterProfileName: model.profile_name, sourceConfigId: model.config_id, sourceTerminalId: t.ID })}>完整适配</button>}</span> : modelRes.loading ? '读取中…' : '首次开机后自动识别'}/>
+    <DetailKV k="预计下次启动" v={identityRes.error ? <span role="alert" className="row" style={{ flexWrap: 'wrap', justifyContent: 'flex-end' }}>读取失败：{identityRes.error} <button className="btn" onClick={identityRes.reload}>重试启动信息</button></span> : <span className="row" style={{ fontFamily: 'var(--font-ui)', flexWrap: 'wrap', justifyContent: 'flex-end' }}><span>{identityRes.loading ? '读取中…' : nextBootText(next)}</span>{next?.task_id && <button className="btn ghost" onClick={() => store.goto('tasks', { taskId: next.task_id })}>查看任务</button>}</span>}/>
+  </>;
 }
 
 function DetailSection({ title, icon, children }) {
@@ -677,9 +748,9 @@ function DetailSection({ title, icon, children }) {
 
 function DetailKV({ k, v }) {
   return (
-    <div style={{ display: "flex", justifyContent: "space-between", padding: "7px 0", borderBottom: "1px solid var(--line-soft)", fontSize: 13 }}>
-      <span style={{ color: "var(--fg-faint)" }}>{k}</span>
-      <span className="mono" style={{ fontWeight: 500 }}>{v}</span>
+    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, minWidth: 0, padding: "7px 0", borderBottom: "1px solid var(--line-soft)", fontSize: 13 }}>
+      <span style={{ color: "var(--fg-faint)", flexShrink: 0 }}>{k}</span>
+      <span className="mono" style={{ fontWeight: 500, minWidth: 0, overflowWrap: "anywhere" }}>{v}</span>
     </div>
   );
 }

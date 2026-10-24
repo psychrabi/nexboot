@@ -18,12 +18,16 @@ func TestListImportSourcesFiltersAndLabels(t *testing.T) {
 		}
 	}
 
-	res, err := ImageService{ImportDir: dir}.ListImportSources(context.Background())
+	res, err := ImageService{ImportDir: dir, DirFree: func(string) (int64, error) { return 42 << 30, nil }}.ListImportSources(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
 	if res.ImportDir != dir || res.Total != 3 {
 		t.Fatalf("result = %#v", res)
+	}
+	// 页面要在上传前就比对导入目录的剩余空间，它和存储池可用空间是两回事。
+	if res.ImportDirFree == nil || *res.ImportDirFree != 42<<30 {
+		t.Fatalf("没有返回导入目录剩余空间：%#v", res.ImportDirFree)
 	}
 	formats := map[string]string{}
 	for _, it := range res.Items {

@@ -20,7 +20,7 @@ func OperatorMessage(err error) string {
 	}
 	switch {
 	case IsBusy(err):
-		return "存储对象正被占用（通常是有客户机还在使用），请稍后重试"
+		return "存储对象正被占用（客户机正在使用，或正在向备机复制），请稍后重试"
 	case IsNotExist(err):
 		return "操作所需的数据集或快照不存在，可能已被删除，或上一步操作没有完成"
 	case IsExists(err):

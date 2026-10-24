@@ -21,13 +21,45 @@ binary=${BINARY:-$repo/bin/ndiskless-linux-amd64}
 outdir=${1:-$repo/dist}
 arch=amd64
 
+build_stamp() {
+  if [ -n "${SOURCE_DATE_EPOCH:-}" ]; then
+    date -u -d "@$SOURCE_DATE_EPOCH" +%Y%m%d%H%M%S
+  else
+    date -u +%Y%m%d%H%M%S
+  fi
+}
+
+# deb_version <git describe 输出> <构建时间>
+deb_version() {
+  local v=${1#v} stamp=$2
+  if [[ $v =~ ^([0-9a-f]{7,40})(-dirty)?$ ]]; then
+    v="0~$stamp.g${BASH_REMATCH[1]}${BASH_REMATCH[2]:+.dirty}" # 没有标签：--always 给的裸哈希
+  elif [[ $v =~ ^(.*)-([0-9]+)-g([0-9a-f]+)(-dirty)?(-(.*))?$ ]]; then
+    local tag=${BASH_REMATCH[1]} n=${BASH_REMATCH[2]} hash=${BASH_REMATCH[3]} dirty=${BASH_REMATCH[4]} extra=${BASH_REMATCH[6]}
+    v="$tag~$n.$stamp.g$hash${dirty:+.dirty}${extra:+.$extra}"
+  elif [[ $v =~ ^([0-9][^-]*(-[A-Za-z][A-Za-z0-9.]*)?)-dirty(-(.*))?$ ]]; then
+    v="${BASH_REMATCH[1]}+0.$stamp.dirty${BASH_REMATCH[4]:+.${BASH_REMATCH[4]}}" # 标签上未提交的改动
+  elif ! [[ $v =~ ^[0-9] ]]; then
+    v="0~$stamp.$v" # dev 之类
+  fi
+  # 后缀里只留 Debian 版本号允许的字符。
+  printf '%s' "$v" | sed -E 's/[^A-Za-z0-9.+~-]+/./g'
+}
+
+if [ "${1:-}" = "--print-version" ]; then
+  deb_version "${VERSION:?set VERSION}" "${2:-$(build_stamp)}"
+  echo
+  exit 0
+fi
+
 [ -f "$binary" ] || { echo "binary not found: $binary (run: make build-static)" >&2; exit 1; }
 command -v dpkg-deb >/dev/null || { echo "dpkg-deb missing (apt-get install dpkg-dev)" >&2; exit 1; }
 
-# 转成 Debian 版本号：去掉前导 v，把 git describe 标签后的 - 换成 ~，
-# 让 0.1.0-6-gabc 排在正式版 0.1.0 之前。
-debver=${version#v}
-debver=$(printf '%s' "$debver" | sed -E 's/-([0-9]+-g[0-9a-f]+(-dirty)?)$/~\1/')
+# 转成 Debian 版本号：去掉前导 v；git describe 的「标签-提交数-g哈希[-dirty][-任意后缀]」
+# 变成「标签~提交数.构建时间.g哈希[.dirty][.后缀]」。~ 让它排在正式版之前；提交数和构建时间
+# 让后打的包总排在前一个包之后（同一提交上的 dirty 构建、后缀随手起名都一样），
+# 升级不需要 --allow-downgrades。构建时间可用 SOURCE_DATE_EPOCH 固定。
+debver=$(deb_version "${version}" "$(build_stamp)")
 
 stage=$(mktemp -d)
 trap 'rm -rf "$stage"' EXIT
@@ -61,7 +93,9 @@ Package: ndiskless
 Version: $debver
 Architecture: $arch
 Maintainer: NexBoot <noreply@nexboot.local>
-Depends: dnsmasq, dnsmasq-utils, qemu-utils, targetcli-fb, zfsutils-linux, keepalived, curl
+Depends: dnsmasq, dnsmasq-utils, qemu-utils, targetcli-fb, zfsutils-linux, keepalived, curl, libhivex-bin, libwin-hivex-perl, p7zip-full | 7zip, wimtools, openssl, ubuntu-keyring
+Recommends: genisoimage | xorriso
+Suggests: linux-image-extra-virtual
 Section: admin
 Priority: optional
 Description: NexBoot diskless boot control plane

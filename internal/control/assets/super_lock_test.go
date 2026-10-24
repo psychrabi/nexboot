@@ -87,7 +87,6 @@ func TestSuperModeLocksItsGroupAndConfigs(t *testing.T) {
 			_, err := f.disks.Create(f.ctx, f.group.ID, GroupDiskRequest{MountTarget: "E:", ImageID: "img-data", ConfigID: "cfg-data"})
 			return err
 		}},
-		{"应用还原点", func(f superLockFixture) error { _, err := f.reductions.SetCurrent(f.ctx, "red-2"); return err }},
 		{"删除还原点", func(f superLockFixture) error { _, err := f.reductions.Delete(f.ctx, "red-2"); return err }},
 		{"合并还原点", func(f superLockFixture) error {
 			_, err := f.reductions.Merge(f.ctx, "cfg-1", MergeReductionsRequest{KeepReductionID: "red-2", DeleteReductionIDs: []string{"red-1"}})
@@ -174,7 +173,6 @@ func TestSuperModeLocksDataConfigAcrossGroups(t *testing.T) {
 			_, err := f.reductions.Create(f.ctx, "cfg-data", CreateReductionRequest{Name: "data-next"})
 			return err
 		}},
-		{"应用", func(f superLockFixture) error { _, err := f.reductions.SetCurrent(f.ctx, "data-next"); return err }},
 		{"删除", func(f superLockFixture) error { _, err := f.reductions.Delete(f.ctx, "data-next"); return err }},
 		{"合并还原点", func(f superLockFixture) error {
 			_, err := f.reductions.Merge(f.ctx, "cfg-data", MergeReductionsRequest{KeepReductionID: "data-next", DeleteReductionIDs: []string{"cfg-data_0"}})
@@ -339,7 +337,7 @@ func TestSuperModeRefusalUsesMACWithoutName(t *testing.T) {
 	if err := f.st.Terminals().Update(f.ctx, f.super); err != nil {
 		t.Fatal(err)
 	}
-	_, err := f.reductions.SetCurrent(f.ctx, "red-2")
+	_, err := f.reductions.Delete(f.ctx, "red-2")
 	requireSuperLocked(t, err, "AA:BB:CC:DD:EE:01")
 	if strings.Contains(err.Error(), f.super.ID) {
 		t.Fatal("拒绝提示不应暴露内部ID")
@@ -572,8 +570,7 @@ func (s hookedSuperStopStorage) SuperStop(ctx context.Context, req storage.Super
 // 保存要等机器关机，可能要一两分钟；期间对终端的改动（如改名）不能被保存结束时写回的旧记录盖掉。
 func TestSuperSaveKeepsChangesMadeWhileWaiting(t *testing.T) {
 	f := newSuperLockFixture(t)
-	bundle, at := "bundle-1", time.Now().UTC()
-	f.super.PendingBundleID, f.super.PendingBundleAt = &bundle, &at
+	at := time.Now().UTC()
 	if err := f.st.Terminals().Update(f.ctx, f.super); err != nil {
 		t.Fatal(err)
 	}
@@ -595,7 +592,24 @@ func TestSuperSaveKeepsChangesMadeWhileWaiting(t *testing.T) {
 	if got.Name != "主播-01-改名" {
 		t.Fatalf("保存把等待期间的改动盖掉了：%+v", got)
 	}
-	if got.PendingBundleID != nil {
-		t.Fatalf("驱动包应随保存固化：%+v", got)
+}
+
+// 应用只移动当前点、不动存储，超管期间放行。
+func TestSuperModeAllowsApplyingARestorePoint(t *testing.T) {
+	f := newSuperLockFixture(t)
+	if err := f.st.Reductions().Create(f.ctx, domain.Reduction{ID: "data-next", ConfigID: "cfg-data", Name: "@next", CreatedAt: time.Now().UTC(), Status: domain.ReductionStatusReady}); err != nil {
+		t.Fatal(err)
+	}
+	for cfgID, redID := range map[string]string{"cfg-1": "red-2", "cfg-data": "data-next"} {
+		if _, err := f.reductions.SetCurrent(f.ctx, redID); err != nil {
+			t.Fatalf("超管期间应用 %s 应当放行：%v", redID, err)
+		}
+		cfg, err := f.st.Configs().Get(f.ctx, cfgID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if cfg.DefaultReductionID == nil || *cfg.DefaultReductionID != redID {
+			t.Fatalf("%s 的当前点 = %v，想要 %s", cfgID, cfg.DefaultReductionID, redID)
+		}
 	}
 }

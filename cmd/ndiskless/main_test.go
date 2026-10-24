@@ -7,6 +7,9 @@ import (
 	"log/slog"
 	"strings"
 	"testing"
+
+	"github.com/tianwei/diskless/internal/control/ops"
+	"github.com/tianwei/diskless/internal/control/platform"
 )
 
 func TestStorageServerFromBootURL(t *testing.T) {
@@ -18,7 +21,7 @@ func TestStorageServerFromBootURL(t *testing.T) {
 
 func TestBootURLWithHints(t *testing.T) {
 	got := bootURLWithHints("http://192.168.211.4:8000/boot?mac=${net0/mac}")
-	want := "http://192.168.211.4:8000/boot?mac=${net0/mac}&platform=${platform}&busid=${net0/busid}&manufacturer=${manufacturer:uristring}&product=${product:uristring}"
+	want := "http://192.168.211.4:8000/boot?mac=${net0/mac}&platform=${platform}&busid=${net0/busid}&busloc=${net0/busloc}&manufacturer=${manufacturer:uristring}&product=${product:uristring}"
 	if got != want {
 		t.Fatalf("url = %q", got)
 	}
@@ -79,5 +82,18 @@ func TestVersionRequestedRecognizesTheUsualSpellings(t *testing.T) {
 	}
 	if versionRequested([]string{"migrate-layout"}) || versionRequested(nil) {
 		t.Fatalf("不该把别的参数当成版本查询")
+	}
+}
+
+// 上传前查备机空间：只算联系得上的其它节点的数据池，本机和备份池不算。
+func TestStandbyPoolFreeCountsReachablePeerDataPools(t *testing.T) {
+	res := platform.ClusterPoolsResult{Nodes: []platform.ClusterPoolView{
+		{NodeID: "self", IP: "192.168.10.4", IsSelf: true, Reachable: true, Pools: []ops.PoolItem{{Role: ops.PoolRoleData, Capacity: 100, Used: 10}}},
+		{NodeID: "n3", IP: "192.168.10.3", Reachable: true, Pools: []ops.PoolItem{{Role: ops.PoolRoleData, Capacity: 100, Used: 40}, {Role: ops.PoolRoleBackup, Capacity: 5}}},
+		{NodeID: "n5", IP: "192.168.10.5", Reachable: false, Pools: []ops.PoolItem{{Role: ops.PoolRoleData, Capacity: 100, Used: 99}}},
+	}}
+	got := standbyPoolFree(res)
+	if len(got) != 1 || got[0].Node != "192.168.10.3" || got[0].Free != 60 {
+		t.Fatalf("standby free = %#v", got)
 	}
 }

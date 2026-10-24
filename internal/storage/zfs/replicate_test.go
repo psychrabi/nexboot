@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/tianwei/diskless/internal/storage"
 )
 
 func newTestClient(runner Runner) *Client {
@@ -355,6 +357,28 @@ func TestPruneSnapshotsKeepsPinnedMarkers(t *testing.T) {
 	}
 }
 
+// 一个标记删不掉（被克隆依赖、备机正在读）不能挡住其余旧标记，否则标记越攒越多，zfs list 越来越慢。
+func TestPruneSnapshotsKeepsGoingPastOneStuckMarker(t *testing.T) {
+	list := strings.Join([]string{
+		"tank/nd@rep-1\t10",
+		"tank/nd@rep-2\t20",
+		"tank/nd@rep-3\t30",
+		"tank/nd@rep-4\t40",
+	}, "\n")
+	runner := &sequenceRunner{outs: [][]byte{[]byte(list)}, err: errors.New("cannot destroy: snapshot has dependent clones"), errAt: 2}
+	err := newTestClient(runner).PruneSnapshotsExcept(context.Background(), "tank/nd", "rep-", 1, nil)
+	var destroyed []string
+	for _, call := range runner.calls[1:] {
+		destroyed = append(destroyed, call.args[2])
+	}
+	if !reflect.DeepEqual(destroyed, []string{"tank/nd@rep-1", "tank/nd@rep-2", "tank/nd@rep-3"}) {
+		t.Fatalf("destroyed = %v，rep-1 删不掉也要接着删 rep-2、rep-3", destroyed)
+	}
+	if err == nil || !strings.Contains(err.Error(), "tank/nd@rep-1") || !strings.Contains(err.Error(), "dependent clones") {
+		t.Fatalf("err = %v，要点名删不掉的标记和原因", err)
+	}
+}
+
 // 逐数据集追赶的收发不带 -R：有共同快照从它增量，新配置以克隆源为起点（对端收成克隆），都没有就整份。
 func TestSendDatasetShapes(t *testing.T) {
 	for _, tc := range []struct {
@@ -412,5 +436,30 @@ func TestResumeTokenFindsAChildDataset(t *testing.T) {
 	runner = &fakeRunner{out: []byte("tank/nd\t1-root\ntank/nd/a\t1-child\n")}
 	if ds, token, _ = newTestClient(runner).ResumeToken(context.Background(), "tank/nd"); ds != "tank/nd" || token != "1-root" {
 		t.Fatalf("根上有令牌时应优先根：ds=%q token=%q", ds, token)
+	}
+}
+
+// 暂存的 -held- 与重建/分叉残留分开列：后者另有回收规则，混在一起会被当成重建残留处理。
+func TestListHeldCopiesListsOnlyHeldSiblingsOldestFirst(t *testing.T) {
+	list := "tank\ntank/nd\ntank/nd-held-20\ntank/nd-held-9\ntank/nd-rebuilding-5\ntank/nd-held-x\ntank/run\n"
+	runner := &fakeRunner{out: []byte(list)}
+	c := New("tank", runner, slog.New(slog.NewTextHandler(io.Discard, nil)))
+	got, err := c.ListHeldCopies(context.Background(), "tank/nd")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Join(got, ",") != "tank/nd-held-9,tank/nd-held-20" {
+		t.Fatalf("got %v", got)
+	}
+	aside, _ := c.ListAsideCopies(context.Background(), "tank/nd")
+	if strings.Join(aside, ",") != "tank/nd-rebuilding-5" {
+		t.Fatalf("aside %v", aside)
+	}
+}
+
+func TestHasDependentClonesRecognisesZfsWording(t *testing.T) {
+	err := storage.CommandError{Name: "zfs", Output: "cannot destroy 'tank/nd/x': volume has dependent clones\nuse '-R' to destroy the following datasets:\ntank/run/CLIENT-1\n"}
+	if !HasDependentClones(err) || HasDependentClones(storage.CommandError{Output: "dataset is busy"}) {
+		t.Fatal("wrong classification")
 	}
 }

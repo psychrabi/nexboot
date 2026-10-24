@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/tianwei/diskless/internal/domain"
+	"github.com/tianwei/diskless/internal/ha"
 	"github.com/tianwei/diskless/internal/storage"
 	"github.com/tianwei/diskless/internal/store"
 )
@@ -193,7 +194,10 @@ func (s ReconcileService) importing(ctx context.Context) (func(string) bool, err
 	if err != nil {
 		return nil, err
 	}
-	names := map[string]bool{}
+	names, err := s.unverifiedInstallations(ctx)
+	if err != nil {
+		return nil, err
+	}
 	for _, t := range active {
 		if t.TargetRef == "" || (t.Type != domain.TaskTypeImportImage && t.Type != domain.TaskTypeCopyImage) {
 			continue
@@ -222,6 +226,21 @@ func (s ReconcileService) MissingDatasets(ctx context.Context) ([]string, error)
 	return missing, nil
 }
 
+// MissingDatasetRefs 同 MissingDatasets，但同时给出数据集名（Ref），供接任判断哪些对象没有任何节点持有。
+func (s ReconcileService) MissingDatasetRefs(ctx context.Context) ([]ha.MissingDataset, error) {
+	report, err := s.check(ctx, false)
+	if err != nil {
+		return nil, err
+	}
+	var missing []ha.MissingDataset
+	for _, issue := range report.Issues {
+		if issue.Kind == IssueMissingDataset {
+			missing = append(missing, ha.MissingDataset{Ref: issue.Ref, Label: issue.Label})
+		}
+	}
+	return missing, nil
+}
+
 // ignoredDataset 跳过不归本检查判断的数据集：导入目录、保留子数据集，以及由离线
 // 回收管理的各类克隆（否则每台在运行的客户机都会被报出来）。
 func ignoredDataset(name string) bool {
@@ -229,7 +248,7 @@ func ignoredDataset(name string) bool {
 		return true
 	}
 	switch storage.Classify(name).Kind {
-	case storage.CarrierClient, storage.CarrierSuper, storage.CarrierInspect, storage.CarrierExport:
+	case storage.CarrierClient, storage.CarrierSuper, storage.CarrierInspect, storage.CarrierExport, storage.CarrierAdapt, storage.CarrierIdentity, storage.CarrierInstallation:
 		return true
 	}
 	return false
@@ -240,4 +259,25 @@ func (s ReconcileService) now() time.Time {
 		return s.Now().UTC()
 	}
 	return time.Now().UTC()
+}
+
+// A saved installation is still private until an ordinary clone has booted successfully.
+// Include the deterministic names even if saving crashed before recording its result.
+func (s ReconcileService) unverifiedInstallations(ctx context.Context) (map[string]bool, error) {
+	sessions, err := s.Store.InstallSessions().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	names := map[string]bool{}
+	for _, sess := range sessions {
+		if sess.Phase == "ready" || sess.ImageID == "" {
+			continue
+		}
+		names[sess.ImageID] = true
+		names[storage.DefaultConfigName(sess.ImageID)] = true
+		if sess.CandidateConfig.ID != "" {
+			names[sess.CandidateConfig.ID] = true
+		}
+	}
+	return names, nil
 }

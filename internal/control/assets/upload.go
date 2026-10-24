@@ -17,8 +17,8 @@ import (
 )
 
 // UploadService 以可续传的分片接收操作者本机的镜像文件，落到导入目录供现有导入流程使用。
-// 文件动辄几十 GB，必须支持断点续传。会话编号带节点 ID：半成品只在当时的主机本地，
-// VIP 漂移后新主机据此能说明「主机已切换」，而不是只答「会话不存在」。
+// 文件动辄几十 GB，必须支持断点续传。导入目录在存储池上并随目录库复制到备机，分片也在其中：
+// VIP 漂移后新主机接手已复制到的会话（见 session）。会话编号带节点 ID，没复制到的能说明「主机已切换」。
 type UploadService struct {
 	// ImportDir 解析成品文件（及 .part 分片）所在的导入目录。
 	ImportDir func(ctx context.Context) (string, error)
@@ -26,6 +26,9 @@ type UploadService struct {
 	NodeID string
 	// FreeSpace 返回路径可用字节数；为 nil 时跳过空间检查。
 	FreeSpace func(path string) (int64, error)
+	// StandbyFree 返回各备机存储池的剩余空间：导入目录会复制到每台备机，最小的那台也要放得下。
+	// 为 nil（单机）或读不到时只查本机。
+	StandbyFree func(ctx context.Context) ([]NodeFree, error)
 	// Now 可注入，供 Reap 计算会话年龄。
 	Now func() time.Time
 
@@ -64,6 +67,15 @@ type uploadMeta struct {
 }
 
 const uploadsSubdir = ".uploads"
+
+// NodeFree 是一台备机存储池的剩余空间。
+type NodeFree struct {
+	Node string
+	Free int64
+}
+
+// uploadHeadroom 是上传后池里至少还要留的空间：池写满后复制、克隆和数据库副本都会失败。
+const uploadHeadroom = 1 << 30
 
 // resumable 查找同一文件（同名、同大小、同修改时间）未完成的上传。只比名字和大小
 // 会把同名的不同镜像续到一起，静默损坏。多个分片匹配时取已收最多的。
@@ -117,9 +129,9 @@ func (s *UploadService) Begin(ctx context.Context, req BeginUploadRequest) (Uplo
 		strings.Contains(req.FileName, "..") {
 		return UploadStatus{}, errs.Invalid("文件名不合法")
 	}
-	if !isSupportedImportImageFile(strings.ToLower(name)) {
+	if !strings.EqualFold(filepath.Ext(name), ".iso") && !isSupportedImportImageFile(strings.ToLower(name)) {
 		return UploadStatus{}, errs.Invalid(
-			"只支持 .zfs/.gz/.gzip 流或 .vmdk/.vhd/.vhdx/.qcow2/.vdi/.raw 磁盘镜像，收到的是 " + name)
+			"只支持 .iso 安装文件、.zfs/.gz/.gzip 流或 .vmdk/.vhd/.vhdx/.qcow2/.vdi/.raw 磁盘镜像，收到的是 " + name)
 	}
 	if req.SizeBytes <= 0 {
 		return UploadStatus{}, errs.Invalid("需要文件大小才能断点续传")
@@ -138,18 +150,13 @@ func (s *UploadService) Begin(ctx context.Context, req BeginUploadRequest) (Uplo
 	resumeID, resumed, canResume := s.resumable(dir, name, req.SizeBytes, req.LastModified)
 
 	// 空间按「还差多少」判：已落盘部分已占在该目录，按全长比会把这些字节算两遍，
-	// 越接近传完越容易被误拒。
-	if s.FreeSpace != nil {
-		needed := req.SizeBytes
-		if canResume {
-			needed -= resumed
-		}
-		if free, err := s.FreeSpace(dir); err == nil && free < needed {
-			return UploadStatus{}, errs.Conflict(fmt.Sprintf(
-				"导入目录只剩 %d 字节，这次上传还需要 %d 字节（文件共 %d 字节，已传 %d）。"+
-					"请先清理导入目录或换一台空间更足的主机",
-				free, needed, req.SizeBytes, resumed))
-		}
+	// 越接近传完越容易被误拒。另留 uploadHeadroom 余量。
+	needed := req.SizeBytes
+	if canResume {
+		needed -= resumed
+	}
+	if err := s.checkSpace(ctx, filepath.Dir(dir), needed); err != nil {
+		return UploadStatus{}, err
 	}
 
 	if canResume {
@@ -172,6 +179,38 @@ func (s *UploadService) Begin(ctx context.Context, req BeginUploadRequest) (Uplo
 	}
 	_ = f.Close()
 	return UploadStatus{UploadID: id, FileName: name, SizeBytes: req.SizeBytes, NodeID: s.NodeID}, nil
+}
+
+// checkSpace 先查本机（写入者）导入目录所在存储池，再查剩余最少的备机：文件会复制到每台备机，
+// 哪台放不下，复制就会卡住，连带数据库副本也同步不过去。
+func (s *UploadService) checkSpace(ctx context.Context, dir string, needed int64) error {
+	want := needed + uploadHeadroom
+	if s.FreeSpace != nil {
+		if free, err := s.FreeSpace(dir); err == nil && free < want {
+			return errs.Conflict(fmt.Sprintf(
+				"存储池空间不足：导入目录 %s 剩余 %s，本次上传需要 %s（含 %s 余量）。请先清理存储池",
+				dir, fmtBytes(free), fmtBytes(want), fmtBytes(uploadHeadroom)))
+		}
+	}
+	if s.StandbyFree == nil {
+		return nil
+	}
+	nodes, err := s.StandbyFree(ctx)
+	if err != nil {
+		return nil
+	}
+	var low *NodeFree
+	for i := range nodes {
+		if low == nil || nodes[i].Free < low.Free {
+			low = &nodes[i]
+		}
+	}
+	if low != nil && low.Free < want {
+		return errs.Conflict(fmt.Sprintf(
+			"备用节点 %s 的存储池剩余 %s，放不下这次上传（需要 %s，含 %s 余量）：导入的文件会同步到每台备用节点。请先清理该节点的存储池",
+			low.Node, fmtBytes(low.Free), fmtBytes(want), fmtBytes(uploadHeadroom)))
+	}
+	return nil
 }
 
 // Status 返回已收进度，浏览器续传前据此确定起点。
@@ -270,6 +309,13 @@ func (s *UploadService) Reap(ctx context.Context, olderThan time.Duration) int {
 	}
 	cut, n := s.now().Add(-olderThan), 0
 	for _, e := range entries {
+		// 移入旧目录文件时中途停机留下的半份副本（见 moveIntoImports）；还在写的 mtime 是新的。
+		if strings.HasSuffix(e.Name(), ".moving") {
+			if info, err := e.Info(); err == nil && info.ModTime().Before(cut) && os.Remove(filepath.Join(dir, e.Name())) == nil {
+				n++
+			}
+			continue
+		}
 		if !strings.HasSuffix(e.Name(), ".json") {
 			continue
 		}
@@ -359,25 +405,35 @@ func splitImportExt(name string) (string, string) {
 }
 
 // session 解析会话编号，并在此区分「主机已切换」与「会话不存在」。
+// 分片放在随目录库复制的导入目录里：主机切换后，旧主机发起的会话若已复制到本机（.json 在），
+// 由本机接着收，从复制到的位置续传；没复制到的才说主机已切换、请重新上传。
 func (s *UploadService) session(ctx context.Context, id string) (string, uploadMeta, error) {
 	if id == "" {
 		return "", uploadMeta{}, errs.Invalid("缺少上传编号")
 	}
-	if s.NodeID != "" && !strings.HasPrefix(id, s.NodeID+"-") {
-		owner := id
-		if i := strings.LastIndex(id, "-"); i > 0 {
-			owner = id[:i]
-		}
-		return "", uploadMeta{}, errs.Conflict(fmt.Sprintf(
-			"这次上传是发往节点 %s 的，而现在的主机是 %s——主机已经切换，已传的部分留在原来那台上。请重新上传",
-			owner, s.NodeID))
+	if strings.ContainsAny(id, `/\`) || strings.HasPrefix(id, ".") {
+		return "", uploadMeta{}, errs.Invalid("上传编号无效")
 	}
 	dir, err := s.partDir(ctx)
 	if err != nil {
 		return "", uploadMeta{}, err
 	}
 	var meta uploadMeta
-	if err := readJSONFile(filepath.Join(dir, id+".json"), &meta); err != nil {
+	metaErr := readJSONFile(filepath.Join(dir, id+".json"), &meta)
+	if s.NodeID != "" && !strings.HasPrefix(id, s.NodeID+"-") {
+		if metaErr == nil {
+			meta.NodeID = s.NodeID
+			return dir, meta, nil
+		}
+		owner := id
+		if i := strings.LastIndex(id, "-"); i > 0 {
+			owner = id[:i]
+		}
+		return "", uploadMeta{}, errs.Conflict(fmt.Sprintf(
+			"这次上传是发往节点 %s 的，而现在的主机是 %s——主机已经切换，已传的部分还没同步到这台。请重新上传",
+			owner, s.NodeID))
+	}
+	if metaErr != nil {
 		return "", uploadMeta{}, errs.NotFound("上传会话不存在或已过期，请重新上传")
 	}
 	return dir, meta, nil

@@ -304,3 +304,37 @@ func TestInspectWindowsListsTheNICsItsDriversCover(t *testing.T) {
 		t.Fatalf("nic pci ids = %v", ids)
 	}
 }
+
+func TestInspectLinuxRecognizesDracutBootConfigurations(t *testing.T) {
+	for _, tc := range []struct {
+		name, path, body, env string
+		want                  domain.HealthLevel
+	}{
+		{"grub2", "boot/grub2/grub.cfg", "linuxefi /vmlinuz root=UUID=x rd.neednet=1 rd.iscsi.firmware=1 ip=ibft\n", "", domain.HealthOK},
+		{"efi", "boot/efi/EFI/centos/grub.cfg", "linuxefi /vmlinuz rd.neednet=1 rd.iscsi.firmware=1 ip=ibft\n", "", domain.HealthOK},
+		{"bls", "boot/loader/entries/linux.conf", "title Linux\nlinux /vmlinuz\noptions root=UUID=x rd.neednet=1 rd.iscsi.firmware=1 ip=ibft\n", "", domain.HealthOK},
+		{"bls kernelopts", "boot/loader/entries/linux.conf", "linux /vmlinuz\noptions $kernelopts\n", "kernelopts=root=UUID=x rd.neednet=1 rd.iscsi.firmware=1 ip=ibft\n", domain.HealthOK},
+		{"missing network", "boot/grub2/grub.cfg", "linuxefi /vmlinuz rd.iscsi.firmware=1\n", "", domain.HealthWarn},
+		{"inline comment", "boot/grub2/grub.cfg", "linuxefi /vmlinuz root=UUID=x # rd.neednet=1 rd.iscsi.firmware=1\n", "", domain.HealthWarn},
+		{"comment only", "boot/grub2/grub.cfg", "# rd.neednet=1 rd.iscsi.firmware=1\nlinuxefi /vmlinuz root=UUID=x\n", "", domain.HealthWarn},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeTree(t, root, map[string]string{"etc/os-release": "ID=centos\n", "usr/sbin/iscsistart": "bin", tc.path: tc.body, "boot/grub2/grubenv": tc.env})
+			items := inspectMounts([]mountedFS{{Root: root, FSType: "xfs"}}, domain.OSTypeLinux)
+			if got := itemLevel(t, items, "iscsi_boot"); got != tc.want {
+				t.Fatalf("iscsi_boot=%s, want %s", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestInspectLinuxRecognizesSeparateDracutBootPartition(t *testing.T) {
+	root, boot := t.TempDir(), t.TempDir()
+	writeTree(t, root, map[string]string{"etc/os-release": "ID=rocky\n", "usr/sbin/iscsistart": "bin"})
+	writeTree(t, boot, map[string]string{"grub2/grub.cfg": "linux /vmlinuz rd.neednet=1 rd.iscsi.firmware=1 ip=ibft\n"})
+	items := inspectMounts([]mountedFS{{Root: root, FSType: "xfs"}, {Root: boot, FSType: "ext4"}}, domain.OSTypeLinux)
+	if got := itemLevel(t, items, "iscsi_boot"); got != domain.HealthOK {
+		t.Fatalf("iscsi_boot=%s", got)
+	}
+}

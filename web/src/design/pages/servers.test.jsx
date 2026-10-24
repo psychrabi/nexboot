@@ -1,5 +1,5 @@
 import React from 'react';
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { render, screen, waitFor, within, act } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
@@ -494,7 +494,7 @@ describe('服务器页以节点为中心', () => {
     renderPage();
     const list = await screen.findByTestId('cluster-nodes');
     const rowFor = (ip) => Array.from(list.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes(ip));
-    expect(within(rowFor('192.168.10.4')).getByText('dev')).toBeTruthy();
+    expect(within(rowFor('192.168.10.4')).getByText('开发版').getAttribute('title')).toBe('dev');
     expect(within(rowFor('192.168.10.3')).getByText('1.2.3')).toBeTruthy();
     // 已运行要能横向比较：一台刚起来而别人没动过，说明它自己重启了。
     expect(within(rowFor('192.168.10.4')).getByText(/1\s*天/)).toBeTruthy();
@@ -822,6 +822,32 @@ describe('只读服务的说明挂在它自己身上', () => {
   });
 });
 
+// 离线节点最后一次上报的角色已经过时：主机宕机、备机接任后，不能出现两个「主机」。
+describe('集群节点 · 离线节点的角色', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('离线的原主机不再显示为主机，在线主机排在最前', async () => {
+    vi.spyOn(api, 'getServer').mockResolvedValue({ Hostname: 'nd-2', OS: 'Ubuntu', UptimeSeconds: 100 });
+    vi.spyOn(api, 'listServices').mockResolvedValue({ items: [] });
+    vi.spyOn(api, 'listClusterBackups').mockResolvedValue({ nodes: [], total: 0, protected: 0 });
+    vi.spyOn(api, 'getBackupStatus').mockResolvedValue({ config: {}, items: [] });
+    vi.spyOn(api, 'listClusterServices').mockResolvedValue({ nodes: [] });
+    vi.spyOn(api, 'listClusterNodes').mockResolvedValue({ items: [
+      { id: 'a1', ip: '192.168.10.3', portal_ip: '192.168.10.250', ha_state: 'active', online: false },
+      { id: 'b2', ip: '192.168.10.4', portal_ip: '192.168.10.250', ha_state: 'active', online: true },
+    ], total: 2 });
+    renderPage();
+    const card = await screen.findByTestId('cluster-nodes');
+    await waitFor(() => expect(within(card).getByText('192.168.10.3')).toBeTruthy());
+    const rows = within(card).getAllByRole('row').slice(1);
+    expect(rows[0].textContent).toContain('192.168.10.4');
+    expect(within(rows[0]).getByText('主机')).toBeTruthy();
+    const old = rows.find(r => r.textContent.includes('192.168.10.3'));
+    expect(within(old).queryByText('主机')).toBeNull();
+    expect(within(old).getByTitle('离线前为主机')).toBeTruthy();
+  });
+});
+
 describe('集群节点 · 添加节点', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -855,6 +881,82 @@ describe('集群节点 · 添加节点', () => {
     await user.click(within(dialog).getByRole('button', { name: /加入集群|纳管/ }));
 
     await waitFor(() => expect(adopt).toHaveBeenCalledWith({ address: '192.168.10.4:8080' }));
+  });
+
+  it('加入中立即禁用；202后重新扫描和重开仍保留已受理，直到正式节点出现', async () => {
+    let resolve;
+    const adopt = vi.fn(() => new Promise(r => { resolve = r; }));
+    stubCluster([{ node_id: 'fresh-b', version: 'v1', address: '192.168.10.4:8080' }], adopt);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /添加节点/ }));
+    const dialog = await screen.findByTestId('adopt-nodes');
+    const join = await within(dialog).findByRole('button', { name: '加入集群' });
+    await user.dblClick(join);
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).disabled).toBe(true);
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).getAttribute('title')).toBe('正在提交加入请求');
+    expect(adopt).toHaveBeenCalledTimes(1);
+    await act(async () => resolve({ status: 'adopting' }));
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).getAttribute('title')).toBe('已受理，等待节点加入');
+    api.discoverNodes.mockResolvedValue({ items: [], total: 0 });
+    await user.click(screen.getByRole('button', { name: '重新扫描' }));
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).disabled).toBe(true);
+    await user.click(screen.getByRole('button', { name: '完成' }));
+    await user.click(screen.getByRole('button', { name: /添加节点/ }));
+    const reopened = await screen.findByTestId('adopt-nodes');
+    expect(within(reopened).getByRole('button', { name: '加入中…' }).disabled).toBe(true);
+    api.discoverNodes.mockResolvedValue({ items: [{ node_id: 'fresh-b', address: '192.168.10.4:8080' }] });
+    api.listClusterNodes.mockResolvedValue({ items: [
+      { id: 'a1', ip: '192.168.10.3', portal_ip: '192.168.10.250', ha_state: 'active', online: true },
+      { id: 'fresh-b', ip: '192.168.10.4', ha_state: 'standby', online: true },
+    ] });
+    await user.click(screen.getByRole('button', { name: '重新扫描' }));
+    await waitFor(() => expect(within(reopened).queryByText('192.168.10.4:8080')).toBeNull());
+    expect(adopt).toHaveBeenCalledTimes(1);
+  });
+
+  it('加入失败后恢复按钮，允许重试同一候选', async () => {
+    let reject;
+    const adopt = vi.fn().mockImplementationOnce(() => new Promise((_, r) => { reject = r; })).mockResolvedValue({ status: 'adopting' });
+    stubCluster([{ node_id: 'fresh-b', address: '192.168.10.4:8080' }], adopt);
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /添加节点/ }));
+    const dialog = await screen.findByTestId('adopt-nodes');
+    await user.click(await within(dialog).findByRole('button', { name: '加入集群' }));
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).disabled).toBe(true);
+    await act(async () => reject(new Error('暂时不可达')));
+    const retry = await within(dialog).findByRole('button', { name: '加入集群' });
+    expect(retry.disabled).toBe(false);
+    await user.click(retry);
+    await waitFor(() => expect(adopt).toHaveBeenCalledTimes(2));
+    expect(within(dialog).getByRole('button', { name: '加入中…' }).disabled).toBe(true);
+  });
+
+  it('节点表和发现列表缩短测试版标识，完整版本仍可查看', async () => {
+    const raw = '831f355-dirty-inf-service-repfix-20261019-r2';
+    stubCluster([{ node_id: 'fresh-b', version: raw, address: '192.168.10.4:8080' }], vi.fn());
+    api.listClusterServices.mockResolvedValue({ nodes: [{ node_id: 'a1', reachable: true, host: { version: raw }, services: [] }] });
+    const user = userEvent.setup();
+    renderPage();
+    const card = await screen.findByTestId('cluster-nodes');
+    expect(await within(card).findByText('测试版 2026.10.19-r2')).toBeTruthy();
+    expect(within(card).getByText('测试版 2026.10.19-r2').getAttribute('title')).toBe(raw);
+    await user.click(screen.getByRole('button', { name: /添加节点/ }));
+    const dialog = await screen.findByTestId('adopt-nodes');
+    expect(await within(dialog).findByText('测试版 2026.10.19-r2')).toBeTruthy();
+    expect(within(dialog).getByText('测试版 2026.10.19-r2').getAttribute('title')).toBe(raw);
+  });
+
+  it('本机还没建集群时，先提示去系统参数创建集群，不给加入按钮', async () => {
+    stubCluster([{ node_id: 'fresh-b', version: 'v1', address: '192.168.10.4:8080' }], vi.fn());
+    api.listClusterNodes.mockResolvedValue({ items: [{ id: 'a1', ip: '192.168.10.3', online: true }], total: 1 });
+    const user = userEvent.setup();
+    renderPage();
+    await user.click(await screen.findByRole('button', { name: /添加节点/ }));
+    const dialog = await screen.findByTestId('adopt-nodes');
+    await waitFor(() => expect(dialog.textContent).toMatch(/本机还没有组建集群.*系统参数.*高可用/));
+    expect(within(dialog).queryByRole('button', { name: /加入集群/ })).toBeNull();
   });
 
   it('没发现候选时说明原因，不留一个空白列表', async () => {

@@ -1,6 +1,17 @@
 // 公共格式化函数和标签表，各页面统一从这里取。
 export const pad2 = (n) => String(n).padStart(2, "0");
 
+// 只缩短界面显示；API、版本比较和悬停提示仍使用完整构建号。
+export const fmtVersion = (value) => {
+  const raw = String(value || "").trim();
+  if (!raw) return "—";
+  if (raw === "dev") return "开发版";
+  const build = raw.match(/^[0-9a-f]{7,40}(-dirty)?-.*?(\d{4})(\d{2})(\d{2})-(r\d+)$/i);
+  if (build) return `${build[1] ? "测试版 " : ""}${build[2]}.${build[3]}.${build[4]}-${build[5]}`;
+  const dirty = raw.match(/^([0-9a-f]{7,40})-dirty$/i);
+  return dirty ? `开发版 ${dirty[1].slice(0, 7)}` : raw;
+};
+
 // null（new Date(null) 是 1970 年）和 Go 零值时间都表示「尚未」。
 const toDate = (iso) => {
   if (!iso) return null;
@@ -48,7 +59,15 @@ export const TASK_LABELS = {
   add_read_cache: "添加读缓存", remove_read_cache: "移除读缓存",
   add_write_cache: "添加写缓存", remove_write_cache: "移除写缓存",
   flush_cache: "刷新写缓存", backup_dataset: "数据备份", image_health_check: "镜像体检",
+  winpe_extract: "提取恢复环境", pe_probe: "适配环境自检", install_image: "ISO 创建镜像",
+  model_adapt: "完整适配", identity_capture: "客户机启动准备", identity_layer_rebuild: "更新客户机启动配置",
 };
 
 // redName 返回还原点的显示名：优先用操作者输入的名称，没有显示名的旧记录退回 ASCII 快照名。
+// 机型在某还原点上的记录从哪来：只有开机成功是开过机。
+export const MODEL_RECORD_SOURCES = { observed: "开机成功", adapted: "完整适配", inherited: "沿用上一个还原点" };
+
 export const redName = (r) => (r && (r.DisplayName || r.Name)) || "";
+// 后端存规范化 MAC（无分隔符、大写，如 525400AABBCC）；显示时插回冒号，比较时去掉。
+export const normMac = (s) => String(s || "").replace(/[:\-.\s]/g, "").toUpperCase();
+export const fmtMac = (s) => normMac(s).match(/.{1,2}/g)?.join(":") || (s || "");

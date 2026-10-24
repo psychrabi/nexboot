@@ -79,7 +79,17 @@ func TestReclaimSkipsAClientThatBootedAfterTheDecision(t *testing.T) {
 		t.Fatalf("刚开机的客户机克隆被回收了：reclaimed=%v，池=%v", reclaimed, z.state())
 	}
 
-	// 决定晚于这次开机：照常回收
+	// 普查开始得比开机打点晚，但客户机还没来得及 sanhook。这时 decidedAt 已晚于开机时间，不能删盘。
+	reclaimed, err = agent.ReclaimIdleClientClones(ctx, "aa:bb:cc:dd:ee:ff", time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if reclaimed || !strings.Contains(strings.Join(z.state(), " "), "CLIENT-AABBCCDDEEFF") {
+		t.Fatalf("刚开机、会话还没出现的克隆被回收了：reclaimed=%v，池=%v", reclaimed, z.state())
+	}
+
+	// 开机超过连接窗口仍没有会话：照常回收
+	agent.provisionedAt.Store("AABBCCDDEEFF", time.Now().Add(-clientConnectGrace-time.Second))
 	reclaimed, err = agent.ReclaimIdleClientClones(ctx, "aa:bb:cc:dd:ee:ff", time.Now())
 	if err != nil {
 		t.Fatal(err)

@@ -17,9 +17,8 @@ const NET_STATUS = {
 };
 
 const getImportDir = (settings) => (settings && (settings.import_dir || settings.ImportDir)) || "";
-const getDefaultImportDir = (settings) => (settings && (settings.default_import_dir || settings.DefaultImportDir)) || "/var/lib/ndiskless/imports";
-const isAbsolutePath = (v) => /^\//.test((v || "").trim());
-const isVarPath = (v) => /^\/var(\/|$)/.test((v || "").trim());
+const GiB = 1024 ** 3;
+const fmtGiB = (b) => `${(Number(b || 0) / GiB).toFixed(1)} GiB`;
 
 function PageSettings() {
   const store = useStore();
@@ -133,44 +132,41 @@ function PageSettings() {
 
 function PageSystemParams() {
   const store = useStore();
-  const [form, setForm] = useState({ import_dir: "" });
   const { data, loading, error, reload } = useResource(() => api.getSettings(), []);
-  const { busy, run } = useMutation(store.toast);
-
-  const savedImportDir = getImportDir(data);
-  const defaultImportDir = getDefaultImportDir(data);
-  const value = form.import_dir || "";
-  const dirty = value.trim() !== (savedImportDir || "").trim();
-  const valid = isAbsolutePath(value);
-
-  useEffect(() => {
-    if (data) setForm({ import_dir: getImportDir(data) });
-  }, [data]);
-
-  const save = async () => {
-    const dir = value.trim();
-    if (!dir) { store.toast("请输入镜像导入目录", "err"); return; }
-    if (!isAbsolutePath(dir)) { store.toast("镜像导入目录必须是绝对路径", "err"); return; }
-    await run(() => api.saveSettings({ import_dir: dir }), "镜像导入目录已更新", { reload, errMsg: "保存失败" });
-  };
 
   return (
     <div className="fade-in" style={{ display: "flex", flexDirection: "column", gap: 14 }}>
       <HACard/>
       <ClientNetworkSettings store={store}/>
-      <ImageDirectorySettings
-        loading={loading}
-        error={error}
-        value={value}
-        savedValue={savedImportDir}
-        defaultValue={defaultImportDir}
-        dirty={dirty}
-        valid={valid}
-        busy={busy}
-        onChange={(v) => setForm({ import_dir: v })}
-        onReset={() => setForm({ import_dir: savedImportDir })}
-        onSave={save}
-      />
+      <WindowsClientSettings data={data} loading={loading} reload={reload} store={store}/>
+      <ImageDirectorySettings data={data} loading={loading} error={error} store={store}/>
+    </div>
+  );
+}
+
+// WindowsClientSettings 控制 Windows 客户机开机脚本是否关闭自动更新、自动重启、睡眠和休眠。
+// 普通客户机的更新不会保留，建议通过超管机更新并保存还原点。
+function WindowsClientSettings({ data, loading, reload, store }) {
+  const { busy, run } = useMutation(store.toast);
+  const enforce = !data || data.enforce_windows_policy !== false;
+  const toggle = () => run(() => api.saveWindowsPolicy({ enforce: !enforce }),
+    enforce ? "已关闭，下次开机不再强制修改；已写入的设置需在 Windows 中调整" : "已开启，客户机下次正常开机生效", { reload, errMsg: "保存失败" });
+  return (
+    <div className="card" style={{ padding: 0, overflow: "hidden" }}>
+      <div className="card-h">
+        <div className="card-title"><Icons.Windows size={14}/> Windows 客户机</div>
+        <span className={`chip ${enforce ? "emerald" : ""}`}>{enforce ? "已开启" : "已关闭"}</span>
+      </div>
+      <div style={{ padding: 16 }}>
+        <label style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 14, cursor: "pointer" }}>
+          <input type="checkbox" checked={enforce} disabled={busy || loading} onChange={toggle} aria-label="开机时关闭自动更新、自动重启、睡眠和休眠"/>
+          开机时关闭自动更新、自动重启、睡眠和休眠（推荐）
+        </label>
+        <div className="hint" style={{ marginTop: 6 }}>
+          客户机正常开机时关闭自动更新、睡眠和休眠，并限制登录状态下更新后的自动重启。ISO 安装和首次设置阶段不受此开关控制，进入系统后仍可手动检查更新。
+          要保留系统补丁，请用超管机安装后保存还原点。关闭此开关只停止后续修改，已写入的设置需在 Windows 中手动调整。
+        </div>
+      </div>
     </div>
   );
 }
@@ -273,44 +269,66 @@ function ClientNetworkSettings({ store }) {
   );
 }
 
-function ImageDirectorySettings({ loading, error, value, savedValue, defaultValue, dirty, valid, busy, onChange, onReset, onSave }) {
-  const risk = isVarPath(value);
-  const empty = !(value || "").trim();
+// ImageDirectorySettings 只读展示导入目录：固定为本机存储池上的 imports，随目录库同步到备用节点，不再可设。
+// 旧版本导入目录里留下的文件列在下面，由运维逐个移入；不会自动搬。
+function ImageDirectorySettings({ data, loading, error, store }) {
+  const dir = getImportDir(data);
+  const dirError = data && (data.import_dir_error || data.ImportDirError);
+  const legacyDirs = (data && (data.legacy_import_dirs || data.LegacyImportDirs)) || [];
+  const [legacy, setLegacy] = useState(null);
+  const [moving, setMoving] = useState("");
+  const loadLegacy = async () => {
+    try { setLegacy(await api.listLegacyImports()); }
+    catch (e) { setLegacy({ items: [], error: e.message }); }
+  };
+  useEffect(() => { if (legacyDirs.length) loadLegacy(); }, [legacyDirs.join("\n")]);
+  const items = (legacy && legacy.items) || [];
+  // 移入在后台进行（跨盘要复制几 GB），列表上有正在移入的就隔几秒再看。
+  useEffect(() => {
+    if (!items.some(f => f.moving)) return undefined;
+    const t = setTimeout(loadLegacy, 3000);
+    return () => clearTimeout(t);
+  }, [legacy]);
+  const move = async (f) => {
+    setMoving(f.path);
+    try {
+      await api.moveLegacyImport(f.path);
+      store.toast(`正在把 ${f.name} 移入导入目录`);
+      await loadLegacy();
+    } catch (e) { store.toast(e.message || "移入失败", "err"); }
+    finally { setMoving(""); }
+  };
   const stateChip = loading
     ? { cls: "", text: "读取中" }
-    : dirty
-      ? { cls: "amber", text: "未保存" }
-      : risk
-        ? { cls: "amber", text: "系统盘风险" }
-        : { cls: "emerald", text: "已生效" };
+    : dirError ? { cls: "rose", text: "没有存储池" } : { cls: "emerald", text: "自动" };
   return (
     <div className="card" style={{ padding: 0, overflow: "hidden" }}>
       <div className="card-h">
         <div className="card-title"><Icons.Folder size={14}/> 镜像导入目录</div>
         <span className={`chip ${stateChip.cls}`}>{stateChip.text}</span>
       </div>
-      <div style={{ padding: 16 }}>
-        <Field label="目录路径" required hint={risk ? "当前路径位于 /var，镜像较大时容易占满系统盘。" : "服务器绝对路径；保存时会做写入测试。"}>
-          <div style={{ display: "grid", gridTemplateColumns: "minmax(260px, 1fr) auto auto", gap: 8, alignItems: "center" }}>
-            <input
-              className="input mono"
-              style={{ width: "100%", minWidth: 0 }}
-              value={value}
-              onChange={e => onChange(e.target.value)}
-              placeholder="/tank/imports"
-            />
-            {dirty && <button className="btn primary" style={{ minWidth: 58, justifyContent: "center", whiteSpace: "nowrap" }} disabled={busy || loading || empty || !valid} onClick={onSave}>
-              {busy ? "保存中…" : "保存"}
-            </button>}
-            {dirty && <button className="btn" style={{ whiteSpace: "nowrap" }} disabled={busy} onClick={onReset}>撤销</button>}
+      <div style={{ padding: 16, display: "flex", flexDirection: "column", gap: 8 }}>
+        {dir && <div className="mono" style={{ wordBreak: "break-all" }}>{dir}</div>}
+        {dirError && <div className="chip rose" style={{ whiteSpace: "normal" }}>{dirError}</div>}
+        {error && <span className="chip rose">{error}</span>}
+        <div className="hint">上传和「从服务器目录」导入的文件都放在存储池上的这个目录，并自动同步到备用节点；主备切换后照常可用。不再支持修改。</div>
+        {legacyDirs.length > 0 && (
+          <div style={{ marginTop: 6 }}>
+            <div className="hint" style={{ marginBottom: 6 }}>旧导入目录（只读）：{legacyDirs.join("、")}。里面的文件不会被使用，需要时请移入上面的导入目录。</div>
+            {legacy && legacy.error && <span className="chip rose">{legacy.error}</span>}
+            {legacy && !legacy.error && items.length === 0 && <div className="hint">旧目录里没有可导入的文件。</div>}
+            {items.map(f => (
+              <div key={f.path} className="row" style={{ gap: 10, alignItems: "center", padding: "4px 0" }}>
+                <span className="mono" style={{ flex: 1, wordBreak: "break-all" }}>{f.path}</span>
+                <span className="meta mono">{fmtGiB(f.size)}</span>
+                {f.error && <span className="chip rose" title={f.error}>移入失败：{f.error}</span>}
+                <button className="btn" disabled={f.moving || moving === f.path} onClick={() => move(f)}>
+                  {f.moving || moving === f.path ? "移入中…" : "移入导入目录"}
+                </button>
+              </div>
+            ))}
           </div>
-        </Field>
-        <div style={{ display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", minHeight: 22 }}>
-          {savedValue && <span className="mono" style={{ fontSize: 12, color: "var(--fg-faint)", wordBreak: "break-all" }}>当前：{savedValue}</span>}
-          <span className="chip mono" title={defaultValue}>默认目录</span>
-          {!empty && !valid && <span className="chip rose">需要绝对路径</span>}
-          {error && <span className="chip rose">{error}</span>}
-        </div>
+        )}
       </div>
     </div>
   );

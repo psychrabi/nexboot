@@ -304,25 +304,27 @@ func (p *fakePool) Rename(_ context.Context, source, dataset string) error {
 		return zfsErr("cannot open '" + source + "': dataset does not exist")
 	}
 	for i, d := range p.datasets {
-		if d == source {
-			p.datasets[i] = dataset
+		if d == source || strings.HasPrefix(d, source+"/") {
+			p.datasets[i] = dataset + strings.TrimPrefix(d, source)
 		}
 	}
 	for snap := range p.snaps {
-		if strings.HasPrefix(snap, source+"@") {
+		if strings.HasPrefix(snap, source+"@") || strings.HasPrefix(snap, source+"/") {
 			delete(p.snaps, snap)
-			p.snaps[dataset+"@"+snap[strings.Index(snap, "@")+1:]] = true
+			p.snaps[dataset+strings.TrimPrefix(snap, source)] = true
 		}
 	}
-	if o, ok := p.origin[source]; ok {
-		delete(p.origin, source)
-		p.origin[dataset] = o
-	}
+	renamedOrigins := make(map[string]string, len(p.origin))
 	for ds, o := range p.origin {
-		if strings.HasPrefix(o, source+"@") {
-			p.origin[ds] = dataset + "@" + o[strings.Index(o, "@")+1:]
+		if ds == source || strings.HasPrefix(ds, source+"/") {
+			ds = dataset + strings.TrimPrefix(ds, source)
 		}
+		if strings.HasPrefix(o, source+"@") || strings.HasPrefix(o, source+"/") {
+			o = dataset + strings.TrimPrefix(o, source)
+		}
+		renamedOrigins[ds] = o
 	}
+	p.origin = renamedOrigins
 	return nil
 }
 
@@ -451,6 +453,10 @@ func (p *fakePool) EnsureFilesystem(_ context.Context, dataset string) error {
 
 func (p *fakePool) EnsureDBCopyDataset(context.Context) (string, error) {
 	return "/tank/nd/db", nil
+}
+
+func (p *fakePool) EnsureFilesDataset(context.Context) (string, error) {
+	return "/tank/nd/files", nil
 }
 
 func (p *fakePool) ListPoolNames(_ context.Context) ([]string, error) {

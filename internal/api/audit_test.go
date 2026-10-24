@@ -6,7 +6,6 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
 	"testing"
 
@@ -145,26 +144,6 @@ func TestAuditMiddlewareLeavesReadsAlone(t *testing.T) {
 
 	if len(audit.entries) != 0 {
 		t.Fatalf("a read was audited: %#v", audit.entries)
-	}
-}
-
-// 名为「教学一班网卡」的驱动包下载时保留该名字：HTTP 头是 latin-1，原始 UTF-8 会变乱码；
-// RFC 6266 的 filename* 携带真名，普通 filename 作为回退。
-func TestDriverArchiveKeepsANonASCIIFilenameReadable(t *testing.T) {
-	drivers := &recordingDriverService{archiveName: "教学一班网卡.zip", archive: []byte("PK\x03\x04")}
-	rec := do(newRouter(Services{Drivers: drivers}), http.MethodGet, "/api/driver-bundles/b-1/archive", "")
-
-	disposition := rec.Header().Get("Content-Disposition")
-	if !strings.Contains(disposition, "filename*=UTF-8''") {
-		t.Fatalf("Content-Disposition = %q, want an RFC 6266 filename*", disposition)
-	}
-	if !strings.Contains(disposition, url.PathEscape("教学一班网卡.zip")) {
-		t.Fatalf("Content-Disposition = %q, want the percent-encoded name", disposition)
-	}
-	for _, r := range disposition {
-		if r > 127 {
-			t.Fatalf("raw non-ascii byte in the header: %q", disposition)
-		}
 	}
 }
 

@@ -57,7 +57,7 @@ function Overlay({ open, onClose, placement = "center", size = "md", width, clos
   // 否则会被困住、居中弹窗偏到右边。
   return createPortal(
     <div style={scrim} onClick={() => closeOnBackdrop && onClose && onClose()}>
-      <div onClick={e => e.stopPropagation()} className={className}
+      <div onClick={e => e.stopPropagation()} className={className} role="dialog" aria-modal="true"
         style={{ display: "flex", flexDirection: "column", overflow: "hidden", ...panel, ...panelStyle }}>
         {children}
       </div>
@@ -81,6 +81,7 @@ function Modal({ open, onClose, title, children, footer, size = "md", width }) {
 }
 
 // 确认弹窗。`typeToConfirm: "<name>"` 要求输入该名称后才解锁确认按钮，用于不可逆的数据销毁操作。
+// `notice: true` 用于明知会失败的操作：只说明原因，只有「知道了」，兑现为 false。
 // 弹窗自己渲染，调用方只拿到 `ask`；若要求调用方自己放置节点，漏放时 Promise 永远不会 resolve。
 const ConfirmContext = React.createContext(null);
 
@@ -98,10 +99,12 @@ function ConfirmProvider({ children }) {
       {children}
       {state && (
         <Modal open size="sm" onClose={() => close(false)} title={state.title || "确认操作"}
-          footer={<>
-            <button className="btn" onClick={() => close(false)}>取消</button>
-            <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={locked} onClick={() => close(true)}>{state.confirmText || "确认"}</button>
-          </>}>
+          footer={state.notice
+            ? <button className="btn primary" onClick={() => close(false)}>知道了</button>
+            : <>
+              <button className="btn" onClick={() => close(false)}>取消</button>
+              <button className={`btn ${state.danger ? "danger" : "primary"}`} disabled={locked} onClick={() => close(true)}>{state.confirmText || "确认"}</button>
+            </>}>
           <div style={{ fontSize: 14, color: "var(--fg-mute)", lineHeight: 1.6, whiteSpace: "pre-wrap" }}>{state.message}</div>
           {state.typeToConfirm && (
             <div style={{ marginTop: 12 }}>

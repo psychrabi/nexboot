@@ -36,7 +36,7 @@ const (
 // ContainerFor 返回池内相对名所属的容器。
 func ContainerFor(name string) string {
 	switch Classify(name).Kind {
-	case CarrierClient, CarrierSuper, CarrierInspect, CarrierExport:
+	case CarrierClient, CarrierSuper, CarrierInspect, CarrierExport, CarrierAdapt, CarrierIdentity, CarrierInstallation:
 		return RunRoot
 	}
 	return CatalogueRoot
@@ -58,6 +58,8 @@ func ReservedCatalogueChild(name string) bool {
 const (
 	clientClonePrefix = "CLIENT-"
 	superClonePrefix  = "SCLIENT-"
+	modelAdaptPrefix  = "ADAPT-"
+	identityPrefix    = "IDENT-"
 	inspectPrefix     = "INSPECT-"
 	exportPrefix      = "EXPORT-"
 	adaptCheckPrefix  = "NDADAPTCHK-"
@@ -125,6 +127,10 @@ func ClientDataCloneName(mac string, lun int) string {
 	return fmt.Sprintf("%s%s%d", ClientCloneName(mac), dataCloneInfix, lun)
 }
 
+func ModelAdaptCloneName(mac string) string      { return modelAdaptPrefix + NormalizeMAC(mac) }
+func InstallationDiskName(mac, id string) string { return "INSTALL-" + NormalizeMAC(mac) + "-" + id }
+func IdentityCloneName(mac string) string        { return identityPrefix + NormalizeMAC(mac) }
+
 func SuperClientCloneName(mac string) string { return superClonePrefix + NormalizeMAC(mac) }
 
 func SuperClientDataCloneName(mac string, lun int) string {
@@ -147,6 +153,11 @@ func InspectCloneName(imageID string) string {
 	return fmt.Sprintf("%s%s-%d", inspectPrefix, strings.ToUpper(sanitizeForID(imageID)), time.Now().UTC().UnixNano())
 }
 
+// WinRECloneName 是从镜像提取恢复环境（WinRE）时挂载的临时克隆，归体检类，与同一镜像的体检克隆可并存。
+func WinRECloneName(imageID string) string {
+	return fmt.Sprintf("%sWINRE-%s-%d", inspectPrefix, strings.ToUpper(sanitizeForID(imageID)), time.Now().UTC().UnixNano())
+}
+
 // ExportCloneName 是导出或复制还原点所用的临时克隆，使流里只带接收端会去掉的快照。
 func ExportCloneName(configID string) string {
 	return fmt.Sprintf("%s%s-%d", exportPrefix, strings.ToUpper(sanitizeForID(configID)), time.Now().UTC().UnixNano())
@@ -163,12 +174,15 @@ const AdaptCheckSnapshot = "ndadaptcheck"
 type CarrierKind string
 
 const (
-	CarrierEntity     CarrierKind = "entity"     // 镜像或配置
-	CarrierClient     CarrierKind = "client"     // 临时客户机克隆
-	CarrierSuper      CarrierKind = "super"      // 超管机持久克隆
-	CarrierInspect    CarrierKind = "inspect"    // 进行中的健康检查
-	CarrierExport     CarrierKind = "export"     // 正在导出或复制的还原点
-	CarrierSuperseded CarrierKind = "superseded" // 被超管保存替下的配置
+	CarrierInstallation CarrierKind = "installation"
+	CarrierAdapt        CarrierKind = "adapt"
+	CarrierIdentity     CarrierKind = "identity"
+	CarrierEntity       CarrierKind = "entity"     // 镜像或配置
+	CarrierClient       CarrierKind = "client"     // 临时客户机克隆
+	CarrierSuper        CarrierKind = "super"      // 超管机持久克隆
+	CarrierInspect      CarrierKind = "inspect"    // 进行中的健康检查
+	CarrierExport       CarrierKind = "export"     // 正在导出或复制的还原点
+	CarrierSuperseded   CarrierKind = "superseded" // 被超管保存替下的配置
 )
 
 // Carrier 是池内名字反解出的领域对象。
@@ -182,12 +196,19 @@ type Carrier struct {
 // Classify 把池内相对名反解为它承载的对象。
 func Classify(name string) Carrier {
 	switch {
+	case strings.HasPrefix(name, "INSTALL-"):
+		mac, _, _ := strings.Cut(strings.TrimPrefix(name, "INSTALL-"), "-")
+		return Carrier{Kind: CarrierInstallation, Name: name, MAC: mac}
 	case strings.HasPrefix(name, inspectPrefix):
 		return Carrier{Kind: CarrierInspect, Name: name}
 	case strings.HasPrefix(name, adaptCheckPrefix):
 		return Carrier{Kind: CarrierInspect, Name: name, MAC: strings.TrimPrefix(name, adaptCheckPrefix)}
 	case strings.HasPrefix(name, exportPrefix):
 		return Carrier{Kind: CarrierExport, Name: name}
+	case strings.HasPrefix(name, modelAdaptPrefix):
+		return Carrier{Kind: CarrierAdapt, Name: name, MAC: strings.TrimPrefix(name, modelAdaptPrefix)}
+	case strings.HasPrefix(name, identityPrefix):
+		return Carrier{Kind: CarrierIdentity, Name: name, MAC: strings.TrimPrefix(name, identityPrefix)}
 	case strings.HasPrefix(name, superClonePrefix):
 		mac, lun := cloneMACAndLUN(strings.TrimPrefix(name, superClonePrefix))
 		return Carrier{Kind: CarrierSuper, Name: name, MAC: mac, LUN: lun}

@@ -83,6 +83,20 @@ func (e SuperBaseOutdated) Error() string {
 		strings.Join(e.Newer, "、"))
 }
 
+// SuperHiveUnsafe 表示超管机系统盘不能原样存成还原点：休眠/快速启动关机（hiberfil.sys 有效），
+// 或 SYSTEM 注册表处于未提交状态且事务日志无法安全回放。拒绝时池和配置都未改动。
+type SuperHiveUnsafe struct {
+	FastStartup bool
+	Reason      string
+}
+
+func (e SuperHiveUnsafe) Error() string {
+	if e.FastStartup {
+		return "超管机是以快速启动/休眠方式关机的，系统盘状态不完整，未保存还原点（配置和已有还原点均未改动）；请在超管机上关闭快速启动（管理员执行 powercfg /h off）后完全关机，再保存"
+	}
+	return fmt.Sprintf("超管机未正常关机，系统注册表无法安全恢复（%s），未保存还原点（配置和已有还原点均未改动）；请重新开机超管机后从开始菜单正常关机，再保存", e.Reason)
+}
+
 type LUN struct {
 	LUN         int
 	Target      string
@@ -98,8 +112,9 @@ type LUNInfo struct {
 }
 
 type ClientSource struct {
-	ImageID  string
-	ConfigID string
+	IdentityLayer bool
+	ImageID       string
+	ConfigID      string
 	// SnapshotName 是 ZFS 快照后缀（还原点名去掉 '@'），不是还原点 ID；由调用方解析，存储层不查库。
 	SnapshotName string
 	MountTarget  string
@@ -253,27 +268,6 @@ type SuperStopResult struct {
 	DataDisks []SuperStopSavedDisk
 }
 
-// SuperAdaptationReq 向超管机持久克隆放入一次性全自动驱动适配：驱动包 zip，以及注册为
-// 本地组策略开机脚本的 AdaptScript，下次开机由 SYSTEM 运行（装驱动、登记启动驱动、自动关机）。
-type SuperAdaptationReq struct {
-	MAC         string
-	Source      ClientSource // SCLIENT 持久盘的克隆来源
-	BundleZip   []byte       // 驱动包，放到 C:\ndadapt\bundle.zip
-	AdaptScript []byte       // 开机以 SYSTEM 运行的自包含 adapt.ps1
-	// ResetClone 先丢弃之前未烘焙的 SCLIENT 系统盘，用于操作者覆盖失败或待处理的注入。
-	ResetClone bool
-	// MountScript 非空时另注册为常驻开机脚本 mount-disks.ps1：与 AdaptScript 不同，它会烘焙进
-	// 还原点，每个克隆每次开机都按服务端重新分配数据盘盘符。
-	MountScript []byte
-}
-
-// SuperAdaptationResult 是注入脚本写进 C:\ndadapt\done.txt 的结果，超管机自动关机后读回。
-type SuperAdaptationResult struct {
-	Done bool   // done.txt 存在（脚本已跑完）
-	OK   bool   // 适配成功（exit 0）
-	Log  string // done.txt 原文
-}
-
 // BackupReq 请求把整个目录容器备份一轮到备份池。增量基点每轮从两个池现读而不存档，
 // 这样合并或超管保存不会悄悄让下一次备份失效。
 type BackupReq struct {
@@ -298,6 +292,31 @@ type InspectImageReq struct {
 	// SnapshotName 是 ZFS 快照后缀（还原点名去掉 '@'）。
 	SnapshotName string
 	OSType       domain.OSType
+}
+
+// ExtractWinREReq 指定从哪个还原点提取恢复环境、拷到哪个目录。
+type ExtractWinREReq struct {
+	ImageID      string
+	ConfigID     string
+	SnapshotName string
+	DestDir      string
+}
+
+// WinREExtract 是提取结果：目标目录里的 boot.wim / boot.sdi 及其哈希。
+type WinREExtract struct {
+	WIMPath   string
+	SDIPath   string
+	WIMSHA256 string
+	SDISHA256 string
+	WIMSize   int64
+	// CurlPath/CurlSHA256 是顺带从系统分区拷出的 curl.exe（WinPE 回报用），镜像没有时为空。
+	CurlPath   string
+	CurlSHA256 string
+	// BCD 取自 Windows\Boot\DVD 下的通用启动配置：EFI 版存为 BCD，BIOS 版存为 BCD.pcat；没有时为空。
+	BCDEFIPath    string
+	BCDEFISHA256  string
+	BCDPCATPath   string
+	BCDPCATSHA256 string
 }
 
 type InspectItem struct {
@@ -371,11 +390,6 @@ type StorageAgent interface {
 	// SuperDiskWritten 是超管机磁盘自克隆基点以来写入的量：即发布要保存的大小，采样两次可判断是否已静止。
 	SuperDiskWritten(ctx context.Context, mac string, lun int) (int64, error)
 	SuperStop(context.Context, SuperStopReq) (SuperStopResult, error)
-	// PrepareSuperAdaptation 离线向超管机持久克隆放入驱动包和组策略开机脚本，下次开机自动适配。
-	PrepareSuperAdaptation(context.Context, SuperAdaptationReq) error
-	// ReadSuperAdaptationResult 读回脚本自动关机后写的结果。活动盘被 iSCSI 导出占着，
-	// 所以经临时快照加克隆读取。脚本未完成时 Done 为 false。
-	ReadSuperAdaptationResult(context.Context, string) (SuperAdaptationResult, error)
 
 	// ExportImage 把镜像以 ZFS 裸流写入 req.W，产物可被 ImportImage 导回。导出期间用临时快照冻结，
 	// 不创建也不留下任何操作者可见的东西。
@@ -410,8 +424,6 @@ type ClientHostAgent interface {
 	ClientCloneMACs(context.Context) ([]string, error)
 	SuperStart(context.Context, ClientReq) (LUNInfo, error)
 	SuperStop(context.Context, SuperStopReq) (SuperStopResult, error)
-	PrepareSuperAdaptation(context.Context, SuperAdaptationReq) error
-	ReadSuperAdaptationResult(context.Context, string) (SuperAdaptationResult, error)
 	SpaceUsage(context.Context) (SpaceUsage, error)
 }
 

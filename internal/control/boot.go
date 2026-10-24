@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"strings"
@@ -13,6 +14,8 @@ import (
 	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/assets"
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/identity"
 	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
@@ -28,12 +31,24 @@ var bootFlight singleflight.Group
 
 const bootBuildTimeout = 2 * time.Minute
 
+// PEBootSource 提供客户机进行中的 WinPE 会话及其引导脚本（见 pe.SessionService）。
+type PEBootSource interface {
+	Active(ctx context.Context, terminalID string) (domain.PESession, bool, error)
+	Script(ctx context.Context, sess domain.PESession, t domain.Terminal) (string, error)
+}
+
 // BootService 处理客户机开机：准备克隆与 LUN，生成 iPXE 脚本。
+type InstallationBootSource interface {
+	BootScript(context.Context, string) (string, bool, error)
+}
+
 type BootService struct {
-	Store   store.Store
-	Storage storage.StorageAgent
-	Builder boot.BootBuilder
-	Logger  *slog.Logger
+	Install  InstallationBootSource
+	Identity *identity.Service
+	Store    store.Store
+	Storage  storage.StorageAgent
+	Builder  boot.BootBuilder
+	Logger   *slog.Logger
 	// APIPort 写入 Windows 开机脚本，供其回调 API（默认 8080）。
 	APIPort string
 	// PortalAddr 非空时替代存储 agent 自身地址写入 sanhook（HA 下为 VIP）。
@@ -41,7 +56,41 @@ type BootService struct {
 	PortalAddr string
 	// Place 非空时按放置规则选节点并把落点记到客户机上；为 nil 时走单机路径。
 	Place *place.Router
-	Now   func() time.Time
+	// PE 非空时，客户机有进行中的 WinPE 会话就下发 WinPE 引导脚本而不是系统盘。
+	PE PEBootSource
+	// Hardware 非空时记录客户机上报的硬件（机型）与每次开机是否进了系统；为 nil 时都不记。
+	Hardware *hwprofile.Service
+	Now      func() time.Time
+}
+
+// RecordHardware 把 /boot 链接上的硬件参数归并成机型挂到这台客户机上。
+func (s BootService) RecordHardware(ctx context.Context, mac string, hints hwprofile.Hints) error {
+	if recorder, ok := s.Install.(interface {
+		RecordHardware(context.Context, string, hwprofile.Hints) (bool, error)
+	}); ok {
+		if handled, err := recorder.RecordHardware(ctx, mac, hints); handled || err != nil {
+			return err
+		}
+	}
+	if v, ok, err := s.installSession(ctx, mac); err != nil {
+		return err
+	} else if ok {
+		v.Firmware = hints.Platform
+		if vendor, device, valid := hwprofile.ParseBusID(hints.BusID); valid {
+			v.HWID = "PCI\\VEN_" + vendor + "&DEV_" + device
+			v.BusLoc = hints.BusLoc
+		}
+		return s.Store.InstallSessions().Update(ctx, v)
+	}
+	if s.Hardware == nil {
+		return nil
+	}
+	t, err := s.terminalByMAC(ctx, storage.NormalizeMAC(mac))
+	if err != nil {
+		return err
+	}
+	_, err = s.Hardware.Observe(ctx, t, hints)
+	return err
 }
 
 // BuildBootScript 为 mac 准备开机所需的 LUN 并返回 iPXE 脚本。
@@ -75,9 +124,26 @@ func (s BootService) terminalByMAC(ctx context.Context, mac string) (domain.Term
 }
 
 func (s BootService) buildBootScript(ctx context.Context, mac string) (string, error) {
+	if s.Install != nil {
+		if script, ok, err := s.Install.BootScript(ctx, mac); ok || err != nil {
+			return script, err
+		}
+	}
 	t, err := s.terminalByMAC(ctx, mac)
 	if err != nil {
 		return "", err
+	}
+	if s.PE != nil {
+		sess, ok, err := s.PE.Active(ctx, t.ID)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			if s.Logger != nil {
+				s.Logger.Info("boot: serving WinPE for a pending PE session", "terminal", t.ID, "mode", sess.Mode)
+			}
+			return s.PE.Script(ctx, sess, t)
+		}
 	}
 	g, err := s.Store.Groups().Get(ctx, t.GroupID)
 	if err != nil {
@@ -131,15 +197,74 @@ func (s BootService) buildBootScript(ctx context.Context, mac string) (string, e
 		// 建盘前先记：建到一半失败时，清理也要能找到这台节点上的残留。
 		t = s.recordPlacement(ctx, t, placed.ServerID)
 	}
+	identityLayer := false
+	var identityErr error
+	if s.Identity != nil && img.OSType == domain.OSTypeWindows && !t.IsSuper {
+		nodeID := s.Identity.NodeID
+		if t.StorageServerID != nil {
+			nodeID = *t.StorageServerID
+		}
+		identityLayer, identityErr = s.Identity.Prepare(ctx, t, g.SystemConfigID, systemReductionID, agent, nodeID)
+		if errors.Is(identityErr, identity.ErrAdaptationRequired) {
+			s.Identity.FailureAlarm(ctx, t, identityErr)
+			return "", identityErr
+		}
+		if errors.Is(identityErr, identity.ErrCaptureStarted) {
+			session, ok, err := s.PE.Active(ctx, t.ID)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", fmt.Errorf("客户机网卡取证会话未准备好，请重试开机")
+			}
+			return s.PE.Script(ctx, session, t)
+		}
+	}
+	// 放置节点可能还是旧程序：它不认识现写模板，会以「身份路径无效」拒绝，
+	// 然后原样导出还原点。那张盘没有这台机器的网卡，Windows 会停在 sanboot。
+	// 本机能写时改由本机启动。
+	if identityErr != nil && s.Identity != nil && s.Storage != nil && agent != storage.ClientHostAgent(s.Storage) {
+		if s.Logger != nil {
+			s.Logger.Warn("放置节点写不了网卡身份层，这次改由本机启动", "terminal", t.ID, "error", identityErr)
+		}
+		agent, portal = storage.ClientHostAgent(s.Storage), s.PortalAddr
+		identityLayer, identityErr = s.Identity.Prepare(ctx, t, g.SystemConfigID, systemReductionID, agent, s.Identity.NodeID)
+		if errors.Is(identityErr, identity.ErrAdaptationRequired) {
+			s.Identity.FailureAlarm(ctx, t, identityErr)
+			return "", identityErr
+		}
+		if errors.Is(identityErr, identity.ErrCaptureStarted) {
+			session, ok, err := s.PE.Active(ctx, t.ID)
+			if err != nil {
+				return "", err
+			}
+			if !ok {
+				return "", fmt.Errorf("客户机网卡取证会话未准备好，请重试开机")
+			}
+			return s.PE.Script(ctx, session, t)
+		}
+		if s.Place != nil {
+			t = s.recordPlacement(ctx, t, s.Place.NodeID)
+		}
+	}
+	if s.Hardware != nil {
+		// 记录失败不拦开机。
+		if rec, err := s.Hardware.NoteBootStarted(ctx, t, img, systemReductionID); err == nil {
+			t = rec
+		} else if s.Logger != nil {
+			s.Logger.Warn("boot attempt record failed", "terminal", t.ID, "error", err)
+		}
+	}
 	req := storage.ClientReq{
 		MAC:     t.MAC,
 		IP:      t.IP,
 		GroupID: t.GroupID,
 		Super:   t.IsSuper,
 		System: storage.ClientSource{
-			ImageID:      g.SystemImageID,
-			ConfigID:     g.SystemConfigID,
-			SnapshotName: systemSnapshot,
+			IdentityLayer: identityLayer,
+			ImageID:       g.SystemImageID,
+			ConfigID:      g.SystemConfigID,
+			SnapshotName:  systemSnapshot,
 		},
 		DataDisks:   dataDisks,
 		MountScript: mountScript,
@@ -153,10 +278,30 @@ func (s BootService) buildBootScript(ctx context.Context, mac string) (string, e
 				"terminal", t.ID, "snapshot", systemSnapshot, "error", err)
 		}
 		agent, portal = storage.ClientHostAgent(s.Storage), s.PortalAddr
+		if s.Identity != nil && img.OSType == domain.OSTypeWindows && !t.IsSuper {
+			req.System.IdentityLayer, identityErr = s.Identity.Prepare(ctx, t, g.SystemConfigID, systemReductionID, agent, s.Identity.NodeID)
+			if errors.Is(identityErr, identity.ErrAdaptationRequired) {
+				s.Identity.FailureAlarm(ctx, t, identityErr)
+				return "", identityErr
+			}
+			if errors.Is(identityErr, identity.ErrCaptureStarted) {
+				session, ok, err := s.PE.Active(ctx, t.ID)
+				if err != nil {
+					return "", err
+				}
+				if !ok {
+					return "", fmt.Errorf("客户机网卡取证会话未准备好，请重试开机")
+				}
+				return s.PE.Script(ctx, session, t)
+			}
+		}
 		lun, err = agent.CreateClientLUN(ctx, req)
 		if s.Place != nil {
 			t = s.recordPlacement(ctx, t, s.Place.NodeID)
 		}
+	}
+	if identityErr != nil {
+		s.Identity.FailureAlarm(ctx, t, identityErr)
 	}
 	if err != nil {
 		return "", explainMissingSnapshot(err, systemSnapshot)
@@ -174,7 +319,7 @@ func (s BootService) recordPlacement(ctx context.Context, t domain.Terminal, ser
 	}
 	rec := t
 	rec.StorageServerID = &serverID
-	if err := s.Store.Terminals().Update(ctx, rec); err != nil {
+	if err := s.Store.Terminals().UpdatePlacement(ctx, rec); err != nil {
 		if s.Logger != nil {
 			s.Logger.Warn("terminal placement record failed", "terminal", t.ID, "error", err)
 		}
@@ -197,6 +342,11 @@ type DataDiskLetter struct {
 // DataDiskLetters 返回客户机数据盘的盘符（规整为大写字母，"D:" -> "D"）。
 // LUN 与开机导出同出 dataDiskLUN 和同一列表，盘符不会对错盘。
 func (s BootService) DataDiskLetters(ctx context.Context, mac string) ([]DataDiskLetter, error) {
+	if _, ok, err := s.installSession(ctx, mac); err != nil {
+		return nil, err
+	} else if ok {
+		return []DataDiskLetter{}, nil
+	}
 	t, err := s.terminalByMAC(ctx, mac)
 	if err != nil {
 		return nil, err
@@ -242,11 +392,18 @@ func dataDiskLUN(index int) int { return assets.DataDiskLUN(index) }
 type NetConfig struct {
 	Gateway string   `json:"gateway"`
 	DNS     []string `json:"dns"`
+	// WindowsPolicy 让开机脚本关闭自动更新、自动重启、睡眠和休眠；随这次请求一起给，不多发请求。
+	WindowsPolicy bool `json:"windows_policy"`
 }
 
 // RegisteredIP 返回本系统写进 dnsmasq 分给该 MAC 的地址，而非调用方自称的地址。
 // /boot 系列据此拒绝替别的机器应答；未知客户机或尚无地址时返回空，视为放行。
 func (s BootService) RegisteredIP(ctx context.Context, mac string) (string, error) {
+	if v, ok, err := s.installSession(ctx, mac); err != nil {
+		return "", err
+	} else if ok {
+		return v.IP, nil
+	}
 	t, err := s.terminalByMAC(ctx, mac)
 	if err != nil {
 		return "", nil // 未知 MAC 由各自的处理器答 404，这里不越俎代庖
@@ -256,15 +413,36 @@ func (s BootService) RegisteredIP(ctx context.Context, mac string) (string, erro
 
 // NetConfig 返回客户机所在分组的网关与 DNS。
 func (s BootService) NetConfig(ctx context.Context, mac string) (NetConfig, error) {
+	cfg := NetConfig{DNS: []string{}, WindowsPolicy: true}
+	if settings, err := s.Store.SystemSettings().Get(ctx, domain.SystemSettingsDefaultID); err == nil {
+		cfg.WindowsPolicy = !settings.KeepWindowsDefaults
+	} else if !errs.IsNotFound(err) {
+		return NetConfig{}, err
+	}
+	if v, ok, err := s.installSession(ctx, mac); err != nil {
+		return NetConfig{}, err
+	} else if ok {
+		cfg.Gateway = v.Gateway
+		if v.DNS1 != "" {
+			cfg.DNS = append(cfg.DNS, v.DNS1)
+		}
+		return cfg, nil
+	}
 	t, err := s.terminalByMAC(ctx, mac)
 	if err != nil {
 		return NetConfig{}, err
+	}
+	if s.Hardware != nil {
+		// 回调即系统已起来；记不上也照常答复。
+		if err := s.Hardware.NoteBooted(ctx, t); err != nil && s.Logger != nil {
+			s.Logger.Warn("boot success record failed", "terminal", t.ID, "error", err)
+		}
 	}
 	g, err := s.Store.Groups().Get(ctx, t.GroupID)
 	if err != nil {
 		return NetConfig{}, err
 	}
-	cfg := NetConfig{Gateway: strings.TrimSpace(g.Gateway), DNS: []string{}}
+	cfg.Gateway = strings.TrimSpace(g.Gateway)
 	for _, dns := range []string{g.DNS1, g.DNS2} {
 		if dns = strings.TrimSpace(dns); dns != "" {
 			cfg.DNS = append(cfg.DNS, dns)
@@ -368,4 +546,32 @@ func explainMissingSnapshot(err error, snapshot string) error {
 	}
 	return fmt.Errorf("还原点 %s 的快照在存储池上已丢失，客户机无法从它开机。"+
 		"请在该配置下改用其它还原点（把它设为当前应用点），再删除这个已损坏的还原点。原因：%w", name, err)
+}
+
+// MountScript 是镜像里烘焙的启动器开机时取的挂盘脚本，总是当前版本；
+// ISO 安装验证阶段的客户机拿到的版本另带验证回报（见 install.Service.VerificationMountScript）。
+func (s BootService) MountScript(ctx context.Context, mac string) (string, error) {
+	if src, ok := s.Install.(interface {
+		VerificationMountScript(context.Context, string) ([]byte, bool, error)
+	}); ok {
+		script, ok, err := src.VerificationMountScript(ctx, mac)
+		if err != nil {
+			return "", err
+		}
+		if ok {
+			return string(script), nil
+		}
+	}
+	return string(adapt.RenderMountScript(s.APIPort)), nil
+}
+
+func (s BootService) installSession(ctx context.Context, mac string) (domain.InstallSession, bool, error) {
+	if s.Install == nil {
+		return domain.InstallSession{}, false, nil
+	}
+	v, err := s.Store.InstallSessions().ActiveByMAC(ctx, storage.NormalizeMAC(mac))
+	if errs.IsNotFound(err) {
+		return v, false, nil
+	}
+	return v, err == nil, err
 }

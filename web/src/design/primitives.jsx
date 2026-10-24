@@ -31,7 +31,7 @@ function Field({ label, required, hint, help, helpInline, helpAfterLabel, childr
 function Select({ value, onChange, options, ...rest }) {
   return (
     <select className="input" value={value} onChange={e => onChange(e.target.value)} style={{ width: "100%" }} {...rest}>
-      {options.map(o => <option key={o.value} value={o.value}>{o.label}</option>)}
+      {options.map(o => <option key={o.value} value={o.value} disabled={o.disabled}>{o.label}</option>)}
     </select>
   );
 }
@@ -126,11 +126,11 @@ function Tip({ text, label = "说明" }) {
   React.useEffect(() => {
     if (!box) return undefined;
     const close = () => setBox(null);
-    const onKey = (e) => { if (e.key === "Escape") close(); };
-    window.addEventListener("keydown", onKey);
+    const onKey = (e) => { if (e.key === "Escape") { e.stopPropagation(); close(); } };
+    window.addEventListener("keydown", onKey, true);
     window.addEventListener("scroll", close, true); // fixed 弹层滚动时会偏离按钮
     return () => {
-      window.removeEventListener("keydown", onKey);
+      window.removeEventListener("keydown", onKey, true);
       window.removeEventListener("scroll", close, true);
     };
   }, [box]);

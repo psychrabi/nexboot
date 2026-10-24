@@ -281,6 +281,35 @@ func TestRecoverCatalogueRebuildsWhatThePoolStillHolds(t *testing.T) {
 	}
 }
 
+// 超管保存的暂存数据集（_before_super）不能收养成配置。
+func TestRecoverCatalogueDoesNotAdoptASupersededConfig(t *testing.T) {
+	ctx := context.Background()
+	st := newImageTestStore(t)
+	agent := &fakeInventoryStorage{
+		inv: storage.PoolInventory{
+			Datasets:  []string{"data1", "data1_default", "data1_default_before_super"},
+			Snapshots: []string{"data1@0", "data1_default@0", "data1_default@1", "data1_default_before_super@rep-1"},
+			Origins: map[string]string{
+				"data1_default":              "data1@0",
+				"data1_default_before_super": "data1_default@0",
+			},
+		},
+		osType: domain.OSTypeWindows,
+	}
+	svc := ReconcileService{Store: st, Storage: agent}
+
+	report, err := svc.RecoverCatalogue(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if report.Configs != 1 {
+		t.Fatalf("recovered %#v，只该收养 data1_default", report)
+	}
+	if _, err := st.Configs().Get(ctx, "data1_default_before_super"); err == nil {
+		t.Fatal("暂存的旧配置被收养成了配置")
+	}
+}
+
 // 每次启动都会跑，再跑一次不能有任何变化。
 func TestRecoverCatalogueIsIdempotentAndNeverTouchesExistingRows(t *testing.T) {
 	ctx := context.Background()

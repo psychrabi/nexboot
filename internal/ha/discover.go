@@ -19,6 +19,9 @@ import (
 // 「连不上」：那台机器必须在它自己的界面上加入。
 var ErrNotAdoptable = errors.New("该节点不是出厂态，不接受自动纳管")
 
+// ErrNotClustered 表示本机还是单机，没有可以下发给新节点的虚 IP 和令牌。
+var ErrNotClustered = errors.New("本机还没有组建集群，不能添加节点。请先到「系统参数 → 高可用」点「创建集群」设置虚 IP，再回来添加节点")
+
 // Candidate 是控制台可以提议加入的一台机器。
 type Candidate struct {
 	NodeID  string `json:"node_id"`
@@ -96,6 +99,9 @@ func (d Discovery) Scan(ctx context.Context) ([]Candidate, error) {
 
 // AdoptNode 纳管一个节点：提交集群自己的 VIP 和令牌，运维无需抄写。
 func (d Discovery) AdoptNode(ctx context.Context, addr string) error {
+	if strings.TrimSpace(d.VIP) == "" || strings.TrimSpace(d.Token) == "" {
+		return ErrNotClustered
+	}
 	body, err := json.Marshal(JoinRequest{VIP: d.VIP, ClusterToken: d.Token})
 	if err != nil {
 		return err

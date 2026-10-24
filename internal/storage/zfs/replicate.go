@@ -2,6 +2,7 @@ package zfs
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"path"
@@ -172,6 +173,17 @@ func (c *Client) ReceiveReplication(ctx context.Context, root string, r io.Reade
 // 后缀是纳秒时间戳，不会冲突也不会复用，不列出来就没人能回收。
 // 按时间戳而非字符串排序，"…-9" 排在 "…-10" 前，最后一个是最值得留着人工恢复的。
 func (c *Client) ListAsideCopies(ctx context.Context, root string) ([]string, error) {
+	return c.listSiblings(ctx, root, root+"-rebuilding-", root+"-diverged-")
+}
+
+// ListHeldCopies 按时间从旧到新列出复制挪到目录外暂存的数据集（"<root>-held-*"）：写入者已删掉、
+// 本机却还有客户机的盘克隆自它，删不掉也不能留在目录里。客户机放手后由之后的轮次删掉。
+func (c *Client) ListHeldCopies(ctx context.Context, root string) ([]string, error) {
+	return c.listSiblings(ctx, root, root+"-held-")
+}
+
+// listSiblings 列出 root 旁边名为「marker+纳秒时间戳」的兄弟数据集，按时间戳从旧到新。
+func (c *Client) listSiblings(ctx context.Context, root string, markers ...string) ([]string, error) {
 	parent := path.Dir(root)
 	if parent == "." || parent == "/" {
 		return nil, nil
@@ -186,7 +198,7 @@ func (c *Client) ListAsideCopies(ctx context.Context, root string) ([]string, er
 	}
 	var found []aside
 	for _, name := range strings.Fields(string(out)) {
-		for _, marker := range []string{root + "-rebuilding-", root + "-diverged-"} {
+		for _, marker := range markers {
 			suffix, ok := strings.CutPrefix(name, marker)
 			if !ok {
 				continue
@@ -319,15 +331,17 @@ func (c *Client) PruneSnapshotsExcept(ctx context.Context, root, prefix string, 
 	for _, name := range pinned {
 		spare[root+"@"+name] = true
 	}
+	var failed []error
 	for _, m := range markers[:len(markers)-keep] {
 		if spare[m.name] {
 			continue
 		}
+		// 删不掉的跳过接着删：停在它上面，后面的旧标记会越攒越多。
 		if err := c.run(ctx, "destroy", "-r", m.name); err != nil {
-			return err
+			failed = append(failed, err)
 		}
 	}
-	return nil
+	return errors.Join(failed...)
 }
 
 // Replicate 在本机以一条 send|recv 管道把 root@snapshot 复制到 target，给定 base 时为增量。

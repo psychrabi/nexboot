@@ -152,8 +152,8 @@ func TestActivateTakesOverAndReportsWhenCatchUpFails(t *testing.T) {
 func TestActivateFillsInAnIncompleteCopyFromAPeer(t *testing.T) {
 	mine := "rep-100"
 	c, exits := newTakeoverController(t, &mine)
-	missing := []string{"配置「办公」"}
-	c.CatalogueIncomplete = func(context.Context) []string { return missing }
+	missing := []MissingDataset{{Ref: "img_office", Label: "配置「办公」"}}
+	c.CatalogueIncomplete = func(context.Context) []MissingDataset { return missing }
 	peer := &fakeWriter{status: PeerStatus{NodeID: "node-c", Role: "standby", Epoch: 5, Healthy: true, Mark: "rep-100"}}
 	c.Peer = peer
 	c.CatchUp = func(context.Context, PeerStatusClient, string) error { missing = nil; return nil }
@@ -347,5 +347,81 @@ func TestActivateStandsDownWhenTheWriterSaysItIsServing(t *testing.T) {
 	}
 	if _, ok := ReadTakeoverReport(c.ReportFile); ok {
 		t.Fatal("没有接任，不该留下接任记录")
+	}
+}
+
+type deadPeer struct{}
+
+func (deadPeer) Status(context.Context) (PeerStatus, error) { return PeerStatus{}, errors.New("no route to host") }
+
+// 写入者库里记着、谁的池里都没有的数据集（failover A4a）：写入者断网后，另一台备机也报告自己缺它，
+// 让给它补不齐。以前每台备机都觉得自己不完整、互相让位，九十多秒没人接任；现在不为它等，直接接任。
+func TestActivateDoesNotWaitForDatasetsNoAnsweringNodeHolds(t *testing.T) {
+	mine := "rep-100"
+	c, exits := newTakeoverController(t, &mine)
+	c.CatalogueIncomplete = func(context.Context) []MissingDataset {
+		return []MissingDataset{{Ref: "e2e-win_default", Label: "配置「default」"}}
+	}
+	other := &fakeWriter{status: PeerStatus{NodeID: "node-c", Role: "standby", Epoch: 5, Healthy: true, Mark: "rep-100",
+		Lacks: []string{"e2e-win_default"}}}
+	c.Peer = deadPeer{}
+	c.ClusterPeers = func(context.Context) []PeerStatusClient { return []PeerStatusClient{deadPeer{}, other} }
+	caught := 0
+	c.CatchUp = func(context.Context, PeerStatusClient, string) error { caught++; return nil }
+
+	if err := c.Activate(context.Background(), "keepalived master"); err != nil {
+		t.Fatalf("谁都没有的记录不该挡住接任: %v", err)
+	}
+	if len(*exits) != 1 || StepDownActive(c.StepDownFile, time.Minute) {
+		t.Fatalf("应直接接任、不让出 VIP: exits=%v", *exits)
+	}
+	if _, ok := ReadTakeoverReport(c.ReportFile); ok {
+		t.Fatal("没有缺任何别处有的东西，不该留下未追平的接任记录")
+	}
+}
+
+// 有节点持有本机缺的数据集（它没把它列进 Lacks）时照旧先让给它：那份数据只有它有。
+func TestActivateStillYieldsToAPeerThatHoldsWhatThisNodeLacks(t *testing.T) {
+	mine := "rep-100"
+	c, exits := newTakeoverController(t, &mine)
+	c.CatalogueIncomplete = func(context.Context) []MissingDataset {
+		return []MissingDataset{{Ref: "e2e-win_default", Label: "配置「default」"}, {Ref: "img_office", Label: "配置「办公」"}}
+	}
+	holder := &fakeWriter{status: PeerStatus{NodeID: "node-c", Role: "standby", Epoch: 5, Healthy: true, Mark: "rep-100",
+		Lacks: []string{"e2e-win_default"}}} // 它也缺 e2e-win_default，但有 img_office
+	c.Peer = holder
+	c.CatchUp = func(context.Context, PeerStatusClient, string) error { return nil }
+
+	err := c.Activate(context.Background(), "keepalived master")
+	if err == nil || len(*exits) != 0 || !StepDownActive(c.StepDownFile, time.Minute) {
+		t.Fatalf("应先让给持有 img_office 的节点: err=%v exits=%v", err, *exits)
+	}
+	if !strings.Contains(err.Error(), "配置「办公」") || strings.Contains(err.Error(), "配置「default」") {
+		t.Fatalf("让位理由只该列别处有的那项: %v", err)
+	}
+}
+
+// status 上报的 Lacks 只列数据集名，并短时缓存（每次都要打开库副本核对）。
+func TestLacksReportsRefsAndIsCached(t *testing.T) {
+	mine := "rep-100"
+	c, _ := newTakeoverController(t, &mine)
+	calls := 0
+	c.CatalogueIncomplete = func(context.Context) []MissingDataset {
+		calls++
+		return []MissingDataset{{Ref: "img_office", Label: "配置「办公」"}, {Label: "无名"}}
+	}
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	c.Now = func() time.Time { return now }
+	if got := c.Lacks(context.Background()); len(got) != 1 || got[0] != "img_office" {
+		t.Fatalf("got %v", got)
+	}
+	c.Lacks(context.Background())
+	if calls != 1 {
+		t.Fatalf("缓存期内不该再核对: %d", calls)
+	}
+	now = now.Add(lacksTTL + time.Second)
+	c.Lacks(context.Background())
+	if calls != 2 {
+		t.Fatalf("过期后应重新核对: %d", calls)
 	}
 }

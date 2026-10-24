@@ -10,8 +10,7 @@
 //	assets/    核心资产：镜像 image → 配置 config → 还原点 reduction 的 CoW 链，
 //	           分组 group / 数据盘 group_disk / 客户机 terminal（含批量导入导出）、
 //	           镜像体检 image_health、分组 IP 窗口 addresspool、删除引用保护 references
-//	adapt/     硬件适配：离线驱动注入 inject（auto-adapt.ps1、
-//	           mount-disks.ps1）、驱动中心 driver
+//	adapt/     驱动包资产与客户机开机脚本。
 //	ops/       存储运维：存储池 pool（zpool/缓存盘）、本地备份 backup（zfs send/recv）
 //	platform/  平台管理：登录 auth、用户 user、审计 audit、系统设置 settings、
 //	           systemd 服务 service、告警 alarm（规则依赖 ops 的池/备份状态）

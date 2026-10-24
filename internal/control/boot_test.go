@@ -14,6 +14,9 @@ import (
 	"github.com/tianwei/diskless/internal/boot"
 	"github.com/tianwei/diskless/internal/control/adapt"
 	"github.com/tianwei/diskless/internal/control/assets"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/identity"
+	"github.com/tianwei/diskless/internal/control/pe"
 	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
@@ -67,6 +70,16 @@ func TestBootServiceNetConfig(t *testing.T) {
 
 	if _, err := service.NetConfig(ctx, "11:22:33:44:55:66"); !errors.Is(err, ErrUnknownTerminal) {
 		t.Fatalf("unknown mac err = %v", err)
+	}
+	// 开机脚本据此决定是否关闭自动更新与睡眠；从未设置过时默认要管。
+	if !cfg.WindowsPolicy {
+		t.Fatalf("默认应要求开机脚本管 Windows 策略：%#v", cfg)
+	}
+	if err := st.SystemSettings().Upsert(ctx, domain.SystemSettings{ID: domain.SystemSettingsDefaultID, KeepWindowsDefaults: true}); err != nil {
+		t.Fatal(err)
+	}
+	if cfg, _ = service.NetConfig(ctx, "aa:bb:cc:dd:ee:ff"); cfg.WindowsPolicy {
+		t.Fatalf("关闭后不应再要求：%#v", cfg)
 	}
 }
 
@@ -591,6 +604,99 @@ func TestBootFallsBackToTheWriterWhenTheRemoteLacksTheSnapshot(t *testing.T) {
 	}
 }
 
+type fallbackIdentityStorage struct {
+	*fakeStorage
+	identityErr   error
+	identityCalls int
+}
+
+func (s *fallbackIdentityStorage) CreateIdentityLayer(context.Context, storage.IdentityLayerReq) error {
+	s.identityCalls++
+	return s.identityErr
+}
+func (s *fallbackIdentityStorage) DeleteIdentityLayer(context.Context, string) error { return nil }
+
+func TestBootFallbackBuildsIdentityOnWriterWhenRemoteHasNoSnapshot(t *testing.T) {
+	ctx := context.Background()
+	st := seedBootStore(t)
+	now := time.Now().UTC()
+	p := domain.HardwareProfile{ID: "vmx", Name: "vmxnet3", Fingerprint: "15ad:07b0", Manufacturer: "VMware", NICVendor: "15ad", NICDevice: "07b0", CreatedAt: now, UpdatedAt: now}
+	if err := st.HardwareProfiles().Create(ctx, p); err != nil {
+		t.Fatal(err)
+	}
+	term, _ := st.Terminals().Get(ctx, "term-1")
+	term.HardwareProfileID = p.ID
+	if err := st.Terminals().Update(ctx, term); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.ModelAdaptations().Create(ctx, domain.ModelAdaptation{ID: "adapt", ProfileID: p.ID, ConfigID: "cfg-1", ReductionID: "red-1", Source: domain.AdaptationAdapted, TemplateInstanceID: `PCI\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\OLD`, ClassKey: "0010", NetCfgInstanceID: "{11111111-2222-3333-4444-555555555555}", CreatedAt: now}); err != nil {
+		t.Fatal(err)
+	}
+	missing := fmt.Errorf("cannot open 'tank/nd/win_default@0': dataset does not exist")
+	placed := &fallbackIdentityStorage{fakeStorage: &fakeStorage{createErr: missing}, identityErr: missing}
+	writer := &fallbackIdentityStorage{fakeStorage: &fakeStorage{}}
+	ids := &identity.Service{Store: st, Storage: writer, NodeID: "writer"}
+	s := BootService{Store: st, Storage: writer, Builder: boot.Builder{}, Identity: ids,
+		Place: &place.Router{Store: st, NodeID: "placed", Local: placed, LocalPortal: "10.9.0.2"}}
+	if _, err := s.BuildBootScript(ctx, term.MAC); err != nil {
+		t.Fatal(err)
+	}
+	if writer.identityCalls != 1 || !writer.req.System.IdentityLayer {
+		t.Fatalf("writer identity rebuild=%d identityLayer=%v", writer.identityCalls, writer.req.System.IdentityLayer)
+	}
+	if alarm, err := st.Alarms().Get(ctx, "identity-"+term.ID); !errors.Is(err, store.ErrNotFound) {
+		t.Fatalf("本地回退已成功准备启动配置，不应留下远端准备失败警告：alarm=%+v err=%v", alarm, err)
+	}
+}
+
+func TestBootFinalIdentityPreparationFailureKeepsWarning(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		fallback bool
+	}{
+		{name: "no-fallback"},
+		{name: "writer-fallback-still-fails", fallback: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx := context.Background()
+			st := seedBootStore(t)
+			now := time.Now().UTC()
+			p := domain.HardwareProfile{ID: "vmx", Name: "vmxnet3", Fingerprint: "15ad:07b0", Manufacturer: "VMware", NICVendor: "15ad", NICDevice: "07b0", CreatedAt: now, UpdatedAt: now}
+			if err := st.HardwareProfiles().Create(ctx, p); err != nil {
+				t.Fatal(err)
+			}
+			term, _ := st.Terminals().Get(ctx, "term-1")
+			term.HardwareProfileID = p.ID
+			if err := st.Terminals().Update(ctx, term); err != nil {
+				t.Fatal(err)
+			}
+			if err := st.ModelAdaptations().Create(ctx, domain.ModelAdaptation{ID: "adapt", ProfileID: p.ID, ConfigID: "cfg-1", ReductionID: "red-1", Source: domain.AdaptationAdapted, TemplateInstanceID: `PCI\VEN_15AD&DEV_07B0&SUBSYS_07B015AD&REV_01\OLD`, ClassKey: "0010", NetCfgInstanceID: "{11111111-2222-3333-4444-555555555555}", CreatedAt: now}); err != nil {
+				t.Fatal(err)
+			}
+			finalErr := errors.New("本机启动网卡配置写入失败")
+			writer := &fallbackIdentityStorage{fakeStorage: &fakeStorage{}, identityErr: finalErr}
+			ids := &identity.Service{Store: st, Storage: writer, NodeID: "writer"}
+			service := BootService{Store: st, Storage: writer, Builder: boot.Builder{}, Identity: ids}
+			if tc.fallback {
+				missing := errors.New("cannot open 'tank/nd/win_default@0': dataset does not exist")
+				placed := &fallbackIdentityStorage{fakeStorage: &fakeStorage{createErr: missing}, identityErr: missing}
+				service.Place = &place.Router{Store: st, NodeID: "placed", Local: placed, LocalPortal: "10.9.0.2"}
+			}
+			script, err := service.BuildBootScript(ctx, term.MAC)
+			if err != nil || !strings.Contains(script, "sanhook") {
+				t.Fatalf("启动配置失败仍应沿用还原点启动：script=%s err=%v", script, err)
+			}
+			alarm, err := st.Alarms().Get(ctx, "identity-"+term.ID)
+			if err != nil || alarm.Status != "active" || alarm.Severity != "warn" || !strings.Contains(alarm.Message, finalErr.Error()) {
+				t.Fatalf("最终准备失败须保留警告并报告最终错误：alarm=%+v err=%v", alarm, err)
+			}
+			if strings.Contains(alarm.Message, "dataset does not exist") {
+				t.Fatalf("不应报告已经结束的远端准备错误：%s", alarm.Message)
+			}
+		})
+	}
+}
+
 // 落点节点缺快照、改由本机开机时，记录要改回本机；否则删除或移动会去远端清理，本机会话和克隆残留。
 func TestBootFallbackRecordsTheLocalNodeAsPlacement(t *testing.T) {
 	ctx := context.Background()
@@ -627,5 +733,114 @@ func TestBootFallbackRecordsTheLocalNodeAsPlacement(t *testing.T) {
 	term, err := st.Terminals().GetByMAC(ctx, storage.NormalizeMAC("aa:bb:cc:dd:ee:ff"))
 	if err != nil || term.StorageServerID == nil || *term.StorageServerID != "node-a" {
 		t.Fatalf("落点应记为实际提供盘的本机：%v err=%v", term.StorageServerID, err)
+	}
+}
+
+// 客户机有进行中的 PE 会话时，/boot 下发 WinPE 引导脚本，不碰它的系统盘。
+func TestBootServiceServesWinPEForPendingSession(t *testing.T) {
+	ctx := context.Background()
+	st := seedBootStore(t)
+	filesDir := t.TempDir()
+	now := time.Now().UTC()
+	for _, env := range []domain.WinPEEnv{
+		{ID: "winpe-img-1", Kind: domain.WinPEEnvImageWinRE, ImageID: "img-1", Version: "10.0.22621.1", Build: 22621, Dir: filepath.Join(filesDir, "winpe", "img-1"), Files: map[string]string{"boot.wim": "a", "boot.sdi": "b"}, CreatedAt: now},
+		{ID: "winpe-bcd", Kind: domain.WinPEEnvBCD, Dir: filepath.Join(filesDir, "winpe", "bcd"), Files: map[string]string{"BCD": "c"}, CreatedAt: now},
+	} {
+		if err := st.WinPEEnvs().Create(ctx, env); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sessions := pe.SessionService{Store: st, FilesDir: func(context.Context) (string, error) { return filesDir, nil }, ReportBase: "http://server-a:8080"}
+	if _, err := sessions.StartProbe(ctx, "term-1", pe.ProbeRequest{}); err != nil {
+		t.Fatal(err)
+	}
+	agent := &fakeStorage{}
+	service := BootService{Store: st, Storage: agent, Builder: boot.Builder{}, PE: sessions}
+
+	script, err := service.BuildBootScript(ctx, "aa:bb:cc:dd:ee:ff")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, "wimboot") || strings.Contains(script, "sanboot") {
+		t.Fatalf("script = %s", script)
+	}
+	if len(agent.calls) != 0 {
+		t.Fatalf("PE 会话期间不该动系统盘：%v", agent.calls)
+	}
+}
+
+// /boot 带来的硬件参数归并成机型挂到终端；建盘前记本次开机，开机脚本回调后记成功并写下「该机型用该还原点能开机」。
+func TestBootServiceTracksHardwareAndBootOutcome(t *testing.T) {
+	ctx := context.Background()
+	st := seedBootStore(t)
+	agent := &fakeStorage{}
+	service := BootService{Store: st, Storage: agent, Builder: boot.Builder{}, Hardware: &hwprofile.Service{Store: st}}
+
+	hints := hwprofile.Hints{Platform: "efi", BusID: "01:15:ad:07:b0", BusLoc: "1024", Manufacturer: "VMware, Inc.", Product: "VMware Virtual Platform"}
+	if err := service.RecordHardware(ctx, "aa:bb:cc:dd:ee:ff", hints); err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RecordHardware(ctx, "00:00:00:00:00:01", hints); !errors.Is(err, ErrUnknownTerminal) {
+		t.Fatalf("unknown mac err = %v", err)
+	}
+	term, _ := st.Terminals().Get(ctx, "term-1")
+	if term.HardwareProfileID == "" {
+		t.Fatalf("profile not attached: %+v", term)
+	}
+	if _, err := service.BuildBootScript(ctx, "aa:bb:cc:dd:ee:ff"); err != nil {
+		t.Fatal(err)
+	}
+	term, _ = st.Terminals().Get(ctx, "term-1")
+	if term.LastBootAt == nil || term.LastBootReductionID != "red-1" || term.LastBootOKAt != nil {
+		t.Fatalf("boot attempt not recorded: %+v", term)
+	}
+	if _, err := service.NetConfig(ctx, "aa:bb:cc:dd:ee:ff"); err != nil {
+		t.Fatal(err)
+	}
+	term, _ = st.Terminals().Get(ctx, "term-1")
+	if term.LastBootOKAt == nil {
+		t.Fatalf("boot success not recorded: %+v", term)
+	}
+	if ad, err := st.ModelAdaptations().ForProfileReduction(ctx, term.HardwareProfileID, "red-1"); err != nil || ad.Source != domain.AdaptationObserved {
+		t.Fatalf("observed adaptation = %+v err = %v", ad, err)
+	}
+}
+
+// 没接 Hardware 的服务（单测里的大多数）行为不变。
+func TestBootServiceWithoutHardwareTrackingStillBoots(t *testing.T) {
+	ctx := context.Background()
+	st := seedBootStore(t)
+	service := BootService{Store: st, Storage: &fakeStorage{}, Builder: boot.Builder{}}
+	if err := service.RecordHardware(ctx, "aa:bb:cc:dd:ee:ff", hwprofile.Hints{BusID: "01:15:ad:07:b0"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.BuildBootScript(ctx, "aa:bb:cc:dd:ee:ff"); err != nil {
+		t.Fatal(err)
+	}
+	term, _ := st.Terminals().Get(ctx, "term-1")
+	if term.HardwareProfileID != "" || term.LastBootAt != nil {
+		t.Fatalf("should not track: %+v", term)
+	}
+}
+
+func TestPlacementCannotEraseConcurrentBootSuccess(t *testing.T) {
+	ctx := context.Background()
+	st := seedBootStore(t)
+	old, err := st.Terminals().GetByMAC(ctx, "AABBCCDDEEFF")
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	fresh := old
+	fresh.LastBootAt = &now
+	fresh.LastBootOKAt = &now
+	fresh.LastBootReductionID = "verified-new"
+	if err := st.Terminals().Update(ctx, fresh); err != nil {
+		t.Fatal(err)
+	}
+	(BootService{Store: st}).recordPlacement(ctx, old, "another-node")
+	got, _ := st.Terminals().Get(ctx, old.ID)
+	if got.LastBootOKAt == nil || got.LastBootReductionID != "verified-new" || got.StorageServerID == nil || *got.StorageServerID != "another-node" {
+		t.Fatalf("placement overwrote unrelated ledger: %+v", got)
 	}
 }

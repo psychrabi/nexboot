@@ -104,22 +104,21 @@ var groupDiskCodec = entityCodec[domain.GroupDisk]{
 
 var terminalCodec = entityCodec[domain.Terminal]{
 	table:   "terminals",
-	columns: []string{"id", "name", "mac", "ip", "group_id", "is_super", "state", "online_since", "offline_at", "last_heartbeat_at", "pending_bundle_id", "pending_bundle_at", "storage_server_id"},
+	columns: []string{"id", "name", "mac", "ip", "group_id", "is_super", "state", "online_since", "offline_at", "last_heartbeat_at", "storage_server_id", "hardware_profile_id", "last_boot_at", "last_boot_reduction_id", "last_boot_ok_at", "last_boot_profile_id"},
 	values: func(v domain.Terminal) []any {
-		return []any{v.ID, v.Name, v.MAC, v.IP, v.GroupID, v.IsSuper, string(v.State), timePtrValue(v.OnlineSince), timePtrValue(v.OfflineAt), timePtrValue(v.LastHeartbeatAt), stringPtrValue(v.PendingBundleID), timePtrValue(v.PendingBundleAt), stringPtrValue(v.StorageServerID)}
+		return []any{v.ID, v.Name, v.MAC, v.IP, v.GroupID, v.IsSuper, string(v.State), timePtrValue(v.OnlineSince), timePtrValue(v.OfflineAt), timePtrValue(v.LastHeartbeatAt), stringPtrValue(v.StorageServerID), v.HardwareProfileID, timePtrValue(v.LastBootAt), v.LastBootReductionID, timePtrValue(v.LastBootOKAt), v.LastBootProfileID}
 	},
 	scan: func(s rowScanner) (domain.Terminal, error) {
 		var v domain.Terminal
 		var name, state string
-		var online, offline, heartbeat, pendingBundleID, pendingBundleAt, storageServer sql.NullString
-		if err := s.Scan(&v.ID, &name, &v.MAC, &v.IP, &v.GroupID, &v.IsSuper, &state, &online, &offline, &heartbeat, &pendingBundleID, &pendingBundleAt, &storageServer); err != nil {
+		var online, offline, heartbeat, storageServer, lastBoot, lastBootOK sql.NullString
+		if err := s.Scan(&v.ID, &name, &v.MAC, &v.IP, &v.GroupID, &v.IsSuper, &state, &online, &offline, &heartbeat, &storageServer, &v.HardwareProfileID, &lastBoot, &v.LastBootReductionID, &lastBootOK, &v.LastBootProfileID); err != nil {
 			return v, err
 		}
 		v.StorageServerID = stringPtr(storageServer)
 		var err error
 		v.Name = name
 		v.State = domain.TerminalState(state)
-		v.PendingBundleID = stringPtr(pendingBundleID)
 		if v.OnlineSince, err = timePtr(online); err != nil {
 			return v, err
 		}
@@ -129,7 +128,10 @@ var terminalCodec = entityCodec[domain.Terminal]{
 		if v.LastHeartbeatAt, err = timePtr(heartbeat); err != nil {
 			return v, err
 		}
-		v.PendingBundleAt, err = timePtr(pendingBundleAt)
+		if v.LastBootAt, err = timePtr(lastBoot); err != nil {
+			return v, err
+		}
+		v.LastBootOKAt, err = timePtr(lastBootOK)
 		return v, err
 	},
 }
@@ -328,13 +330,13 @@ var backupConfigCodec = entityCodec[domain.BackupConfig]{
 
 var systemSettingsCodec = entityCodec[domain.SystemSettings]{
 	table:   "system_settings",
-	columns: []string{"id", "import_dir", "client_iface", "allow_cross_subnet", "replication_rate_mbps", "data_pool"},
+	columns: []string{"id", "import_dir", "client_iface", "allow_cross_subnet", "replication_rate_mbps", "data_pool", "keep_windows_defaults"},
 	values: func(v domain.SystemSettings) []any {
 		var rate any
 		if v.ReplicationRateMBPS != nil {
 			rate = *v.ReplicationRateMBPS
 		}
-		return []any{v.ID, v.ImportDir, v.ClientIface, v.AllowCrossSubnet, rate, v.DataPool}
+		return []any{v.ID, v.ImportDir, v.ClientIface, v.AllowCrossSubnet, rate, v.DataPool, v.KeepWindowsDefaults}
 	},
 	scan: func(s rowScanner) (domain.SystemSettings, error) {
 		var v domain.SystemSettings
@@ -342,7 +344,7 @@ var systemSettingsCodec = entityCodec[domain.SystemSettings]{
 		// data_pool 是可空列（迁移 0040 添加时无默认值），旧行读回 NULL；扫进普通 string 会报
 		// "converting NULL to string is unsupported" 并让所有设置读取失败。与 replication_rate_mbps 一样把 NULL 当作 ""。
 		var dataPool sql.NullString
-		err := s.Scan(&v.ID, &v.ImportDir, &v.ClientIface, &v.AllowCrossSubnet, &rate, &dataPool)
+		err := s.Scan(&v.ID, &v.ImportDir, &v.ClientIface, &v.AllowCrossSubnet, &rate, &dataPool, &v.KeepWindowsDefaults)
 		if rate.Valid {
 			n := int(rate.Int64)
 			v.ReplicationRateMBPS = &n

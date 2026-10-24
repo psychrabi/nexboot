@@ -44,7 +44,7 @@ Options:
   --pool NAME                    ZFS pool used by ndiskless. Default: tank.
   --addr ADDR                    HTTP listen address. Default: :8080.
   --boot-url URL                 iPXE HTTP boot URL. Default: auto-detect from host IPv4 and --addr.
-  --import-dir DIR               Server-side ZFS send file import directory. Default: /var/lib/ndiskless/imports.
+  --import-dir DIR               Ignored (accepted for old scripts): imports now live in <pool>/nd/files/imports on each node.
   --bootstrap-user USER          Initial admin user. Default: admin.
   --bootstrap-password PASSWORD  Initial admin password. Required.
   --create-pool NAME             Create this ZFS pool if missing.
@@ -133,7 +133,7 @@ parse_args() {
       --pool) shift; POOL=${1:-} ;;
       --addr) shift; ADDR=${1:-} ;;
       --boot-url) shift; BOOT_URL=${1:-} ;;
-      --import-dir) shift; IMPORT_DIR=${1:-} ;;
+      --import-dir) shift; warn "--import-dir ${1:-} is ignored: uploads and imports now live in the storage pool's imports directory (<pool>/nd/files/imports)" ;;
       --bootstrap-user) shift; BOOTSTRAP_USER=${1:-} ;;
       --bootstrap-password) shift; BOOTSTRAP_PASSWORD=${1:-} ;;
       --create-pool) shift; CREATE_POOL=${1:-} ;;
@@ -231,7 +231,7 @@ install_deps() {
   # dnsmasq-utils 提供 dhcp_release，用于终端删除、改 IP、换组后释放旧租约。
   # 缺了它 dnsmasq 会因旧租约拒发保留地址（"not using configured address X because it is leased to Y"），
   # 但不会让任何操作失败。
-  apt-get -o DPkg::Lock::Timeout=600 install -y curl dnsmasq dnsmasq-utils qemu-utils targetcli-fb zfsutils-linux
+  apt-get -o DPkg::Lock::Timeout=600 install -y curl dnsmasq dnsmasq-utils qemu-utils targetcli-fb zfsutils-linux libhivex-bin libwin-hivex-perl p7zip-full wimtools openssl ubuntu-keyring
 
   if ! modprobe zfs >/dev/null 2>&1; then
     log "zfs module missing; installing dkms headers"
@@ -335,7 +335,7 @@ detect_boot_url() {
 # ensure_dirs 创建 write_env 和服务需要的状态目录。--provisioned 下没有 install_binary 建目录，
 # 缺 /etc/ndiskless 会让 write_env 失败。幂等。
 ensure_dirs() {
-  install -d -m 0755 "$DATA_DIR" "$ENV_DIR" "$IMPORT_DIR"
+  install -d -m 0755 "$DATA_DIR" "$ENV_DIR"
 }
 
 # prepare_runtime 做 install_deps 中与 apt 无关的主机准备：加载并持久化 LIO 模块、启用池自动导入、
@@ -353,9 +353,7 @@ prepare_runtime() {
 install_binary() {
   [ -n "$BINARY" ] || die "--binary is required"
   [ -f "$BINARY" ] || die "binary not found: $BINARY"
-  [ -n "$IMPORT_DIR" ] || die "--import-dir is required"
-  [[ "$IMPORT_DIR" = /* ]] || die "--import-dir must be absolute"
-  install -d -m 0755 "$PREFIX" "$DATA_DIR" "$ENV_DIR" "$IMPORT_DIR"
+  install -d -m 0755 "$PREFIX" "$DATA_DIR" "$ENV_DIR"
   if [ -f "$PREFIX/$APP" ]; then
     cp -a "$PREFIX/$APP" "$PREFIX/$APP.$(date +%Y%m%d%H%M%S).bak"
   fi

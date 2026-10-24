@@ -96,7 +96,7 @@ function PageAlarms() {
           </div>
         </div>
         <div style={{ overflowX: "auto" }}><table className="t">
-          <thead><tr><th style={{ width: 36 }}><input type="checkbox" aria-label="选择本页全部告警" checked={allOnPage} onChange={e => setSelected(e.target.checked ? items.map(a => a.ID) : [])}/></th><th>级别</th><th>类型</th><th>资源</th><th>消息</th><th>时间</th><th>状态</th><th className="t-actions"></th></tr></thead>
+          <thead><tr><th style={{ width: 36 }}><input type="checkbox" aria-label="选择本页全部告警" checked={allOnPage} onChange={e => setSelected(e.target.checked ? items.map(a => a.ID) : [])}/></th><th>级别</th><th>类型</th><th>资源</th><th>消息</th><th>首次发现</th><th>状态</th><th className="t-actions"></th></tr></thead>
           <tbody>
             {items.map(a => {
               const sev = SEV[a.Severity] || SEV.info;
@@ -111,9 +111,10 @@ function PageAlarms() {
                   <td className="muted" style={{ fontSize: 12, minWidth: 160 }} title={a.Message || ""}>
                     <div style={{ display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical", overflow: "hidden" }}>{a.Message || "—"}</div>
                   </td>
-                  <td className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(a.UpdatedAt || a.CreatedAt)}</td>
+                  <td className="mono muted" style={{ fontSize: 12 }}>{fmtDateTime(a.CreatedAt || a.UpdatedAt)}</td>
                   <td><span className={`chip ${st.c}`}>{a.Status !== "active" && <Icons.Check size={10}/>}{st.t}</span></td>
                   <td className="t-actions"><div>
+                    {a.Status !== "recovered" && a.ModelAdapt && <button className="btn" onClick={() => store.goto('models', { profileId: a.ModelAdapt.ProfileID, adapt: true, sourceConfigId: a.ModelAdapt.ConfigID, sourceTerminalId: a.ModelAdapt.TerminalID })}>完整适配</button>}
                     {a.Status === "active" && <button className="btn" style={{ padding: "3px 8px" }} onClick={() => ack(a)}>确认</button>}
                   </div></td>
                 </tr>

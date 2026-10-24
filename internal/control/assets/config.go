@@ -4,10 +4,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
+	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/control/tasks"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
@@ -29,6 +32,7 @@ type ConfigService struct {
 	Storage storage.StorageAgent
 	Now     func() time.Time
 	Async   bool
+	Place   *place.Router
 	// Replicating 返回正在接收这些数据集（或整个目录）的备机；nil 表示没有。
 	// 发送会占住数据集数分钟，期间删除必然失败。
 	Replicating func(ids ...string) []string
@@ -122,18 +126,21 @@ func (s ConfigService) executeCreateFromImage(ctx context.Context, task domain.T
 	if cfg.Name == "" {
 		cfg.Name = name
 	}
-	return s.storeNewConfig(ctx, task, cfg, created.Reduction)
+	return s.storeNewConfig(ctx, task, cfg, created.Reduction, storage.ReductionID(imageID, storage.BaselineReduction))
 }
 
-// storeNewConfig 在一个事务里写入配置及其基线还原点：缺还原点行的配置无法绑定，两者不能只落一半。
+// storeNewConfig 在一个事务里写入配置、基线还原点及来源模板，不能只落一半。
 // 失败时销毁数据集，快照随之删除。
-func (s ConfigService) storeNewConfig(ctx context.Context, task domain.Task, cfg domain.Config, reduction domain.Reduction) (domain.Config, error) {
+func (s ConfigService) storeNewConfig(ctx context.Context, task domain.Task, cfg domain.Config, reduction domain.Reduction, sourceReductionID string) (domain.Config, error) {
 	reduction.ConfigID = cfg.ID
 	if err := s.Store.Tx(ctx, func(tx store.Store) error {
 		if err := tx.Configs().Create(ctx, cfg); err != nil {
 			return err
 		}
 		if err := tx.Reductions().Create(ctx, reduction); err != nil {
+			return err
+		}
+		if err := hwprofile.InheritFrom(ctx, tx, sourceReductionID, reduction, time.Now().UTC()); err != nil {
 			return err
 		}
 		return s.runner().Finish(ctx, tx, task, cfg.ID)
@@ -174,11 +181,10 @@ func (s ConfigService) CreateFromConfig(ctx context.Context, sourceConfigID stri
 	if reduction.ConfigID != sourceConfigID {
 		return ConfigOperationResult{}, ErrReductionMismatch
 	}
-	snapshotName := strings.TrimPrefix(reduction.Name, "@")
 	var cfg domain.Config
 	task, err := claim.Run(ctx, s.runner(), domain.TaskTypeCreateConfig, sourceConfigID, func(ctx context.Context, task domain.Task) error {
 		var err error
-		cfg, err = s.executeCreateFromConfig(ctx, task, sourceConfig, req.Name, snapshotName)
+		cfg, err = s.executeCreateFromConfig(ctx, task, sourceConfig, req.Name, reduction)
 		return err
 	})
 	if err != nil {
@@ -190,9 +196,10 @@ func (s ConfigService) CreateFromConfig(ctx context.Context, sourceConfigID stri
 	return ConfigOperationResult{TaskID: task.ID, Config: cfg}, nil
 }
 
-func (s ConfigService) executeCreateFromConfig(ctx context.Context, task domain.Task, sourceConfig domain.Config, name string, snapshotName string) (domain.Config, error) {
+func (s ConfigService) executeCreateFromConfig(ctx context.Context, task domain.Task, sourceConfig domain.Config, name string, sourceReduction domain.Reduction) (domain.Config, error) {
 	// 池与数据库在此一起变更，中间不得插入复制轮次（见 storage.ChangeCatalogue）。
 	defer storage.ChangeCatalogue()()
+	snapshotName := strings.TrimPrefix(sourceReduction.Name, "@")
 	created, err := s.Storage.CreateConfig(ctx, sourceConfig.ID, name, &snapshotName)
 	if err != nil {
 		return domain.Config{}, err
@@ -200,7 +207,7 @@ func (s ConfigService) executeCreateFromConfig(ctx context.Context, task domain.
 	cfg := created.Config
 	cfg.ImageID = sourceConfig.ImageID
 	cfg.Name = name
-	return s.storeNewConfig(ctx, task, cfg, created.Reduction)
+	return s.storeNewConfig(ctx, task, cfg, created.Reduction, sourceReduction.ID)
 }
 
 func (s ConfigService) List(ctx context.Context, imageID string) (ConfigListResult, error) {
@@ -240,10 +247,25 @@ func (s ConfigService) Delete(ctx context.Context, configID string) (ConfigTaskR
 	if err := s.ensureConfigNotInUse(ctx, configID); err != nil {
 		return ConfigTaskResult{}, err
 	}
-	if err := s.ensureNoDependents(ctx, configID, nil); err != nil {
+	idle, err := s.ensureNoDependents(ctx, configID, nil)
+	if err != nil {
 		return ConfigTaskResult{}, err
 	}
 	if err := s.catalogueBusy("删除配置", configID); err != nil {
+		return ConfigTaskResult{}, err
+	}
+	reductions, err := s.Store.Reductions().ListByConfig(ctx, configID)
+	if err != nil {
+		return ConfigTaskResult{}, err
+	}
+	layers, err := nodeLayers(ctx, s.Store, reductionIDsOf(reductions), ErrConfigHasDependents)
+	if err != nil {
+		return ConfigTaskResult{}, err
+	}
+	if err := clearIdentityCaches(ctx, s.Storage, idle, configID); err != nil {
+		return ConfigTaskResult{}, err
+	}
+	if err := clearNodeLayers(ctx, s.Place, layers); err != nil {
 		return ConfigTaskResult{}, err
 	}
 	task, err := claim.Run(ctx, s.runner(), domain.TaskTypeDeleteConfig, configID, func(ctx context.Context, task domain.Task) error {
@@ -268,6 +290,9 @@ func (s ConfigService) executeDelete(ctx context.Context, task domain.Task, conf
 	}
 	return s.Store.Tx(ctx, func(tx store.Store) error {
 		if err := tx.Reductions().DeleteByConfig(ctx, configID); err != nil {
+			return err
+		}
+		if err := tx.ModelAdaptations().DeleteByConfig(ctx, configID); err != nil {
 			return err
 		}
 		if err := tx.Configs().Delete(ctx, configID); err != nil {
@@ -403,9 +428,29 @@ func (s ConfigService) mergeInto(ctx context.Context, cfg domain.Config, rollbac
 	}
 	// 旧镜像数据集也会被销毁。已 promote 过的合并重试时，镜像反挂在保留配置下，不能把它当成阻塞项。
 	doomed[cfg.ImageID] = true
-	if err := s.ensureNoDependents(ctx, configID, doomed); err != nil {
+	idle, err := s.ensureNoDependents(ctx, configID, doomed)
+	if err != nil {
 		return ConfigTaskResult{}, err
 	}
+	var affected []string
+	for _, c := range configs {
+		reductions, err := s.Store.Reductions().ListByConfig(ctx, c.ID)
+		if err != nil {
+			return ConfigTaskResult{}, err
+		}
+		affected = append(affected, reductionIDsOf(reductions)...)
+	}
+	layers, err := nodeLayers(ctx, s.Store, affected, ErrConfigHasDependents)
+	if err != nil {
+		return ConfigTaskResult{}, err
+	}
+	if err := clearIdentityCaches(ctx, s.Storage, idle, configID); err != nil {
+		return ConfigTaskResult{}, err
+	}
+	if err := clearNodeLayers(ctx, s.Place, layers); err != nil {
+		return ConfigTaskResult{}, err
+	}
+
 	repoint := ix.groupsUsingConfig(configID)
 	task, err := claim.Run(ctx, s.runner(), domain.TaskTypeMergeConfig, configID, func(ctx context.Context, task domain.Task) error {
 		return s.executeMerge(ctx, task, cfg.ImageID, configID, deleteIDs, keptNames, rollbackTo, repoint)
@@ -436,6 +481,9 @@ func (s ConfigService) executeMerge(ctx context.Context, task domain.Task, image
 			if err := tx.Reductions().DeleteByConfig(ctx, id); err != nil {
 				return err
 			}
+			if err := tx.ModelAdaptations().DeleteByConfig(ctx, id); err != nil {
+				return err
+			}
 			if err := tx.Configs().Delete(ctx, id); err != nil {
 				return err
 			}
@@ -446,6 +494,8 @@ func (s ConfigService) executeMerge(ctx context.Context, task domain.Task, image
 		if err != nil {
 			return err
 		}
+		// 新基线的内容就是合并进去的那个点（保留的点里最新的一个），适配记录随之过去。
+		mergedFrom := latestNamed(existing, keptNames)
 		for _, item := range existing {
 			stale := item
 			stale.Name = item.Name + "~merged"
@@ -453,7 +503,7 @@ func (s ConfigService) executeMerge(ctx context.Context, task domain.Task, image
 				return err
 			}
 		}
-		// 基线 ID 合并前后都是「<config>_0」，可能与旧行重合，所以用 upsert。
+		// 基线 ID 与新建镜像统一为「<image>_0」，可能与旧行重合，所以用 upsert。
 		if _, err := tx.Reductions().Get(ctx, baseline.ID); err == nil {
 			if err := tx.Reductions().Update(ctx, baseline); err != nil {
 				return err
@@ -464,6 +514,14 @@ func (s ConfigService) executeMerge(ctx context.Context, task domain.Task, image
 			}
 		} else {
 			return err
+		}
+		if mergedFrom != nil && mergedFrom.ID != baseline.ID {
+			if err := tx.ModelAdaptations().DeleteByReduction(ctx, baseline.ID); err != nil {
+				return err
+			}
+			if err := hwprofile.InheritFrom(ctx, tx, mergedFrom.ID, baseline, time.Now().UTC()); err != nil {
+				return err
+			}
 		}
 		for _, group := range repoint {
 			if group.SystemReductionID == baseline.ID {
@@ -481,12 +539,30 @@ func (s ConfigService) executeMerge(ctx context.Context, task domain.Task, image
 			if err := tx.Reductions().Delete(ctx, item.ID); err != nil {
 				return err
 			}
+			if err := tx.ModelAdaptations().DeleteByReduction(ctx, item.ID); err != nil {
+				return err
+			}
 		}
 		if err := setConfigCurrent(ctx, tx, configID, baseline.ID); err != nil {
 			return err
 		}
 		return s.runner().Finish(ctx, tx, task, configID)
 	})
+}
+
+// latestNamed 在 reductions 里找名字属于 names、创建最晚的那个；没有时为 nil。
+func latestNamed(reductions []domain.Reduction, names []string) *domain.Reduction {
+	var latest *domain.Reduction
+	for i := range reductions {
+		r := &reductions[i]
+		if !slices.Contains(names, r.Name) {
+			continue
+		}
+		if latest == nil || r.CreatedAt.After(latest.CreatedAt) {
+			latest = r
+		}
+	}
+	return latest
 }
 
 func (s ConfigService) runner() tasks.Runner {
@@ -508,19 +584,23 @@ func (s ConfigService) ensureConfigNameUnique(ctx context.Context, imageID, name
 
 // ensureNoDependents 向池查询是否还有克隆依赖本配置的快照。数据库答不了：fork 不记来源，
 // 孤儿客户机克隆根本没有行。ignore 是本操作会先销毁、因而不算阻塞的数据集。
-func (s ConfigService) ensureNoDependents(ctx context.Context, configID string, ignore map[string]bool) error {
+// 返回关机客户机的身份层，由调用方在其余检查通过后清掉。
+func (s ConfigService) ensureNoDependents(ctx context.Context, configID string, ignore map[string]bool) ([]string, error) {
 	dependents, err := s.Storage.ConfigDependents(ctx, configID)
 	if err != nil {
 		if errors.Is(err, storage.ErrNotImplemented) {
-			return nil
+			return nil, nil
 		}
-		return err
+		return nil, err
 	}
-	blockers := filterDependents(dependents, ignore)
-	if len(blockers) == 0 {
-		return nil
+	idle, blockers, err := splitIdentityCaches(ctx, s.Store, s.Storage, filterDependents(dependents, ignore))
+	if err != nil {
+		return nil, err
 	}
-	return blocked(ErrConfigHasDependents, explainBlockers(ctx, s.Store, blockers, "该配置"))
+	if len(blockers) > 0 {
+		return nil, blocked(ErrConfigHasDependents, explainBlockers(ctx, s.Store, blockers, "该配置"))
+	}
+	return idle, nil
 }
 
 // ensureNotLastConfig 保证镜像至少留一个配置，否则无法分配给分组，也无法做健康检查。

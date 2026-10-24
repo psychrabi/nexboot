@@ -3,10 +3,10 @@
 # 阻断项只有 Windows/System32 和 drivers/msiscsi.sys（见 internal/storage/local/inspect.go 的
 # inspectWindows）；网卡 INF 和 Boot/BCD 只是 WARN，一并放进去让体检全绿。
 # 它不能真正启动，那两个矩阵也不依赖镜像内容。1G 稀疏文件，实占几 MB，省得宿主机多备 60G。
-# 用法：sudo ./mkwin.sh /var/lib/ndiskless/imports/winmin.raw 1G
+# 用法：sudo ./mkwin.sh /ndiskless/tank/nd/files/imports/winmin.raw 1G（导入目录见 /api/runtime 的 import_dir）
 # 依赖：parted、ntfs-3g（mkfs.ntfs）、losetup
 set -euo pipefail
-OUT=${1:-/var/lib/ndiskless/imports/winmin.raw}
+OUT=${1:?用法：mkwin.sh <导入目录>/winmin.raw [大小]}
 SIZE=${2:-1G}
 [ "$(id -u)" -eq 0 ] || { echo "要 root：挂载与 losetup 都需要" >&2; exit 1; }
 for c in parted mkfs.ntfs losetup; do

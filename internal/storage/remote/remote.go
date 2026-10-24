@@ -11,6 +11,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"regexp"
 	"strings"
 	"time"
 
@@ -19,8 +20,10 @@ import (
 
 // Handler 是节点侧服务端。每个集群节点不论角色都要运行：服务放置在本节点的客户机是本机工作，不只是主节点的事。
 type Handler struct {
-	Agent storage.ClientHostAgent
-	Token string
+	Agent               storage.ClientHostAgent
+	Token               string
+	NodeID              string
+	CleanupInstallation func(context.Context, storage.InstallationCleanupReq) error
 }
 
 // wireError 承载跨节点的类型化错误：kind 告诉客户端还原成哪种错误，其余信息放在字段里。
@@ -28,6 +31,9 @@ type wireError struct {
 	Error string `json:"error"`
 	Kind  string `json:"kind,omitempty"`
 	LUN   int    `json:"lun,omitempty"`
+	// super_hive_unsafe 的拒绝原因，见 storage.SuperHiveUnsafe。
+	FastStartup bool   `json:"fast_startup,omitempty"`
+	Reason      string `json:"reason,omitempty"`
 }
 
 func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
@@ -46,6 +52,23 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err error
 	)
 	switch method {
+	case "cleanup-installation-resources":
+		var req storage.InstallationCleanupReq
+		decoder := json.NewDecoder(http.MaxBytesReader(w, r.Body, 64<<10))
+		decoder.DisallowUnknownFields()
+		if err := decoder.Decode(&req); err != nil || h.NodeID == "" || req.NodeID != h.NodeID ||
+			!regexp.MustCompile(`^install-[0-9a-f]{16}$`).MatchString(req.ID) ||
+			!regexp.MustCompile(`^[0-9A-F]{12}$`).MatchString(req.MAC) ||
+			(req.ImageID != "" && req.ImageID != "iso_"+strings.TrimPrefix(req.ID, "install-")) {
+			http.Error(w, "invalid installation cleanup target", http.StatusBadRequest)
+			return
+		}
+		if h.CleanupInstallation == nil {
+			err = storage.ErrNotImplemented
+		} else {
+			err = h.CleanupInstallation(ctx, req)
+			out = struct{}{}
+		}
 	case "create-client-lun":
 		var req storage.ClientReq
 		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
@@ -83,18 +106,51 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
 			out, err = h.Agent.SuperStop(ctx, req)
 		}
-	case "prepare-super-adaptation":
-		var req storage.SuperAdaptationReq
+	case "create-identity-layer":
+		var req storage.IdentityLayerReq
 		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
-			err = h.Agent.PrepareSuperAdaptation(ctx, req)
-			out = struct{}{}
+			if agent, ok := h.Agent.(storage.IdentityHostAgent); ok {
+				err = agent.CreateIdentityLayer(ctx, req)
+				out = struct{}{}
+			} else {
+				err = storage.ErrNotImplemented
+			}
 		}
-	case "read-super-adaptation-result":
+	case "delete-identity-layer":
 		var req struct {
 			MAC string `json:"mac"`
 		}
 		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
-			out, err = h.Agent.ReadSuperAdaptationResult(ctx, req.MAC)
+			if agent, ok := h.Agent.(storage.IdentityHostAgent); ok {
+				err = agent.DeleteIdentityLayer(ctx, req.MAC)
+				out = struct{}{}
+			} else {
+				err = storage.ErrNotImplemented
+			}
+		}
+	case "release-identity-layers":
+		var req struct {
+			Sources []string `json:"sources"`
+		}
+		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if agent, ok := h.Agent.(storage.IdentityLayerReleaser); ok {
+				out, err = agent.ReleaseIdentityLayers(ctx, req.Sources)
+			} else {
+				err = storage.ErrNotImplemented
+			}
+		}
+	case "delete-aside-image":
+		var req struct {
+			ImageID   string   `json:"image_id"`
+			ConfigIDs []string `json:"config_ids"`
+		}
+		if err = json.NewDecoder(r.Body).Decode(&req); err == nil {
+			if agent, ok := h.Agent.(storage.AsideHostAgent); ok {
+				err = agent.DeleteAsideImage(ctx, req.ImageID, req.ConfigIDs)
+				out = struct{}{}
+			} else {
+				err = storage.ErrNotImplemented
+			}
 		}
 	case "space-usage":
 		out, err = h.Agent.SpaceUsage(ctx)
@@ -108,6 +164,11 @@ func (h Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		if errors.As(err, &missing) {
 			we.Kind = "super_session_missing"
 			we.LUN = missing.LUN
+		}
+		var unsafe storage.SuperHiveUnsafe
+		if errors.As(err, &unsafe) {
+			we.Kind = "super_hive_unsafe"
+			we.FastStartup, we.Reason = unsafe.FastStartup, unsafe.Reason
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusInternalServerError)
@@ -156,6 +217,9 @@ func (c Client) call(ctx context.Context, method string, in, dst any) error {
 			if we.Kind == "super_session_missing" {
 				return storage.SuperSessionMissing{LUN: we.LUN}
 			}
+			if we.Kind == "super_hive_unsafe" {
+				return storage.SuperHiveUnsafe{FastStartup: we.FastStartup, Reason: we.Reason}
+			}
 			return errors.New(we.Error)
 		}
 		return fmt.Errorf("storage node %s: %s", c.BaseURL, resp.Status)
@@ -178,6 +242,10 @@ func (c Client) CleanupClientClones(ctx context.Context, pool string, macs []str
 		MACs []string `json:"macs"`
 	}{pool, macs}
 	return c.call(ctx, "cleanup-client-clones", in, nil)
+}
+
+func (c Client) CleanupInstallationResources(ctx context.Context, req storage.InstallationCleanupReq) error {
+	return c.call(ctx, "cleanup-installation-resources", req, nil)
 }
 
 func (c Client) ReclaimIdleClientClones(ctx context.Context, mac string, decidedAt time.Time) (bool, error) {
@@ -214,21 +282,32 @@ func (c Client) SuperStop(ctx context.Context, req storage.SuperStopReq) (storag
 	return out, err
 }
 
-func (c Client) PrepareSuperAdaptation(ctx context.Context, req storage.SuperAdaptationReq) error {
-	return c.call(ctx, "prepare-super-adaptation", req, nil)
-}
-
-func (c Client) ReadSuperAdaptationResult(ctx context.Context, mac string) (storage.SuperAdaptationResult, error) {
-	in := struct {
-		MAC string `json:"mac"`
-	}{mac}
-	var out storage.SuperAdaptationResult
-	err := c.call(ctx, "read-super-adaptation-result", in, &out)
-	return out, err
-}
-
 func (c Client) SpaceUsage(ctx context.Context) (storage.SpaceUsage, error) {
 	var out storage.SpaceUsage
 	err := c.call(ctx, "space-usage", struct{}{}, &out)
 	return out, err
+}
+
+func (c Client) CreateIdentityLayer(ctx context.Context, req storage.IdentityLayerReq) error {
+	return c.call(ctx, "create-identity-layer", req, nil)
+}
+func (c Client) DeleteIdentityLayer(ctx context.Context, mac string) error {
+	return c.call(ctx, "delete-identity-layer", struct {
+		MAC string `json:"mac"`
+	}{mac}, nil)
+}
+
+func (c Client) ReleaseIdentityLayers(ctx context.Context, sources []string) ([]string, error) {
+	var released []string
+	err := c.call(ctx, "release-identity-layers", struct {
+		Sources []string `json:"sources"`
+	}{sources}, &released)
+	return released, err
+}
+
+func (c Client) DeleteAsideImage(ctx context.Context, imageID string, configIDs []string) error {
+	return c.call(ctx, "delete-aside-image", struct {
+		ImageID   string   `json:"image_id"`
+		ConfigIDs []string `json:"config_ids"`
+	}{imageID, configIDs}, nil)
 }

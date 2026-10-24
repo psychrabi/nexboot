@@ -4,11 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
+	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
+	"github.com/tianwei/diskless/internal/storage/zfs"
 	"github.com/tianwei/diskless/internal/store"
 )
 
@@ -25,6 +29,9 @@ func referencedBy[T any](list []T, id string, key func(T) string) bool {
 // EnsureSuperAvailable 在另一台超管机已占用同一配置时拒绝启用超管，否则两台的保存会互相覆盖。
 // 只读数据库，TerminalService（新建/更新）和 BootService（开机）直接调用。
 func EnsureSuperAvailable(ctx context.Context, st store.Store, target domain.Terminal) error {
+	if err := ensureNoInstallation(ctx, st, target.MAC); err != nil {
+		return err
+	}
 	groups, err := st.Groups().List(ctx)
 	if err != nil {
 		return err
@@ -342,7 +349,7 @@ func blocked(sentinel error, msg string) error {
 // 运行中的机器要关），每类各用一句，不能笼统写成「请删除这些」。subject 是被阻塞的对象，如「该配置」。
 func explainBlockers(ctx context.Context, st store.Store, datasets []string, subject string) string {
 	var inspecting, exporting bool
-	var configs, clients, supers, others []string
+	var configs, clients, supers, superModes, identities, others []string
 	for _, dataset := range datasets {
 		carrier := storage.Classify(storage.DatasetID(dataset))
 		switch carrier.Kind {
@@ -352,6 +359,15 @@ func explainBlockers(ctx context.Context, st store.Store, datasets []string, sub
 			exporting = true
 		case storage.CarrierSuper:
 			supers = append(supers, formatMAC(carrier.MAC))
+		case storage.CarrierAdapt:
+			others = append(others, "客户机 "+formatMAC(carrier.MAC)+" 的机型适配盘")
+		case storage.CarrierIdentity:
+			// 能清的身份层已由 splitIdentityCaches 挑走；超管机的不能清，清理会连带超管盘。
+			if t, err := st.Terminals().GetByMAC(ctx, carrier.MAC); err == nil && t.IsSuper {
+				superModes = append(superModes, formatMAC(carrier.MAC))
+			} else {
+				identities = append(identities, formatMAC(carrier.MAC))
+			}
 		case storage.CarrierClient:
 			clients = append(clients, formatMAC(carrier.MAC))
 		default:
@@ -379,10 +395,167 @@ func explainBlockers(ctx context.Context, st store.Store, datasets []string, sub
 	if len(supers) > 0 {
 		parts = append(parts, "请先关闭正在使用的超管机："+strings.Join(dedupe(supers), "、"))
 	}
+	if len(identities) > 0 {
+		parts = append(parts, "请先关闭这些客户机，关机满 5 分钟后重试："+strings.Join(dedupe(identities), "、"))
+	}
+	if len(superModes) > 0 {
+		parts = append(parts, "请先结束超管机的超管模式（保存或放弃）："+strings.Join(dedupe(superModes), "、"))
+	}
 	if len(others) > 0 {
 		parts = append(parts, "请先清理仍在占用的对象："+strings.Join(dedupe(others), "、"))
 	}
 	return strings.Join(parts, "；")
+}
+
+// splitIdentityCaches 从占用数据集里分出关机客户机的身份层：身份层是开机时按还原点生成的缓存，
+// 删掉后下次开机重建，不该挡住删除。可能还在用的机器留在 rest 里照常拦。
+func splitIdentityCaches(ctx context.Context, st store.Store, agent storage.StorageAgent, datasets []string) (macs, rest []string, err error) {
+	if _, ok := agent.(storage.IdentityHostAgent); !ok {
+		return nil, datasets, nil
+	}
+	for _, dataset := range datasets {
+		carrier := storage.Classify(storage.DatasetID(dataset))
+		if carrier.Kind != storage.CarrierIdentity {
+			rest = append(rest, dataset)
+			continue
+		}
+		idle, err := terminalIdle(ctx, st, carrier.MAC)
+		if err != nil {
+			return nil, nil, err
+		}
+		if idle {
+			macs = append(macs, carrier.MAC)
+		} else {
+			rest = append(rest, dataset)
+		}
+	}
+	return macs, rest, nil
+}
+
+// terminalIdle 判断能否清这台机器的身份层。清理会拆它的克隆，所以与离线回收守同一条规则：
+// 普通机、关机满 cloneGracePeriod、其间没开过机、没有 WinPE 任务。没连上过的机器没有关机时间，只看开机；
+// 库里没有这台机器时它不可能在用这层。
+func terminalIdle(ctx context.Context, st store.Store, mac string) (bool, error) {
+	t, err := st.Terminals().GetByMAC(ctx, mac)
+	if errs.IsNotFound(err) {
+		return true, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	now := time.Now()
+	if t.IsSuper || t.State != domain.TerminalStateOffline {
+		return false, nil
+	}
+	if t.OfflineAt != nil && now.Sub(*t.OfflineAt) < cloneGracePeriod {
+		return false, nil
+	}
+	if t.LastBootAt != nil && now.Sub(*t.LastBootAt) < cloneGracePeriod {
+		return false, nil
+	}
+	if _, err := st.PESessions().ActiveByTerminal(ctx, t.ID); err == nil {
+		return false, nil
+	} else if !errs.IsNotFound(err) {
+		return false, err
+	}
+	return true, nil
+}
+
+func reductionIDsOf(reductions []domain.Reduction) []string {
+	ids := make([]string, 0, len(reductions))
+	for _, r := range reductions {
+		ids = append(ids, r.ID)
+	}
+	return ids
+}
+
+// nodeLayers 按身份层记录找出建自这些还原点的层，按所在节点分组。删除只查本机池，看不到建在别的节点上的层；
+// 它们会钉住那台节点上的副本，复制删不掉，最后只能整份重建。机器还在用的拒绝并点名。
+func nodeLayers(ctx context.Context, st store.Store, reductionIDs []string, sentinel error) (map[string][]string, error) {
+	want := make(map[string]bool, len(reductionIDs))
+	for _, id := range reductionIDs {
+		want[id] = true
+	}
+	identities, err := st.TerminalIdentities().List(ctx)
+	if err != nil {
+		return nil, err
+	}
+	layers := map[string][]string{}
+	var busy []string
+	for _, v := range identities {
+		if v.LayerServerID == "" || !want[v.LayerReductionRef] {
+			continue
+		}
+		t, err := st.Terminals().Get(ctx, v.TerminalID)
+		if errs.IsNotFound(err) {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		idle, err := terminalIdle(ctx, st, t.MAC)
+		if err != nil {
+			return nil, err
+		}
+		mac := storage.NormalizeMAC(t.MAC)
+		if !idle {
+			busy = append(busy, formatMAC(mac))
+			continue
+		}
+		red, err := st.Reductions().Get(ctx, v.LayerReductionRef)
+		if err != nil {
+			return nil, err
+		}
+		layers[v.LayerServerID] = append(layers[v.LayerServerID], red.ConfigID+"@"+strings.TrimPrefix(red.Name, "@"))
+	}
+	if len(busy) > 0 {
+		return nil, blocked(sentinel, "请先关闭这些客户机，关机满 5 分钟后重试："+strings.Join(dedupe(busy), "、"))
+	}
+	return layers, nil
+}
+
+// clearNodeLayers resolves the exact recorded owners; unknown or unreachable owners must not silently fall back.
+func clearNodeLayers(ctx context.Context, router *place.Router, layers map[string][]string) error {
+	if len(layers) == 0 {
+		return nil
+	}
+	if router == nil {
+		return errs.Conflict("请先配置身份层所在节点的路由，再重试删除")
+	}
+	ids := make([]string, 0, len(layers))
+	for id := range layers {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	hosts, err := router.NamedHosts(ctx, ids)
+	if err != nil {
+		return err
+	}
+	for _, h := range hosts {
+		host, ok := h.Agent.(storage.IdentityLayerReleaser)
+		if !ok {
+			return storage.ErrNotImplemented
+		}
+		if _, err := host.ReleaseIdentityLayers(ctx, dedupe(layers[h.ServerID])); err != nil {
+			return errs.Conflict(fmt.Sprintf("节点「%s」的身份层没有清掉，请确认客户机已关机后重试：%s", h.ServerID, zfs.OperatorMessage(err)))
+		}
+	}
+	return nil
+}
+
+// clearIdentityCaches passes expected sources so a concurrent rebuild can never turn a stale MAC into an unconditional delete.
+func clearIdentityCaches(ctx context.Context, agent storage.StorageAgent, macs []string, sources ...string) error {
+	if len(macs) == 0 {
+		return nil
+	}
+	host, ok := agent.(storage.IdentityLayerReleaser)
+	if !ok {
+		return storage.ErrNotImplemented
+	}
+	if _, err := host.ReleaseIdentityLayers(ctx, sources); err != nil {
+		return errs.Conflict(fmt.Sprintf("身份层没有清掉，请确认客户机已关机后重试：%s", zfs.OperatorMessage(err)))
+	}
+	return nil
 }
 
 // formatMAC 给规范化的 MAC 加分隔符，与设备标签上的写法一致。

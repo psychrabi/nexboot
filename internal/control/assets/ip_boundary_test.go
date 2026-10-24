@@ -702,6 +702,21 @@ func TestReleasingTheLeaseWhenAnAddressChangesHands(t *testing.T) {
 		syncer.mustNotRelease(t, "192.168.1.16")
 	})
 
+	t.Run("只改终端的 MAC", func(t *testing.T) {
+		ctx, _, group, syncer, svc := newSvc(t)
+		term, err := svc.Create(ctx, TerminalRequest{MAC: "00:11:22:33:44:05", IP: "192.168.1.15", GroupID: group.ID})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := svc.Update(ctx, term.ID, TerminalRequest{
+			MAC: "00:11:22:33:44:06", IP: "192.168.1.15", GroupID: group.ID,
+		}); err != nil {
+			t.Fatal(err)
+		}
+		// 地址没变，但旧 MAC 的租约不放，新 MAC 就拿不到保留地址。
+		syncer.mustRelease(t, "192.168.1.15", "001122334405")
+	})
+
 	t.Run("跨组搬迁", func(t *testing.T) {
 		ctx, st, from, syncer, svc := newSvc(t)
 		to := seedExtraGroup(t, ctx, st, "grp-to", "二班", "192.168.2.10", 10)

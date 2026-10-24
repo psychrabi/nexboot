@@ -380,6 +380,8 @@ type NodeView struct {
 	HAState    string     `json:"ha_state"`
 	Online     bool       `json:"online"`
 	LastSeenAt *time.Time `json:"last_seen_at"`
+	// IsSelf 标出应答的这台；别台的 HAState 可能过期，界面不能靠它认本机。
+	IsSelf bool `json:"is_self"`
 }
 
 // NodeListResult 是 /api/cluster/nodes 的响应。
@@ -401,6 +403,7 @@ func (r ClusterRegistry) Nodes(ctx context.Context) (NodeListResult, error) {
 			ID: s.ID, Name: s.Name, IP: s.IP, PortalIP: s.PortalIP, HAState: s.HAState,
 			Online:     s.LastSeenAt != nil && now.Sub(*s.LastSeenAt) <= place.Freshness,
 			LastSeenAt: s.LastSeenAt,
+			IsSelf:     r.SelfNodeID != "" && s.ID == r.SelfNodeID,
 		})
 	}
 	return NodeListResult{Items: items, Total: len(items)}, nil

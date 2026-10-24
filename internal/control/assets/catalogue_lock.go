@@ -43,16 +43,34 @@ type imageClaim struct {
 func claimImages(ctx context.Context, st store.Store, typ domain.TaskType, imageIDs ...string) (*imageClaim, error) {
 	ids := uniqueSorted(imageIDs)
 	imagesInUse.Lock()
+	defer imagesInUse.Unlock()
 	for _, id := range ids {
 		if running, busy := imagesInUse.held[id]; busy {
-			imagesInUse.Unlock()
 			return nil, errs.Conflict(fmt.Sprintf("镜像 %s 正在%s，请等该任务完成后再操作", imageLabel(ctx, st, id), taskLabel(running.typ)))
+		}
+	}
+	// 与准备期 claim 的释放串行，避免用旧快照漏掉刚持久化的适配会话。
+	active, err := st.PESessions().ListActive(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, session := range active {
+		if session.Mode != domain.PEModeAdapt || session.ConfigID == "" {
+			continue
+		}
+		cfg, err := st.Configs().Get(ctx, session.ConfigID)
+		if err != nil {
+			return nil, err
+		}
+		for _, id := range ids {
+			if cfg.ImageID == id {
+				return nil, errs.Conflict(fmt.Sprintf("配置「%s」正在机型适配，请等客户机「%s」完成", cfg.Name, session.MAC))
+			}
 		}
 	}
 	for _, id := range ids {
 		imagesInUse.held[id] = imageOperation{typ: typ}
 	}
-	imagesInUse.Unlock()
 	var once sync.Once
 	return &imageClaim{release: func() {
 		once.Do(func() {
@@ -216,6 +234,8 @@ func imageLabel(ctx context.Context, st store.Store, id string) string {
 // taskLabel 返回任务列表中显示的操作名（与前端 TASK_LABELS 一致），只列会占用镜像的任务。
 func taskLabel(typ domain.TaskType) string {
 	switch typ {
+	case domain.TaskTypeCopyImage:
+		return "另存为镜像"
 	case domain.TaskTypeCreateConfig:
 		return "创建配置"
 	case domain.TaskTypeDeleteConfig:
@@ -245,3 +265,12 @@ const (
 	taskTypeDeleteImage    domain.TaskType = "delete_image"
 	taskTypeApplyReduction domain.TaskType = "apply_reduction"
 )
+
+// BeginModelAdaptation reserves the existing catalogue gate during preparation. The persisted PE session keeps it reserved afterwards.
+func BeginModelAdaptation(ctx context.Context, st store.Store, imageID, configID string) (func(), error) {
+	c, err := claimConfigImage(ctx, st, domain.TaskTypeModelAdapt, imageID, configID)
+	if err != nil {
+		return nil, err
+	}
+	return c.Drop, nil
+}

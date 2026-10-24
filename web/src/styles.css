@@ -1063,6 +1063,8 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 .tmcell.s-unknown::before { background: var(--amber); }
 .tmcell.s-offline { background: var(--bg-0); }
 .tmcell.s-online .tmstate  { color: var(--emerald); }
+.tmcell.s-installing::before { background: var(--cyan); }
+.tmcell.s-installing .tmstate { color: var(--cyan); }
 .tmcell.s-unknown .tmstate { color: var(--amber); }
 .tmcell .tmload {
   height: 3px; border-radius: 2px; background: var(--bg-0); margin-top: auto;

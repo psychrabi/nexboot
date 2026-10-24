@@ -42,7 +42,6 @@ test-web:
 e2e:
 	python3 tools/e2e/config_reduction_matrix.py
 	python3 tools/e2e/boot_matrix.py
-	python3 tools/e2e/adaptation_matrix.py
 	python3 tools/e2e/driver_matrix.py
 	python3 tools/e2e/platform_matrix.py
 	python3 tools/e2e/pool_matrix.py

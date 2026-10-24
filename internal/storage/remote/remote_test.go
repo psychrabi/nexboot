@@ -1,8 +1,11 @@
 package remote
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
+	"net/http"
 	"net/http/httptest"
 	"reflect"
 	"testing"
@@ -11,6 +14,72 @@ import (
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
 )
+
+func TestCleanupInstallationRejectsWrongNodeBeforeCleanup(t *testing.T) {
+	req := storage.InstallationCleanupReq{NodeID: "other", ID: "install-0123456789abcdef", ImageID: "iso_0123456789abcdef", MAC: "001122334455"}
+	body, _ := json.Marshal(req)
+	r := httptest.NewRequest(http.MethodPost, "/internal/storage/cleanup-installation-resources", bytes.NewReader(body))
+	r.Header.Set("Authorization", "Bearer tok")
+	w := httptest.NewRecorder()
+	Handler{Token: "tok"}.ServeHTTP(w, r)
+	if w.Code != http.StatusBadRequest {
+		t.Fatalf("wrong target status=%d, want 400", w.Code)
+	}
+}
+
+func TestCleanupInstallationResourcesContract(t *testing.T) {
+	req := storage.InstallationCleanupReq{NodeID: "owner", ID: "install-0123456789abcdef", ImageID: "iso_0123456789abcdef", MAC: "001122334455", Password: "private-password", Token: "private-token"}
+	calls := 0
+	var got storage.InstallationCleanupReq
+	var cleanupError error
+	srv := httptest.NewServer(Handler{Token: "cluster", NodeID: "owner", CleanupInstallation: func(_ context.Context, r storage.InstallationCleanupReq) error { calls++; got = r; return cleanupError }})
+	defer srv.Close()
+	client := Client{BaseURL: srv.URL, Token: "cluster"}
+	if err := client.CleanupInstallationResources(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 1 || !reflect.DeepEqual(got, req) {
+		t.Fatalf("cleanup request lost fields: %+v", got)
+	}
+	cleanupError = errors.New("请先关闭安装客户机")
+	if err := client.CleanupInstallationResources(context.Background(), req); err == nil || err.Error() != cleanupError.Error() {
+		t.Fatalf("cleanup error lost: %v", err)
+	}
+	for _, bad := range []string{"auth", "node", "id", "image", "mac", "media-path"} {
+		t.Run(bad, func(t *testing.T) {
+			badReq := req
+			token := "cluster"
+			switch bad {
+			case "auth":
+				token = "wrong"
+			case "node":
+				badReq.NodeID = "other"
+			case "id":
+				badReq.ID = "../outside"
+			case "image":
+				badReq.ImageID = "published-image"
+			case "mac":
+				badReq.MAC = "../outside"
+			}
+			body, _ := json.Marshal(badReq)
+			if bad == "media-path" {
+				body = append(body[:len(body)-1], []byte(`,"MediaDir":"/etc"}`)...)
+			}
+			r := httptest.NewRequest(http.MethodPost, "/internal/storage/cleanup-installation-resources", bytes.NewReader(body))
+			r.Header.Set("Authorization", "Bearer "+token)
+			w := httptest.NewRecorder()
+			before := calls
+			Handler{Token: "cluster", NodeID: "owner", CleanupInstallation: func(context.Context, storage.InstallationCleanupReq) error { calls++; return nil }}.ServeHTTP(w, r)
+			want := http.StatusBadRequest
+			if bad == "auth" {
+				want = http.StatusUnauthorized
+			}
+			if w.Code != want || calls != before {
+				t.Fatalf("unsafe cleanup: status=%d calls=%d", w.Code, calls-before)
+			}
+		})
+	}
+}
 
 // fakeHost 记录收到的请求并返回预设结果；契约测试让每个 RPC 走一遍 Handler+Client，
 // 断言参数、结果和错误类型都原样传递。
@@ -52,15 +121,7 @@ func (f *fakeHost) SuperStop(_ context.Context, req storage.SuperStopReq) (stora
 	}
 	return storage.SuperStopResult{System: domain.Reduction{ID: "red-1", Name: "r"}}, nil
 }
-func (f *fakeHost) PrepareSuperAdaptation(_ context.Context, req storage.SuperAdaptationReq) error {
-	if req.MAC == "" || len(req.BundleZip) == 0 {
-		return errors.New("lost fields")
-	}
-	return nil
-}
-func (f *fakeHost) ReadSuperAdaptationResult(_ context.Context, mac string) (storage.SuperAdaptationResult, error) {
-	return storage.SuperAdaptationResult{Done: true}, nil
-}
+
 func (f *fakeHost) SpaceUsage(context.Context) (storage.SpaceUsage, error) {
 	return storage.SpaceUsage{}, nil
 }
@@ -113,13 +174,6 @@ func TestRoundTrip(t *testing.T) {
 		t.Fatalf("clones=%v err=%v", clones, err)
 	}
 
-	if err := client.PrepareSuperAdaptation(ctx, storage.SuperAdaptationReq{MAC: "aa:bb", BundleZip: []byte{1}, AdaptScript: []byte{2}}); err != nil {
-		t.Fatal(err)
-	}
-	res, err := client.ReadSuperAdaptationResult(ctx, "aa:bb")
-	if err != nil || !res.Done {
-		t.Fatalf("res=%+v err=%v", res, err)
-	}
 }
 
 // 调用方据以分支的类型化错误必须跨网络原样还原。
@@ -136,6 +190,18 @@ func TestSuperSessionMissingSurvivesWire(t *testing.T) {
 	}
 }
 
+func TestSuperHiveUnsafeSurvivesWire(t *testing.T) {
+	for _, want := range []storage.SuperHiveUnsafe{{FastStartup: true}, {Reason: "没有可用于恢复的注册表事务日志"}} {
+		host, client := newPair(t)
+		host.failStop = want
+		_, err := client.SuperStop(context.Background(), storage.SuperStopReq{MAC: "aa:bb", ConfigID: "c"})
+		var got storage.SuperHiveUnsafe
+		if !errors.As(err, &got) || got != want {
+			t.Fatalf("err=%v", err)
+		}
+	}
+}
+
 func TestTokenRequired(t *testing.T) {
 	_, client := newPair(t)
 	client.Token = "wrong"
@@ -146,3 +212,52 @@ func TestTokenRequired(t *testing.T) {
 
 // 编译期检查：本地代理和远程客户端都实现放置接缝。
 var _ storage.ClientHostAgent = Client{}
+
+type asideHost struct {
+	fakeHost
+	gotImage   string
+	gotConfigs []string
+}
+
+func (f *asideHost) DeleteAsideImage(_ context.Context, imageID string, configIDs []string) error {
+	f.gotImage, f.gotConfigs = imageID, configIDs
+	return nil
+}
+
+// 删镜像时主机要让每个节点删掉挪开副本里这个镜像的数据，参数原样到达对端。
+func TestDeleteAsideImageRoundTrip(t *testing.T) {
+	host := &asideHost{}
+	srv := httptest.NewServer(Handler{Agent: host, Token: "tok"})
+	t.Cleanup(srv.Close)
+	client := Client{BaseURL: srv.URL, Token: "tok"}
+	if err := client.DeleteAsideImage(context.Background(), "win10", []string{"win10_default", "win10_lab"}); err != nil {
+		t.Fatal(err)
+	}
+	if host.gotImage != "win10" || !reflect.DeepEqual(host.gotConfigs, []string{"win10_default", "win10_lab"}) {
+		t.Fatalf("args: %q %v", host.gotImage, host.gotConfigs)
+	}
+	_, plain := newPair(t)
+	if err := plain.DeleteAsideImage(context.Background(), "win10", nil); err == nil {
+		t.Fatal("不支持的节点应报错而不是假装删了")
+	}
+}
+
+type expectedLayersAgent struct {
+	storage.ClientHostAgent
+	gone []string
+}
+
+func (a *expectedLayersAgent) ReleaseIdentityLayers(_ context.Context, gone []string) ([]string, error) {
+	a.gone = append([]string(nil), gone...)
+	return []string{"001122334455"}, nil
+}
+func TestReleaseIdentityLayersTransportsExpectedSources(t *testing.T) {
+	agent := &expectedLayersAgent{}
+	srv := httptest.NewServer(Handler{Agent: agent, Token: "cluster"})
+	defer srv.Close()
+	client := Client{BaseURL: srv.URL, Token: "cluster"}
+	released, err := client.ReleaseIdentityLayers(context.Background(), []string{"cfg@old"})
+	if err != nil || !reflect.DeepEqual(released, []string{"001122334455"}) || !reflect.DeepEqual(agent.gone, []string{"cfg@old"}) {
+		t.Fatalf("expected source lost across RPC: %v %v %v", released, agent.gone, err)
+	}
+}

@@ -11,10 +11,12 @@ import (
 	"time"
 
 	"github.com/tianwei/diskless/internal/control/errs"
+	"github.com/tianwei/diskless/internal/control/hwprofile"
 	"github.com/tianwei/diskless/internal/control/place"
 	"github.com/tianwei/diskless/internal/control/tasks"
 	"github.com/tianwei/diskless/internal/domain"
 	"github.com/tianwei/diskless/internal/storage"
+	"github.com/tianwei/diskless/internal/storage/zfs"
 	"github.com/tianwei/diskless/internal/store"
 )
 
@@ -208,6 +210,9 @@ func (s TerminalService) Update(ctx context.Context, id string, req TerminalRequ
 	if err != nil {
 		return domain.Terminal{}, err
 	}
+	if err := ensureNoInstallation(ctx, s.Store, current.MAC); err != nil {
+		return domain.Terminal{}, err
+	}
 	terminal, err := terminalFromRequest(current, req)
 	if err != nil {
 		return domain.Terminal{}, err
@@ -234,24 +239,78 @@ func (s TerminalService) Update(ctx context.Context, id string, req TerminalRequ
 			return domain.Terminal{}, err
 		}
 	}
+	if current.MAC != terminal.MAC {
+		if err := s.prepareIdentityCleanup(ctx, current, "修改 MAC"); err != nil {
+			return domain.Terminal{}, err
+		}
+	}
 	if err := s.prepareSuperSwitch(ctx, current, terminal.IsSuper); err != nil {
 		return domain.Terminal{}, err
-	}
-	// 经编辑取消超管时也要清掉暂存驱动包，与 DisableSuper 一致；否则普通机上残留的 PendingBundleID 会显示矛盾的「待固化」。
-	if current.IsSuper && !terminal.IsSuper {
-		terminal.PendingBundleID = nil
-		terminal.PendingBundleAt = nil
 	}
 	if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
 		return domain.Terminal{}, err
 	}
-	if current.IP != "" && current.IP != terminal.IP {
+	// 只改 MAC 时旧 MAC 仍租着这个地址，dnsmasq 不会把它发给新 MAC，同样要释放。
+	if current.IP != "" && (current.IP != terminal.IP || current.MAC != terminal.MAC) {
 		releaseLease(ctx, s.DHCP, s.Logger, current.IP, current.MAC)
 	}
 	if err := syncDHCP(ctx, s.Store, s.DHCP, s.Logger); err != nil {
 		return domain.Terminal{}, err
 	}
 	return terminal, nil
+}
+
+func (s TerminalService) prepareIdentityCleanup(ctx context.Context, terminal domain.Terminal, operation string) error {
+	if terminal.State == domain.TerminalStateOnline {
+		return errs.Conflict(fmt.Sprintf("请先关闭客户机「%s」（%s），再%s", terminal.Name, terminal.MAC, operation))
+	}
+	if session, err := s.Store.PESessions().ActiveByTerminal(ctx, terminal.ID); err == nil {
+		return errs.Conflict(fmt.Sprintf("请先完成客户机「%s」（%s）的 WinPE 任务「%s」，再%s", terminal.Name, terminal.MAC, session.TaskID, operation))
+	} else if !errs.IsNotFound(err) {
+		return err
+	}
+	identity, err := s.Store.TerminalIdentities().Get(ctx, terminal.ID)
+	if errs.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	refusal := func(node, cause string) error {
+		if node == "" {
+			node = "本机"
+		}
+		return errs.Conflict(fmt.Sprintf("请先确认客户机「%s」（%s）在节点「%s」的旧身份层已清理，再%s：%s", terminal.Name, terminal.MAC, node, operation, cause))
+	}
+	hosts := s.hosts(ctx)
+	if s.Place != nil {
+		available := map[string]bool{}
+		for _, h := range hosts {
+			available[h.ServerID] = h.Healthy
+		}
+		servers, err := s.Store.Servers().List(ctx)
+		if err != nil {
+			return err
+		}
+		for _, node := range servers {
+			if node.Role != domain.ServerRoleControl && !available[node.ID] {
+				return refusal(node.ID, "该存储节点未在线，无法确认旧身份层")
+			}
+		}
+		if identity.LayerServerID != "" && !available[identity.LayerServerID] {
+			return refusal(identity.LayerServerID, "原身份层节点无法访问，请恢复该节点后重试")
+		}
+	}
+	for _, h := range hosts {
+		host, ok := h.Agent.(storage.IdentityHostAgent)
+		if !ok {
+			return refusal(h.ServerID, "该节点不支持身份层清理")
+		}
+		if err := host.DeleteIdentityLayer(ctx, terminal.MAC); err != nil {
+			return refusal(h.ServerID, zfs.OperatorMessage(err))
+		}
+	}
+	return nil
 }
 
 // releaseLease 通知 dnsmasq 某地址已易主，尽力而为：dhcp_release 不论是否送达都返回 0，
@@ -334,6 +393,17 @@ func (s TerminalService) allocateIP(ctx context.Context, groupID string) (string
 		}
 		occupied[ipv4Uint32(ip)] = true
 	}
+	installations, err := s.Store.InstallSessions().List(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, v := range installations {
+		if v.Active() {
+			if ip, e := parseTerminalIP(v.IP); e == nil {
+				occupied[ipv4Uint32(ip)] = true
+			}
+		}
+	}
 	reserveClusterAddrs(ctx, s.Store, occupied)
 	return allocateIPFromGroup(group, occupied)
 }
@@ -341,6 +411,12 @@ func (s TerminalService) allocateIP(ctx context.Context, groupID string) (string
 func (s TerminalService) Delete(ctx context.Context, id string) error {
 	terminal, err := s.Store.Terminals().Get(ctx, id)
 	if err != nil {
+		return err
+	}
+	if err := ensureNoInstallation(ctx, s.Store, terminal.MAC); err != nil {
+		return err
+	}
+	if err := s.prepareIdentityCleanup(ctx, terminal, "删除客户机"); err != nil {
 		return err
 	}
 	// 立即回收克隆而不等离线回收器：宽限期是因为会话断开不能证明关机，而删除终端是明确意图；
@@ -356,6 +432,14 @@ func (s TerminalService) Delete(ctx context.Context, id string) error {
 				return err
 			}
 		}
+	}
+
+	if _, err := s.Store.TerminalIdentities().Get(ctx, id); err == nil {
+		if err := s.Store.TerminalIdentities().Delete(ctx, id); err != nil {
+			return err
+		}
+	} else if !errs.IsNotFound(err) {
+		return err
 	}
 	// client_clones 行通过 ON DELETE CASCADE 随终端删除。
 	if err := s.Store.Terminals().Delete(ctx, id); err != nil {
@@ -381,7 +465,7 @@ func (s TerminalService) Heartbeat(ctx context.Context, mac string) (domain.Term
 	terminal.LastHeartbeatAt = &now
 	terminal.OfflineAt = nil
 	terminal.State = domain.TerminalStateOnline
-	if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
+	if err := s.Store.Terminals().UpdatePresence(ctx, terminal); err != nil {
 		return domain.Terminal{}, err
 	}
 	return terminal, nil
@@ -403,7 +487,7 @@ func (s TerminalService) SweepOffline(ctx context.Context, timeout time.Duration
 		}
 		terminal.State = domain.TerminalStateOffline
 		terminal.OfflineAt = &now
-		if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
+		if err := s.Store.Terminals().UpdatePresence(ctx, terminal); err != nil {
 			return changed, err
 		}
 		changed++
@@ -459,7 +543,7 @@ func (s TerminalService) ReconcileOnline(ctx context.Context, offlineMisses map[
 				terminal.LastHeartbeatAt = &now
 				terminal.OfflineAt = nil
 				terminal.State = domain.TerminalStateOnline
-				if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
+				if err := s.Store.Terminals().UpdatePresence(ctx, terminal); err != nil {
 					return changed, err
 				}
 				changed++
@@ -478,7 +562,7 @@ func (s TerminalService) ReconcileOnline(ctx context.Context, offlineMisses map[
 		delete(offlineMisses, key)
 		terminal.OfflineAt = &now
 		terminal.State = domain.TerminalStateOffline
-		if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
+		if err := s.Store.Terminals().UpdatePresence(ctx, terminal); err != nil {
 			return changed, err
 		}
 		changed++
@@ -531,6 +615,13 @@ func (s TerminalService) Move(ctx context.Context, req MoveTerminalsRequest) (Mo
 		terminalsByID[terminal.ID] = terminal
 		if terminal.GroupID == targetID {
 			targetCount++
+		}
+	}
+	for _, id := range ids {
+		if terminal, ok := terminalsByID[id]; ok {
+			if err := ensureNoInstallation(ctx, s.Store, terminal.MAC); err != nil {
+				return MoveTerminalsResult{}, err
+			}
 		}
 	}
 	for _, id := range ids {
@@ -688,8 +779,6 @@ func (s TerminalService) DisableSuper(ctx context.Context, id string) (domain.Te
 		return domain.Terminal{}, err
 	}
 	terminal.IsSuper = false
-	terminal.PendingBundleID = nil
-	terminal.PendingBundleAt = nil
 	if err := s.Store.Terminals().Update(ctx, terminal); err != nil {
 		return domain.Terminal{}, err
 	}
@@ -847,6 +936,11 @@ func (s TerminalService) executeStopSuper(ctx context.Context, task domain.Task,
 		if errors.As(err, &missing) {
 			return SuperStopResult{}, superSessionMissingError(terminal, missing.LUN, dataDisks)
 		}
+		// 去掉存储层的包装前缀，只给出中文原因和处理办法。
+		var unsafe storage.SuperHiveUnsafe
+		if errors.As(err, &unsafe) {
+			return SuperStopResult{}, errs.Invalid(fmt.Sprintf("超管机 %s 保存失败：%s", terminal.MAC, unsafe.Error()))
+		}
 		return SuperStopResult{}, err
 	}
 	// 存还原点不改超管状态：机器仍是超管机，开机可接着装；结束编辑走「取消超管」，那里会连盘一起丢弃。
@@ -885,6 +979,10 @@ func (s TerminalService) executeStopSuper(ctx context.Context, task domain.Task,
 			if err := tx.Reductions().Create(ctx, *result.Reduction); err != nil {
 				return err
 			}
+			// 模板还在盘里：上一个点能开机的机型，这个点也能。
+			if err := hwprofile.InheritLatest(ctx, tx, *result.Reduction, time.Now().UTC()); err != nil {
+				return err
+			}
 			// 保存的点成为当前点，并像「设为当前」一样下发到跟随该配置的分组。
 			if err := setConfigCurrent(ctx, tx, cfg.ID, result.Reduction.ID); err != nil {
 				return err
@@ -903,7 +1001,6 @@ func (s TerminalService) executeStopSuper(ctx context.Context, task domain.Task,
 		if err != nil {
 			return err
 		}
-		current.PendingBundleID, current.PendingBundleAt = nil, nil // 驱动包已随本次保存固化
 		if err := tx.Terminals().Update(ctx, current); err != nil {
 			return err
 		}
@@ -966,6 +1063,15 @@ func (s TerminalService) runner() tasks.Runner {
 }
 
 func (s TerminalService) validateTerminal(ctx context.Context, terminal domain.Terminal, currentID string) error {
+	installations, err := s.Store.InstallSessions().List(ctx)
+	if err != nil {
+		return err
+	}
+	for _, v := range installations {
+		if v.Active() && (v.MAC == storage.NormalizeMAC(terminal.MAC) || v.IP == terminal.IP) {
+			return errs.Conflict("客户机或 IP 正在从 ISO 创建镜像，请先完成或取消安装任务")
+		}
+	}
 	group, err := s.Store.Groups().Get(ctx, terminal.GroupID)
 	if err != nil {
 		return err

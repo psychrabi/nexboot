@@ -26,7 +26,8 @@ const NETWORK = {
 
 function stubApi(overrides = {}) {
   const base = {
-    getSettings: async () => ({ import_dir: '/tank/imports', default_import_dir: '/tank/imports' }),
+    getSettings: async () => ({ import_dir: '/ndiskless/tank/nd/files/imports', legacy_import_dirs: [] }),
+    listLegacyImports: async () => ({ items: [] }),
     getNetwork: async () => NETWORK,
     saveNetwork: async (body) => ({ ...NETWORK, ...body }),
     listTasks: async () => list([]),
@@ -92,5 +93,59 @@ describe('系统参数 · 客户机网络', () => {
     await userEvent.click(screen.getByLabelText('允许跨网段分组（DHCP 中继）'));
     await waitFor(() => expect(saveNetwork).toHaveBeenCalledWith({ client_iface: '', allow_cross_subnet: false }));
     expect((await screen.findAllByText(/还有 1 个跨网段分组：vmdk/)).length).toBeGreaterThan(0);
+  });
+});
+
+describe('系统参数 · Windows 客户机', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('默认打开，关掉时调用接口', async () => {
+    const saveWindowsPolicy = vi.fn(async ({ enforce }) => ({ import_dir: '/tank/imports', enforce_windows_policy: enforce }));
+    stubApi({
+      getSettings: async () => ({ import_dir: '/ndiskless/tank/nd/files/imports', enforce_windows_policy: true }),
+      saveWindowsPolicy,
+    });
+    renderPage();
+    const box = await screen.findByLabelText('开机时关闭自动更新、自动重启、睡眠和休眠');
+    expect(box.checked).toBe(true);
+    await userEvent.click(box);
+    await waitFor(() => expect(saveWindowsPolicy).toHaveBeenCalledWith({ enforce: false }));
+  });
+});
+
+describe('系统参数 · 镜像导入目录', () => {
+  afterEach(() => vi.restoreAllMocks());
+
+  it('只读显示存储池上的导入目录，不能再改', async () => {
+    stubApi();
+    renderPage();
+    expect(await screen.findByText('/ndiskless/tank/nd/files/imports')).toBeTruthy();
+    expect(screen.getByText(/自动同步到备用节点/)).toBeTruthy();
+    expect(screen.queryByPlaceholderText('/tank/imports')).toBeNull();
+    expect(screen.queryByText('默认目录')).toBeNull();
+  });
+
+  it('没有存储池时说明要先创建存储池', async () => {
+    stubApi({ getSettings: async () => ({ import_dir: '', import_dir_error: '请先创建存储池：上传和导入的文件存放在存储池的 imports 目录' }) });
+    renderPage();
+    expect(await screen.findByText(/请先创建存储池/)).toBeTruthy();
+    expect(screen.getByText('没有存储池')).toBeTruthy();
+  });
+
+  it('旧目录里的文件只读列出，点了才移入', async () => {
+    const moveLegacyImport = vi.fn(async (path) => ({ path, moving: true }));
+    let moved = false;
+    stubApi({
+      getSettings: async () => ({ import_dir: '/ndiskless/tank/nd/files/imports', legacy_import_dirs: ['/var/lib/ndiskless/imports'] }),
+      listLegacyImports: async () => ({ items: moved ? [] : [{ name: 'win10.iso', path: '/var/lib/ndiskless/imports/win10.iso', size: 5.7 * 1024 ** 3 }] }),
+      moveLegacyImport: async (path) => { moved = true; return moveLegacyImport(path); },
+    });
+    renderPage();
+    expect(await screen.findByText('/var/lib/ndiskless/imports/win10.iso')).toBeTruthy();
+    expect(screen.getByText(/旧导入目录（只读）/)).toBeTruthy();
+    expect(moveLegacyImport).not.toHaveBeenCalled();
+    await userEvent.click(screen.getByRole('button', { name: '移入导入目录' }));
+    await waitFor(() => expect(moveLegacyImport).toHaveBeenCalledWith('/var/lib/ndiskless/imports/win10.iso'));
+    await waitFor(() => expect(screen.getByText('旧目录里没有可导入的文件。')).toBeTruthy());
   });
 });
