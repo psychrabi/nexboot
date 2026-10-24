@@ -5,6 +5,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import { api } from '../../lib/api.js';
 import { StoreProvider, useStore } from '../store.jsx';
 import { ConfirmProvider } from '../overlay.jsx';
+import { fmtDateTimeSec } from '../../lib/format.js';
 import { PageAlarms } from './alarms.jsx';
 
 const alarm = (i, status = 'active') => ({ ID: `a${i}`, Severity: 'warn', Type: '复制滞后', Resource: `r${i}`, Value: 'v', Message: `m${i}`, Status: status, CreatedAt: '2026-09-30T13:00:00Z' });
@@ -53,8 +54,8 @@ describe('告警中心', () => {
     renderPage();
     const row = (await screen.findByText('m1')).closest('tr');
     expect(screen.getByRole('columnheader', { name: '首次发现' })).toBeTruthy();
-    expect(within(row).getByText('2026-09-30 21:00:00')).toBeTruthy();
-    expect(within(row).queryByText('2026-10-08 09:20:00')).toBeNull();
+    expect(within(row).getByText(fmtDateTimeSec('2026-09-30T13:00:00Z'))).toBeTruthy();
+    expect(within(row).queryByText(fmtDateTimeSec('2026-10-08T01:20:00Z'))).toBeNull();
   });
 
   it('全部确认覆盖所有活动告警，不止当前页', async () => {

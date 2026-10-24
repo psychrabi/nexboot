@@ -826,7 +826,6 @@ func (r bootChangedDuringVerificationRepo) GetByMAC(ctx context.Context, mac str
 	return old, r.TerminalRepo.Update(ctx, fresh)
 }
 
-
 func TestBootScriptBIOSNetworkBootReturnsClearIpxePrompt(t *testing.T) {
 	ctx := context.Background()
 	st, err := store.Open(ctx, "file:"+filepath.Join(t.TempDir(), "db"))

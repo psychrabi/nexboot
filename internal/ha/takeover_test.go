@@ -352,7 +352,9 @@ func TestActivateStandsDownWhenTheWriterSaysItIsServing(t *testing.T) {
 
 type deadPeer struct{}
 
-func (deadPeer) Status(context.Context) (PeerStatus, error) { return PeerStatus{}, errors.New("no route to host") }
+func (deadPeer) Status(context.Context) (PeerStatus, error) {
+	return PeerStatus{}, errors.New("no route to host")
+}
 
 // 写入者库里记着、谁的池里都没有的数据集（failover A4a）：写入者断网后，另一台备机也报告自己缺它，
 // 让给它补不齐。以前每台备机都觉得自己不完整、互相让位，九十多秒没人接任；现在不为它等，直接接任。
