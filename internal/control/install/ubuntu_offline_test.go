@@ -111,8 +111,22 @@ func runEarlyScript(t *testing.T, tools ...string) (log, calls, auto string, err
 	if err := os.WriteFile(path, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}
+	// PATH 只含假工具目录：GitHub runner 等机子若装了 open-iscsi，/usr/bin 里的
+	// iscsiadm 会让「缺工具应停下」的用例误过。shell 工具从本机绝对路径链进 bin
+	//（不用 LookPath：测试进程 PATH 未必含 /usr/bin）。
+	for _, name := range []string{"sed", "grep", "cat"} {
+		for _, dir := range []string{"/bin", "/usr/bin"} {
+			host := filepath.Join(dir, name)
+			if _, err := os.Stat(host); err == nil {
+				if err := os.Symlink(host, filepath.Join(bin, name)); err != nil {
+					t.Fatal(err)
+				}
+				break
+			}
+		}
+	}
 	cmd := exec.Command("/bin/sh", path)
-	cmd.Env = []string{"PATH=" + bin + ":/usr/bin:/bin"}
+	cmd.Env = []string{"PATH=" + bin}
 	err = cmd.Run()
 	b, _ := os.ReadFile(filepath.Join(dir, "nd-early.log"))
 	c, _ := os.ReadFile(record)
