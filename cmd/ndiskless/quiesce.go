@@ -2,7 +2,7 @@ package main
 
 import "context"
 
-// standbyCleaner 是 quiesceStandby 对存储 agent 的需求。故意收窄：下面的顺序是安全性质，接口小到能伪造，测试才能钉住它。
+// standbyCleaner is the minimal storage-agent interface required by quiesceStandby, allowing tests to verify safe operation ordering.
 type standbyCleaner interface {
 	ClientCloneMACs(ctx context.Context) ([]string, error)
 	CleanupClientClones(ctx context.Context, mac string, keep []string) error
@@ -10,12 +10,12 @@ type standbyCleaner interface {
 	CleanupSuperClones(ctx context.Context, mac string) error
 }
 
-// quiesceStandby 清掉备机不该持有的一切：先拆 iSCSI 导出，再删其后的克隆。
-// 顺序就是安全性：导出拆完本机不再对外供盘，后面不可能删掉客户机正在用的卷，无需判断「有没有活会话」
-// （回收器曾因看不见 CHAP 会话误删过在用的盘）。
-// 超管克隆也一并清掉：超管机放在写入者上，切换后旧写入者的那份没人回收，下次该节点写入时还会被复用，
-// 让机器的盘取决于谁持有 VIP；未保存的超管会话本来就不承诺跨切换保留。
-// 每步都尽力而为：没收拾完的备机仍是备机，下次降级再试；为了清理让启动失败更糟。
+// quiesceStandby removes standby-owned resources: first unexport iSCSI targets, then clean up clones.
+// Ordering is essential: once exports are removed, this node cannot serve active client volumes, even if session detection is unreliable.
+// Previous cleanup logic deleted in-use volumes because it could not see CHAP sessions.
+// Also clean Super Admin clones: after failover, old-writer clones might otherwise remain and be reused
+// depending on VIP ownership. Unsaved Super Admin sessions are not guaranteed to survive failover.
+// Cleanup is best-effort: an incomplete cleanup should not turn an otherwise valid standby startup into a failure.
 func quiesceStandby(ctx context.Context, teardownExports func(context.Context) error,
 	cleaner standbyCleaner, logf func(msg string, args ...any)) {
 	if teardownExports != nil {
