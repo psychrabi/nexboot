@@ -1,17 +1,17 @@
 package api
 
-// handle.go 是 JSON 端点适配器族。机械的 JSON 路由一行注册即可：按服务方法形状选适配器，
-// 解码、错误映射、编码都已完成；所有错误都经 writeError 出去，状态码映射不会再按 handler 各自分叉。
+// handle.go defines adapters for JSON endpoints. Register simple routes using an adapter matching the service method signature.
+// Decode, error mapping and encoding are centralized; all failures pass through writeError for consistent status codes.
 //
 //	handle(svc.List)                          func(ctx) (Res, error)
 //	handleIn(svc.Create, status(201))         func(ctx, Req) (Res, error)
-//	handleID(svc.Get, notFound("…不存在"))     func(ctx, id) (Res, error)
+//	handleID(svc.Get, notFound("… not found"))     func(ctx, id) (Res, error)
 //	handleIDIn(svc.Update)                    func(ctx, id, Req) (Res, error)
 //	handleErrID(svc.Delete)                   func(ctx, id) error        → 204
 //	handleErrIDIn(svc.ChangePassword)         func(ctx, id, Req) error   → 204
 //	handleReq(fn)                             func(*http.Request) (Res, error)
 //
-// id 总是取自路径参数 {id}，单参数路由统一用这个名字。需要更多请求信息（查询参数、多个路径参数）的走 handleReq，同样统一出错。
+// id always comes from the {id} path parameter. Routes requiring query or multiple path values use handleReq.
 
 import (
 	"context"
@@ -22,7 +22,7 @@ import (
 	"github.com/tianwei/diskless/internal/control/errs"
 )
 
-// responder 承载每条路由的响应策略。
+// responder configures each route's response behavior.
 type responder struct {
 	status   int
 	notFound string
@@ -30,13 +30,13 @@ type responder struct {
 
 type respondOpt func(*responder)
 
-// status 设置成功状态码（默认 200；204 不发响应体）。
+// status sets the success code (default 200; 204 has no response body).
 func status(code int) respondOpt {
 	return func(rp *responder) { rp.status = code }
 }
 
-// notFound 覆盖未找到错误的提示。store 自带的文本（`groups "x": not found`）是给开发者看的，
-// 以前显示中文提示的路由靠它保留。
+// notFound overrides storage-layer not-found messages intended for developers, such as `groups "x": not found`.
+// Routes can use this override to provide meaningful user-facing errors.
 func notFound(msg string) respondOpt {
 	return func(rp *responder) { rp.notFound = msg }
 }
@@ -49,7 +49,7 @@ func newResponder(defaultStatus int, opts []respondOpt) responder {
 	return rp
 }
 
-// funnel 是所有适配器共用的唯一错误出口：先应用 notFound 覆盖，再 writeError。返回是否已写响应。
+// funnel is the shared error path: apply notFound overrides, then call writeError. Returns whether a response was written.
 func funnel(w http.ResponseWriter, rp responder, err error) bool {
 	if err != nil && rp.notFound != "" && errs.IsNotFound(err) {
 		http.Error(w, rp.notFound, http.StatusNotFound)
@@ -58,7 +58,7 @@ func funnel(w http.ResponseWriter, rp responder, err error) bool {
 	return writeError(w, err)
 }
 
-// finish 是所有适配器的唯一出口：出错走 funnel，否则编码结果。
+// finish routes failures through funnel, otherwise encodes the result.
 func finish[Res any](w http.ResponseWriter, rp responder, res Res, err error) {
 	if funnel(w, rp, err) {
 		return
@@ -66,7 +66,7 @@ func finish[Res any](w http.ResponseWriter, rp responder, res Res, err error) {
 	writeJSON(w, rp.status, res)
 }
 
-// finishEmpty 是只返回 error 的服务方法用的 finish：204 不发响应体，其余回 {"status":"ok"}（ack/action 路由一贯的形状）。
+// finishEmpty handles methods returning only error: 204 has no body; other successes return {"status":"ok"}.
 func finishEmpty(w http.ResponseWriter, rp responder, err error) {
 	if funnel(w, rp, err) {
 		return
@@ -78,11 +78,11 @@ func finishEmpty(w http.ResponseWriter, rp responder, err error) {
 	writeJSON(w, rp.status, map[string]string{"status": "ok"})
 }
 
-// decodeBody 读取 JSON 请求体，失败时给出标准的 400 提示。
+// decodeBody parses JSON request bodies and returns a standard 400 on decoding errors.
 func decodeBody[Req any](w http.ResponseWriter, r *http.Request) (Req, bool) {
 	var req Req
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "请求格式错误", http.StatusBadRequest)
+		http.Error(w, "Invalid request format", http.StatusBadRequest)
 		return req, false
 	}
 	return req, true
@@ -142,7 +142,7 @@ func handleErrIDIn[Req any](fn func(context.Context, string, Req) error, opts ..
 	}
 }
 
-// handleReq 是需要更多请求信息（查询参数、多个路径值）的路由的出口，错误同样统一处理。
+// handleReq handles routes needing extra request details and uses the same centralized error path.
 func handleReq[Res any](fn func(*http.Request) (Res, error), opts ...respondOpt) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		res, err := fn(r)
