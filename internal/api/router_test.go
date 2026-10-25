@@ -2084,7 +2084,7 @@ func TestUsersCRUDRoundTrip(t *testing.T) {
 
 	// 坏 JSON → 400，带标准提示
 	rec = do(http.MethodPost, "/api/users", login.Token, `{oops`)
-	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "请求格式错误") {
+	if rec.Code != http.StatusBadRequest || !strings.Contains(rec.Body.String(), "Invalid request format") {
 		t.Fatalf("bad json: %d %s", rec.Code, rec.Body.String())
 	}
 
