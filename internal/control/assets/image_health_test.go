@@ -20,7 +20,7 @@ func TestImportImageAutoTriggersHealthCheck(t *testing.T) {
 	fake := &fakeImageStorage{now: now, inspectReport: storage.InspectReport{
 		Level:          domain.HealthWarn,
 		PartitionStyle: "gpt",
-		Items:          []storage.InspectItem{{Name: "bcd", Level: domain.HealthWarn, Detail: "BCD 缺失"}},
+		Items:          []storage.InspectItem{{Name: "bcd", Level: domain.HealthWarn, Detail: "BCD missing"}},
 	}}
 	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
 
@@ -56,7 +56,7 @@ func TestRunHealthCheckOverwritesPreviousReport(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Date(2026, 7, 1, 12, 0, 0, 0, time.UTC)
-	fake := &fakeImageStorage{now: now, inspectReport: storage.InspectReport{Level: domain.HealthBlock, Items: []storage.InspectItem{{Name: "msiscsi", Level: domain.HealthBlock, Detail: "msiscsi.sys 缺失"}}}}
+	fake := &fakeImageStorage{now: now, inspectReport: storage.InspectReport{Level: domain.HealthBlock, Items: []storage.InspectItem{{Name: "msiscsi", Level: domain.HealthBlock, Detail: "msiscsi.sys missing"}}}}
 	service := ImageService{Store: st, Storage: fake, Now: func() time.Time { return now }}
 	if _, err := service.ImportImage(ctx, ImportImageRequest{Name: "win11", SourcePath: "/var/lib/ndiskless/imports/win11.zfs", OSType: domain.OSTypeWindows}); err != nil {
 		t.Fatal(err)
@@ -94,12 +94,12 @@ func TestRunHealthCheckStoresTheNICsTheImageHasDriversFor(t *testing.T) {
 	}
 }
 
-// 数据盘没有系统，体检只会产出「找不到系统分区」的阻断报告并告警，应拒绝并清掉旧报告。
+// Data disks have no system partition; reject inapplicable health checks and remove outdated reports.
 func TestRunHealthCheckRefusesADataDiskAndDropsItsStaleReport(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
-	if err := st.Images().Create(ctx, domain.Image{ID: "steam", Name: "Steam 游戏库", OSType: domain.OSTypeWindows, Purpose: domain.ImagePurposeData, State: domain.ImageStateNormal, CreatedAt: now}); err != nil {
+	if err := st.Images().Create(ctx, domain.Image{ID: "steam", Name: "Steam Game Library", OSType: domain.OSTypeWindows, Purpose: domain.ImagePurposeData, State: domain.ImageStateNormal, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ImageHealthReports().Create(ctx, domain.ImageHealthReport{ID: "health-steam", ImageID: "steam", Level: domain.HealthBlock, CreatedAt: now}); err != nil {
@@ -107,7 +107,7 @@ func TestRunHealthCheckRefusesADataDiskAndDropsItsStaleReport(t *testing.T) {
 	}
 	fake := &fakeImageStorage{now: now}
 	_, err := ImageService{Store: st, Storage: fake}.RunHealthCheck(ctx, "steam")
-	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "Steam 游戏库") {
+	if !errors.Is(err, errs.ErrInvalid) || !strings.Contains(err.Error(), "Steam Game Library") {
 		t.Fatalf("err = %v", err)
 	}
 	if fake.inspectReq.ImageID != "" {
@@ -122,7 +122,7 @@ func TestSetPurposeToDataDropsTheHealthReport(t *testing.T) {
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	now := time.Now().UTC()
-	if err := st.Images().Create(ctx, domain.Image{ID: "games", Name: "游戏盘", OSType: domain.OSTypeWindows, Purpose: domain.ImagePurposeSystem, State: domain.ImageStateNormal, CreatedAt: now}); err != nil {
+	if err := st.Images().Create(ctx, domain.Image{ID: "games", Name: "Games Disk", OSType: domain.OSTypeWindows, Purpose: domain.ImagePurposeSystem, State: domain.ImageStateNormal, CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.ImageHealthReports().Create(ctx, domain.ImageHealthReport{ID: "health-games", ImageID: "games", Level: domain.HealthBlock, CreatedAt: now}); err != nil {
@@ -170,17 +170,17 @@ func TestGroupBindingRejectsBlockLevelImage(t *testing.T) {
 		SystemImageID: "win11", SystemConfigID: "win11_default",
 	}
 
-	// 阻断级拒绝绑定，错误中带体检结论。
+	// A blocking report rejects binding and includes the health outcome in the error.
 	mustPutHealthReport(t, ctx, st, domain.ImageHealthReport{
 		ID: "health-win11", ImageID: "win11", Level: domain.HealthBlock,
-		Items:     []domain.HealthCheckItem{{Name: "msiscsi", Level: domain.HealthBlock, Detail: "msiscsi.sys 缺失"}},
+		Items:     []domain.HealthCheckItem{{Name: "msiscsi", Level: domain.HealthBlock, Detail: "msiscsi.sys missing"}},
 		CreatedAt: now,
 	})
 	if _, err := groups.Create(ctx, req); !errors.Is(err, ErrImageHealthBlocked) {
 		t.Fatalf("err = %v", err)
 	}
 
-	// 警告级放行。
+	// A warning-level report still allows binding.
 	report, err := st.ImageHealthReports().GetByImage(ctx, "win11")
 	if err != nil {
 		t.Fatal(err)
