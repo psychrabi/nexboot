@@ -10,7 +10,7 @@ import (
 	"github.com/tianwei/diskless/internal/store"
 )
 
-// newImageTestStore 打开一个临时 sqlite store，各 control 子包测试各自保留一份。
+// newImageTestStore opens a temporary SQLite store; each control test package has its own copy.
 func newImageTestStore(t *testing.T) *store.SQLStore {
 	t.Helper()
 	st, err := store.Open(context.Background(), "file:"+filepath.Join(t.TempDir(), "test.db"))
@@ -21,7 +21,7 @@ func newImageTestStore(t *testing.T) *store.SQLStore {
 	return st
 }
 
-// seedHealthImage 预置适配测试开机所需的 镜像→配置→还原点 链，是 assets 测试夹具的私有副本。
+// seedHealthImage seeds the Image → Configuration → Restore Point chain needed for adaptation boot tests.
 func seedHealthImage(t *testing.T, ctx context.Context, st *store.SQLStore, now time.Time) {
 	t.Helper()
 	redID := "win11_0"

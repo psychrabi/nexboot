@@ -1,9 +1,9 @@
 :root {
-  /* 深色运维控制台配色（oklch） */
-  --bg-0: oklch(0.205 0.012 250);     /* 最深 */
-  --bg-1: oklch(0.235 0.014 250);     /* 表面 */
-  --bg-2: oklch(0.265 0.016 250);     /* 抬升 */
-  --bg-3: oklch(0.305 0.018 250);     /* 悬停 */
+  /* Dark operations console palette (oklch) */
+  --bg-0: oklch(0.205 0.012 250);     /* Deepest background */
+  --bg-1: oklch(0.235 0.014 250);     /* Surface */
+  --bg-2: oklch(0.265 0.016 250);     /* Raised surface */
+  --bg-3: oklch(0.305 0.018 250);     /* Hover */
   --line: oklch(0.365 0.018 250 / 0.6);
   --line-soft: oklch(0.345 0.016 250 / 0.35);
   --grid: oklch(0.325 0.018 250 / 0.25);
@@ -12,9 +12,9 @@
   --fg-dim: oklch(0.60 0.012 250);
   --fg-faint: oklch(0.50 0.012 250);
 
-  /* 强调色：同彩度与明度，只变色相 */
+  /* Accent colors share saturation and lightness, varying only in hue */
   --cyan: oklch(0.78 0.15 200);
-  /* NexBoot 品牌色 */
+  /* NexBoot brand color */
   --brand-cyan: #00E0FF;
   --brand-sky: #4DA3FF;
   --brand-blue: #1A6DFF;
@@ -33,16 +33,16 @@
   --r-md: 10px;
   --r-lg: 14px;
 
-  /* 只用系统字体：内网隔离环境下载不了网络字体。西文字体不含中文，须显式跟上中文回退字体。 */
+  /* Use system fonts because isolated networks cannot fetch web fonts. Include fallback fonts for non-Latin scripts. */
   --font-ui: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei UI", "Microsoft YaHei",
              "PingFang SC", "Hiragino Sans GB", "Noto Sans CJK SC", "Source Han Sans SC", sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", Consolas, "Liberation Mono", Menlo, monospace;
 
-  /* 浮层体系：所有弹出层共用一套遮罩和 z-index 层级 */
+  /* Overlay system: dialogs share backdrop and z-index levels */
   --overlay-scrim: oklch(0.145 0.012 250 / 0.62);
-  --z-overlay: 1000;   /* 弹窗 / 抽屉 / 命令面板（互斥） */
-  --z-popover: 1200;   /* 顶栏下拉（通知）压在浮层之上 */
-  --z-toast:   9999;   /* 提示条永远在最上层 */
+  --z-overlay: 1000;   /* Modal / drawer / command palette (mutually exclusive) */
+  --z-popover: 1200;   /* Header dropdowns and notifications above overlays */
+  --z-toast:   9999;   /* Toast notifications above all layers */
 }
 
 * { box-sizing: border-box; }
@@ -54,7 +54,7 @@ body {
   font-size: 14px;
   line-height: 1.45;
   min-height: 100vh;
-  /* 网格背景 */
+  /* Grid background */
   background-image:
     radial-gradient(circle at 0% 0%, oklch(0.78 0.15 200 / 0.06), transparent 50%),
     radial-gradient(circle at 100% 100%, oklch(0.72 0.15 290 / 0.05), transparent 60%),
@@ -68,7 +68,7 @@ body {
 
 ::selection { background: var(--cyan-soft); color: var(--fg); }
 
-/* 滚动条 */
+/* Scrollbars */
 ::-webkit-scrollbar { width: 8px; height: 8px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--bg-3); border-radius: 4px; }
@@ -76,7 +76,7 @@ body {
 
 .mono { font-family: var(--font-mono); font-feature-settings: "tnum" 1, "zero" 1; }
 
-/* 公共 */
+/* Shared */
 .card {
   background: linear-gradient(180deg, var(--bg-1) 0%, oklch(0.225 0.014 250) 100%);
   border: 1px solid var(--line);
@@ -90,7 +90,7 @@ body {
   justify-content: space-between;
   gap: 12px;
 }
-/* 卡片标题都是中文，大写和字距无效，只靠字重和颜色区分层级。 */
+/* Card titles use font weight and color for hierarchy; avoid unnecessary letter spacing or uppercase transforms. */
 .card-title {
   font-size: 13px;
   font-weight: 600;
@@ -105,15 +105,15 @@ body {
   color: var(--fg);
 }
 
-/* ── 文本工具类 ───────────────────────────────────────────────────────
-   11px 是下限，再小中文在 1080p 屏上就看不清。 */
+/* ── Text utilities ───────────────────────────────────────────────────────
+   11px is the minimum readable font size for common 1080p displays. */
 .lbl  { font-size: 12px; color: var(--fg-faint); font-weight: 500; }
 .meta { font-size: 12px; color: var(--fg-faint); }
 .hint { font-size: 12px; color: var(--fg-faint); line-height: 1.6; }
-/* 单行截断 */
+/* Single-line truncation */
 .ellip { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; min-width: 0; }
 
-/* 状态点 */
+/* Status indicator */
 .dot {
   width: 8px; height: 8px; border-radius: 50%;
   background: var(--fg-faint);
@@ -132,7 +132,7 @@ body {
   100% { box-shadow: 0 0 0 0 transparent; }
 }
 
-/* 徽标/标签 */
+/* Badges and labels */
 .field-help {
   display: inline-flex; align-items: center; justify-content: center;
   width: 14px; height: 14px; margin-left: 5px; padding: 0;
@@ -159,7 +159,7 @@ body {
 .chip.rose    { color: var(--rose); border-color: oklch(0.55 0.14 18 / 0.5); background: var(--rose-soft); }
 .chip.violet  { color: var(--violet); border-color: oklch(0.55 0.10 290 / 0.5); background: var(--violet-soft); }
 
-/* 按钮 */
+/* Buttons */
 .btn {
   display: inline-flex;
   align-items: center;
@@ -174,11 +174,11 @@ body {
   cursor: pointer;
   transition: all 0.12s ease;
   font-family: inherit;
-  /* 中文每个字都可断行，自动布局表格里「详情」这类按钮会被挤成两行，按钮文字一律不换行。 */
+  /* Prevent button text from wrapping in auto-layout tables with narrow action columns. */
   white-space: nowrap;
 }
 .btn:hover { background: var(--bg-3); color: var(--fg); border-color: oklch(0.405 0.018 250); }
-/* 禁用按钮必须看起来是禁用的，否则点了没反应会被当成坏了。 */
+/* Disabled buttons must visibly appear inactive. */
 .btn:disabled { opacity: 0.45; cursor: not-allowed; }
 .btn:disabled:hover { background: var(--bg-2); color: var(--fg-mute); border-color: var(--line); }
 .btn.primary:disabled:hover { background: linear-gradient(180deg, oklch(0.55 0.12 200), oklch(0.45 0.12 200)); color: oklch(0.98 0.01 200); border-color: oklch(0.5 0.12 200); }
@@ -193,15 +193,15 @@ body {
 .btn.danger { color: var(--rose); border-color: oklch(0.55 0.14 18 / 0.4); }
 .btn.icon { padding: 6px; }
 
-/* 同一件事的几个按钮（导入/导出/模板）合成一组，不与主操作争夺注意力。 */
+/* Group related import/export/template buttons to reduce competition with primary actions. */
 .btn-group { display: inline-flex; }
 .btn-group .btn { border-radius: 0; margin-left: -1px; }
 .btn-group .btn:first-child { border-radius: var(--r-sm) 0 0 var(--r-sm); margin-left: 0; }
 .btn-group .btn:last-child  { border-radius: 0 var(--r-sm) var(--r-sm) 0; }
 .btn-group .btn:hover { position: relative; z-index: 1; }
 
-/* 原生复选框在深色底上最亮，会压过主操作；accent-color 只影响选中态，
-   所以用与 .login-check-box 相同的令牌重绘。 */
+/* Native checkboxes can be overly bright on a dark background; accent-color affects only the checked state,
+   so restyle with the same tokens as .login-check-box. */
 input[type="checkbox"] {
   appearance: none;
   -webkit-appearance: none;
@@ -230,7 +230,7 @@ input[type="checkbox"]:checked { background: var(--cyan-soft); border-color: var
 input[type="checkbox"]:checked::before { transform: scale(1); }
 input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(--cyan-soft); }
 
-/* 通用输入框 */
+/* Shared inputs */
 .input {
   background: var(--bg-0);
   border: 1px solid var(--line);
@@ -244,7 +244,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
 }
 .input:focus { border-color: var(--cyan-dim); box-shadow: 0 0 0 3px var(--cyan-soft); }
 
-/* 页面框架 */
+/* App layout */
 .app {
   display: grid;
   grid-template-columns: 232px 1fr;
@@ -258,7 +258,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
 .sidebar { grid-area: side; }
 .main    { grid-area: main; padding: 20px 24px 40px; min-width: 0; }
 
-/* 顶栏 */
+/* Top bar */
 .topbar {
   display: flex;
   align-items: center;
@@ -294,7 +294,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
   color: var(--fg-faint);
 }
 
-/* 侧栏 */
+/* Sidebar */
 .sidebar {
   background: linear-gradient(180deg, oklch(0.215 0.014 250) 0%, oklch(0.195 0.012 250) 100%);
   border-right: 1px solid var(--line);
@@ -308,7 +308,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
   border-bottom: 1px solid var(--line-soft);
 }
 .brand-name { font-size: 14px; font-weight: 600; letter-spacing: 0.02em; }
-/* 字标中的 "Boot" 用品牌蓝，支持时用渐变。 */
+/* Use brand blue (with optional gradient) for the Boot wordmark. */
 .brand-accent {
   color: var(--brand-sky);
   background: linear-gradient(90deg, var(--brand-sky), var(--brand-blue));
@@ -390,7 +390,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
   color: oklch(0.225 0.014 250);
 }
 
-/* 页头 */
+/* Page header */
 .page-head {
   display: flex;
   align-items: flex-end;
@@ -404,7 +404,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
   font-weight: 600;
   letter-spacing: -0.01em;
 }
-/* 标题与说明同一基线排列，省出首屏空间；窄屏自动折行。 */
+/* Align titles and descriptions to save vertical space; wrap automatically on narrow screens. */
 .page-head .page-title {
   display: flex;
   align-items: baseline;
@@ -417,7 +417,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
 }
 .page-head .actions { display: flex; gap: 8px; align-items: center; }
 
-/* 标签页 */
+/* Tabs */
 .tabs { display: flex; gap: 2px; border-bottom: 1px solid var(--line); margin-bottom: 18px; }
 .tab {
   padding: 10px 14px;
@@ -437,7 +437,7 @@ input[type="checkbox"]:focus-visible { outline: none; box-shadow: 0 0 0 3px var(
   margin-left: 6px;
 }
 
-/* 表格 */
+/* Tables */
 table.t { width: 100%; border-collapse: collapse; }
 table.t th, table.t td {
   text-align: left;
@@ -445,7 +445,7 @@ table.t th, table.t td {
   font-size: 13px;
   border-bottom: 1px solid var(--line-soft);
 }
-/* 表头是中文，不用大写和字距，靠字重和颜色区分层级。 */
+/* Use weight and color for table-header hierarchy without forced uppercase or letter spacing. */
 table.t th {
   color: var(--fg-faint);
   font-weight: 500;
@@ -457,18 +457,18 @@ table.t tbody tr { transition: background 0.1s; }
 table.t tbody tr:hover { background: var(--bg-2); }
 table.t td { color: var(--fg); }
 table.t .muted { color: var(--fg-mute); }
-/* 操作列：自动布局下 `width: 1%` 即收缩到内容宽，按钮不会被长名称挤压。 */
+/* Action column: width:1% shrinks to contents under auto table layout. */
 table.t th.t-actions, table.t td.t-actions { width: 1%; white-space: nowrap; }
-/* MAC、IP、时间、大小等机器值不可拆行；放长路径的单元格加 .ellip 取消。 */
+/* Keep MAC/IP/timestamps/sizes on one line; use .ellip for lengthy paths. */
 table.t td.mono { white-space: nowrap; }
 table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end; }
 
-/* 工具类 */
+/* Utilities */
 .row { display: flex; align-items: center; gap: 8px; }
 .col { display: flex; flex-direction: column; }
 .grow { flex: 1; }
 
-/* 统计数字 */
+/* Metrics */
 .stat-num {
   font-family: var(--font-mono);
   font-weight: 600;
@@ -479,7 +479,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 .stat-num.lg { font-size: 36px; }
 .stat-num .unit { font-size: 14px; color: var(--fg-mute); margin-left: 4px; font-weight: 400; }
 
-/* 进度条 */
+/* Progress bars */
 .bar {
   background: var(--bg-0);
   height: 6px;
@@ -493,10 +493,10 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 .bar.rose > span   { background: var(--rose); }
 .bar.violet > span { background: var(--violet); }
 
-/* 隐藏滚动条 */
+/* Hide scrollbars */
 .nosb::-webkit-scrollbar { display: none; }
 
-/* 侧栏底部用户下拉 */
+/* Sidebar user menu */
 .user-trigger {
   display: flex; align-items: center; gap: 10px;
   width: 100%;
@@ -575,7 +575,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 }
 
 /* ============================================================
-   登录页
+   Login page
    ============================================================ */
 .login-root {
   position: fixed; inset: 0;
@@ -590,7 +590,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 @keyframes loginOut { to { opacity: 0; transform: scale(1.02); filter: blur(8px); } }
 .login-root.leaving { animation: loginOut 0.55s ease both; }
 
-/* 开机网格背景：96 个迷你终端格 */
+/* Boot grid background with 96 miniature client cells */
 .login-grid {
   position: absolute; inset: -40px;
   display: grid;
@@ -653,7 +653,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   pointer-events: none;
 }
 
-/* 淡扫描线动画 */
+/* Subtle scanline animation */
 .login-scanline {
   position: absolute; inset: 0;
   background: repeating-linear-gradient(
@@ -682,7 +682,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   min-height: 0;
 }
 
-/* ── 左侧 ── */
+/* ── Left pane ── */
 .login-aside { display: flex; flex-direction: column; gap: 26px; min-width: 0; }
 .login-brand { display: flex; align-items: center; gap: 14px; }
 .login-mark {
@@ -772,7 +772,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 }
 .login-log-line { white-space: nowrap; transition: opacity 0.4s; }
 
-/* ── 右侧：表单卡片 ── */
+/* ── Right pane: form card ── */
 .login-form-wrap { display: grid; place-items: center; }
 .login-card {
   width: 100%;
@@ -793,7 +793,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   flex-direction: column;
   gap: 16px;
 }
-/* 角标 */
+/* Corner badge */
 .login-card-corner {
   position: absolute;
   width: 14px; height: 14px;
@@ -991,7 +991,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   backdrop-filter: blur(8px);
 }
 
-/* 响应式：窄屏堆叠 */
+/* Responsive narrow-screen stacking */
 @media (max-width: 1100px) {
   .login-stage { grid-template-columns: 1fr; padding: 40px; gap: 30px; }
   .login-stats { grid-template-columns: repeat(2, 1fr); }
@@ -999,17 +999,17 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   .login-bottom { padding: 14px 40px; }
 }
 
-/* 迷你折线图容器 */
+/* Mini sparkline container */
 .spark { height: 36px; width: 100%; }
 
-/* 淡入 */
+/* Fade in */
 @keyframes fadeIn { from { opacity: 0; transform: translateY(4px); } to { opacity: 1; transform: none; } }
 .fade-in { animation: fadeIn 0.25s ease both; }
 
-/* 抽屉滑入（存储池详情） */
+/* Drawer slide-in (storage pool details) */
 @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: none; opacity: 1; } }
 
-/* 光环（总览指标） */
+/* Glow (overview metrics) */
 .ring-wrap { position: relative; width: 96px; height: 96px; }
 .ring-wrap svg { width: 100%; height: 100%; transform: rotate(-90deg); }
 .ring-wrap .ring-bg { stroke: var(--bg-0); }
@@ -1020,7 +1020,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   text-align: center;
 }
 
-/* 拓扑节点 */
+/* Topology nodes */
 .topo-node {
   background: var(--bg-1);
   border: 1px solid var(--line);
@@ -1029,7 +1029,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   box-shadow: 0 4px 12px -6px oklch(0 0 0 / 0.6);
 }
 
-/* 紧凑面板的列表行 */
+/* Compact panel rows */
 .lrow {
   display: flex; align-items: center; gap: 10px;
   padding: 9px 14px;
@@ -1039,7 +1039,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 .lrow:last-child { border-bottom: none; }
 .lrow:hover { background: var(--bg-2); }
 
-/* 迷你终端格 */
+/* Mini client cells */
 .tmcell {
   min-height: 78px;
   background: var(--bg-1);
@@ -1052,7 +1052,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   position: relative;
   overflow: hidden;
 }
-/* 左侧色条表示状态；离线压暗底色但不降透明度，字要看得清。 */
+/* Left border indicates status; darken offline backgrounds without reducing text contrast. */
 .tmcell::before { content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 3px; background: transparent; }
 .tmcell:hover { transform: translateY(-1px); border-color: var(--cyan-dim); background: var(--bg-2); }
 .tmcell .tmh { display: flex; align-items: center; gap: 6px; min-width: 0; }
@@ -1073,7 +1073,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 .tmcell.s-warn .tmload > span { background: var(--amber); }
 .tmcell.s-err  .tmload > span { background: var(--rose); }
 
-/* 分段控件 */
+/* Segmented controls */
 .seg {
   display: inline-flex;
   background: var(--bg-2);
@@ -1091,7 +1091,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   cursor: pointer;
   font-family: inherit;
 }
-/* 选中态与其它激活态（导航、标签、焦点环）一样用青色，仅靠底色明度差看不出来。 */
+/* Use cyan for selections, like navigation, tabs and focus rings, instead of relying solely on background brightness. */
 .seg button.on {
   background: var(--cyan-soft);
   color: var(--cyan);
@@ -1099,7 +1099,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   box-shadow: 0 0 0 1px var(--cyan-dim) inset;
 }
 .seg button:hover:not(.on) { color: var(--fg); background: var(--bg-3); }
-/* 计数放在分段内，筛选与计数合为一个控件。 */
+/* Place counts within segments so filtering and counts share one control. */
 .seg button .n {
   font-family: var(--font-mono);
   font-size: 11px;
@@ -1108,9 +1108,9 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
 }
 .seg button.on .n { color: var(--cyan); }
 
-/* ── 页面公共部件 ──────────────────────────────────────────────────────── */
+/* ── Shared page components ──────────────────────────────────────────────────────── */
 
-/* 带前置图标的搜索框 */
+/* Search box with leading icon */
 .search-box {
   display: flex; align-items: center; gap: 8px;
   background: var(--bg-0);
@@ -1126,19 +1126,19 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   color: var(--fg); font-family: inherit; font-size: 13px; padding: 0;
 }
 
-/* 总览下排三张卡：节点负载窄、存储池与镜像宽；窄屏上下堆叠。 */
+/* Overview lower row: narrow node load card, wider storage/image cards; stack on small screens. */
 .overview-trio { display: grid; gap: 14px; grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.2fr) minmax(0, 1.25fr); }
 .overview-trio.duo { grid-template-columns: minmax(0, 1fr) minmax(0, 1.2fr); }
 @media (max-width: 1180px) { .overview-trio, .overview-trio.duo { grid-template-columns: 1fr; } }
 
-/* 分页栏 */
+/* Pagination bar */
 .pager {
   display: flex; align-items: center; justify-content: flex-end; gap: 10px;
   padding: 10px 16px;
   border-top: 1px solid var(--line-soft);
 }
 
-/* 统计卡片，模糊光斑属于卡片本身，不由调用方内联。 */
+/* Metric cards own their blurred glow; callers should not inline it. */
 .stat-card { padding: 14px 16px; position: relative; overflow: hidden; }
 .stat-card .stat-card-orb {
   position: absolute; right: -10px; top: -10px;
@@ -1147,9 +1147,9 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   pointer-events: none;
 }
 
-/* ── 响应式 ───────────────────────────────────────────────────────────
-   须适配 1366 笔记本和分屏：1180 以下侧栏收成图标栏；820 以下进一步精简框架，
-   宽表格在自身内滚动，不撑出页面横向滚动。 */
+/* ── Responsive design ───────────────────────────────────────────────────────────
+   Support 1366px laptops and split views: below 1180px collapse sidebar to icons; below 820px simplify the layout,
+   and scroll wide tables within their own containers. */
 @media (max-width: 1180px) {
   .app { grid-template-columns: 60px 1fr; }
   .brand { justify-content: center; padding: 14px 8px; }
@@ -1175,7 +1175,7 @@ table.t td.t-actions > div { display: flex; gap: 4px; justify-content: flex-end;
   .main { padding: 12px 12px 28px; }
   .page-head { flex-direction: column; align-items: flex-start; gap: 6px; }
   .page-head h1 { font-size: 19px; }
-  /* 多列表格在窄屏上原地横向滚动，页面本身不出现横向滚动条。 */
+  /* Allow wide tables to scroll horizontally without overflowing the page. */
   table.t { display: block; overflow-x: auto; }
   table.t th, table.t td { white-space: nowrap; }
 }

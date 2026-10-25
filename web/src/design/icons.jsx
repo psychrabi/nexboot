@@ -1,4 +1,4 @@
-// 轻量描边图标，默认 16x16、currentColor。
+// Lightweight outline icons, defaulting to 16x16 with currentColor.
 import React from "react";
 
 const Icon = ({
@@ -54,7 +54,7 @@ const Icons = {
       <path d="M4 12v6c0 1.7 3.6 3 8 3s8-1.3 8-3v-6" />
     </Icon>
   ),
-  // 系统标识：Windows 用实心四格窗（与描边的 Dashboard 区分），Linux 用企鹅。
+  // OS icons: Windows uses four solid panes to differ from the outline Dashboard; Linux uses a penguin.
   Windows: (p) => (
     <Icon fill="currentColor" stroke={0} {...p}>
       <path d="M3 5.6 10.4 4.6v6.9H3zM11.6 4.4 21 3v8.5h-9.4zM3 12.7h7.4v6.9L3 18.6zM11.6 12.7H21V21l-9.4-1.4z" />

@@ -1,11 +1,11 @@
 import { defineConfig } from 'vite';
 import react from '@vitejs/plugin-react';
 
-// `npm run dev` 的 API 代理目标，可用 ND_API_TARGET=http://localhost:9999 npm run dev 覆盖。
-// 默认不用 :8080，它常被连旧后端的 SSH 隧道占用。
+// Dev API proxy target; override with ND_API_TARGET=http://localhost:9999 npm run dev.
+// Do not default to :8080 because it may be occupied by an SSH tunnel to an old backend.
 const apiTarget = process.env.ND_API_TARGET || 'http://localhost:8091';
 
-// 构建产物经 go:embed 嵌入 Go 二进制（web/embed.go → all:dist）并同源提供，资源路径必须用相对 base。
+// Build assets are embedded by go:embed (web/embed.go → all:dist) and served same-origin; use relative base paths.
 export default defineConfig({
   plugins: [react()],
   base: './',
@@ -17,7 +17,7 @@ export default defineConfig({
       '/healthz': apiTarget,
     },
   },
-  // 测试跑在 jsdom 上，因为要验证的是浏览器行为：点击生效、轮询结束、计数渲染。
+  // Run tests under jsdom to validate clicks, polling and counters as browser behavior.
   test: {
     environment: 'jsdom',
     globals: true,

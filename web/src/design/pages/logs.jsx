@@ -7,18 +7,19 @@ import { useResource, usePageState } from "../../lib/hooks.js";
 import { fmtDateTimeSec as fmtDateTime } from "../../lib/format.js";
 const { useState } = React;
 
+// Preserve legacy audit module identifiers via Unicode escapes for historical log filters; display labels remain English.
 const MODULES = [
-  ["镜像", "Images"],
-  ["终端", "Clients"],
-  ["分组", "Groups"],
-  ["存储", "Storage"],
-  ["用户", "Users"],
-  ["服务器", "Servers"],
-  ["备份", "Backups"],
-  ["驱动", "Drivers"],
-  ["适配", "Adaptation"],
-  ["日志", "Logs"],
-  ["系统", "System"],
+  ["\u955c\u50cf", "Images"],
+  ["\u7ec8\u7aef", "Clients"],
+  ["\u5206\u7ec4", "Groups"],
+  ["\u5b58\u50a8", "Storage"],
+  ["\u7528\u6237", "Users"],
+  ["\u670d\u52a1\u5668", "Servers"],
+  ["\u5907\u4efd", "Backups"],
+  ["\u9a71\u52a8", "Drivers"],
+  ["\u9002\u914d", "Adaptation"],
+  ["\u65e5\u5fd7", "Logs"],
+  ["\u7cfb\u7edf", "System"],
 ];
 const fmtCost = (ms) => {
   ms = Number(ms || 0);

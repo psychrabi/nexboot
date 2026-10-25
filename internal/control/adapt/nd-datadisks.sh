@@ -1,7 +1,7 @@
 #!/bin/sh
-# ndiskless 数据盘挂载：导入 Linux 镜像时写入，每次开机由 nd-datadisks.service 运行。
-# 从 iBFT 取服务器地址与本机 MAC，向服务器要「LUN -> 挂载点」，按 LUN 找到 iSCSI 盘挂上。
-# 任何失败只写日志，不阻塞开机。日志：/var/log/nd-datadisks.log（每次开机覆盖）。
+# ndiskless data-disk mounting: installed when importing a Linux image and run at each boot by nd-datadisks.service.
+# Read server address and local MAC from iBFT, fetch LUN-to-mount-target mapping and mount the corresponding iSCSI disks.
+# Log failures without blocking boot. Log: /var/log/nd-datadisks.log (overwritten at boot).
 port='__ND_API_PORT__'
 exec >/var/log/nd-datadisks.log 2>&1
 echo "start $(date -Is)"
@@ -31,7 +31,7 @@ list=$(fetch "$url") || { echo "fetch $url failed; skip"; exit 0; }
 echo "disks from $server mac=$mac:"
 echo "$list"
 
-# 盘可能比服务晚出现：最多等 30 秒。
+# Disks may appear after the service starts; wait up to 30 seconds.
 find_disk() {
 	i=0
 	while [ $i -lt 30 ]; do

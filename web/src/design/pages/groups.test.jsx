@@ -1,76 +1,29 @@
-import React from "react";
-import { render, screen, waitFor, within } from "@testing-library/react";
-import userEvent from "@testing-library/user-event";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { api } from "../../lib/api.js";
-import { StoreProvider } from "../store.jsx";
-import { ConfirmProvider } from "../overlay.jsx";
-import { PageGroups } from "./groups.jsx";
+import React from 'react';
+import { render, screen, waitFor, within } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { api } from '../../lib/api.js';
+import { StoreProvider } from '../store.jsx';
+import { ConfirmProvider } from '../overlay.jsx';
+import { PageGroups } from './groups.jsx';
 
-// 分组绑定 镜像 → 配置（还原点用配置的应用点）。<select> 值为空时仍显示第一项，
-// 防止表单值为空而下一级报「无可用配置」。
+// Groups bind an image and configuration (using that configuration's applied restore point).
+// Select state must match the visible option so downstream configurations can load.
 
 const list = (items) => ({ items, total: items.length });
 const IMAGES = [
-  {
-    ID: "isharedisk",
-    Name: "isharedisk",
-    OSType: "windows",
-    State: "normal",
-    Purpose: "system",
-    CreatedAt: "2026-07-30T10:00:00Z",
-  },
-  {
-    ID: "games",
-    Name: "games",
-    OSType: "windows",
-    State: "normal",
-    Purpose: "data",
-    CreatedAt: "2026-08-18T10:00:00Z",
-  },
-  {
-    ID: "linuxdata",
-    Name: "linuxdata",
-    OSType: "linux",
-    State: "normal",
-    Purpose: "data",
-    CreatedAt: "2026-08-18T10:00:00Z",
-  },
+  { ID: 'isharedisk', Name: 'isharedisk', OSType: 'windows', State: 'normal', Purpose: 'system', CreatedAt: '2026-07-30T10:00:00Z' },
+  { ID: 'games', Name: 'games', OSType: 'windows', State: 'normal', Purpose: 'data', CreatedAt: '2026-08-18T10:00:00Z' },
+  { ID: 'linuxdata', Name: 'linuxdata', OSType: 'linux', State: 'normal', Purpose: 'data', CreatedAt: '2026-08-18T10:00:00Z' },
 ];
-const CONFIGS = [
-  {
-    ID: "isharedisk_default",
-    ImageID: "isharedisk",
-    Name: "default",
-    DefaultReductionID: "isharedisk_default_0",
-  },
-];
-const REDUCTIONS = [
-  {
-    ID: "isharedisk_default_0",
-    ConfigID: "isharedisk_default",
-    Name: "@0",
-    DisplayName: "0",
-    Status: "ready",
-  },
-];
-// 服务器的客户机网段：网络字段的判定依据和新分组默认值的来源。
+const CONFIGS = [{ ID: 'isharedisk_default', ImageID: 'isharedisk', Name: 'default', DefaultReductionID: 'isharedisk_default_0' }];
+const REDUCTIONS = [{ ID: 'isharedisk_default_0', ConfigID: 'isharedisk_default', Name: '@0', DisplayName: '0', Status: 'ready' }];
+// The server's client subnet determines defaults and validates network fields.
 const NETWORK = {
-  interfaces: [
-    { name: "ndbr0", addrs: ["192.168.50.1/24"], up: true, client: true },
-  ],
-  client_iface: "ndbr0",
-  client_networks: ["192.168.50.1/24"],
-  server_addrs: ["192.168.50.1"],
-  boot_host: "192.168.50.1",
-  allow_cross_subnet: false,
-  known: true,
-  suggest: {
-    start_ip: "192.168.50.10",
-    client_max: 30,
-    netmask: "255.255.255.0",
-    gateway: "",
-  },
+  interfaces: [{ name: 'ndbr0', addrs: ['192.168.50.1/24'], up: true, client: true }],
+  client_iface: 'ndbr0', client_networks: ['192.168.50.1/24'], server_addrs: ['192.168.50.1'],
+  boot_host: '192.168.50.1', allow_cross_subnet: false, known: true,
+  suggest: { start_ip: '192.168.50.10', client_max: 30, netmask: '255.255.255.0', gateway: '' },
   groups: [],
 };
 
@@ -93,588 +46,316 @@ function stubApi(overrides = {}) {
   }
 }
 
-const renderPage = () =>
-  render(
-    <StoreProvider>
-      <ConfirmProvider>
-        <PageGroups />
-      </ConfirmProvider>
-    </StoreProvider>,
-  );
+const renderPage = () => render(
+  <StoreProvider><ConfirmProvider><PageGroups/></ConfirmProvider></StoreProvider>,
+);
 
-describe("分组页", () => {
+describe('Groups page', () => {
   beforeEach(() => stubApi());
   afterEach(() => vi.restoreAllMocks());
 
-  it("新建分组时三级联动都有值，而不是「无可用配置」", async () => {
+  it('Populates all cascading selectors when creating a group', async () => {
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
 
-    // 下拉显示的镜像必须就是表单里的值，否则下一级查不到配置。
-    await waitFor(() =>
-      expect(api.listConfigs).toHaveBeenCalledWith("isharedisk"),
-    );
+    // Ensure the selected image matches form state so configurations can resolve.
+    await waitFor(() => expect(api.listConfigs).toHaveBeenCalledWith('isharedisk'));
 
-    expect(screen.queryByText("No configurations available")).toBeNull();
-    expect(await screen.findByText("default")).toBeTruthy();
+    expect(screen.queryByText('No configurations available')).toBeNull();
+    expect(await screen.findByText('default')).toBeTruthy();
   });
 
-  it("保存时带上镜像 / 配置", async () => {
-    const createGroup = vi.fn(async () => ({ ID: "g-1" }));
+  it('Saves the selected image and configuration', async () => {
+    const createGroup = vi.fn(async () => ({ ID: 'g-1' }));
     stubApi({ createGroup });
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
     await waitFor(() => expect(api.listConfigs).toHaveBeenCalled());
 
-    // 名称框没有 placeholder，Field 把标签渲染成兄弟 div，只能经共同父节点找输入框。
-    const nameField = screen
-      .getByText(/Group Name/)
-      .parentElement.querySelector("input");
-    await userEvent.type(nameField, "教学一班");
-    await userEvent.click(screen.getByRole("button", { name: "Save" }));
+    // Group Name input has no placeholder; locate it through the Field container.
+    const nameField = screen.getByText(/Group Name/).parentElement.querySelector('input');
+    await userEvent.type(nameField, 'Classroom A');
+    await userEvent.click(screen.getByRole('button', { name: 'Save' }));
 
-    await waitFor(() => expect(createGroup).toHaveBeenCalled(), {
-      timeout: 3000,
-    });
+    await waitFor(() => expect(createGroup).toHaveBeenCalled(), { timeout: 3000 });
     const body = createGroup.mock.calls[0][0];
-    expect(body.system_image_id).toBe("isharedisk");
-    expect(body.system_config_id).toBe("isharedisk_default");
-    // 还原点在配置上「应用」决定，不按分组选。
+    expect(body.system_image_id).toBe('isharedisk');
+    expect(body.system_config_id).toBe('isharedisk_default');
+    // Applied restore points belong to configurations, not individual groups.
     expect(body.system_reduction_id).toBeUndefined();
   });
 
-  // 系统盘只列系统镜像，数据盘只列同系统的数据盘镜像。
-  it("系统盘与数据盘各自只列出对应用途的镜像", async () => {
-    stubApi({
-      listGroups: async () =>
-        list([
-          {
-            ID: "g-1",
-            Name: "教学一班",
-            StartIP: "192.168.10.10",
-            ClientMax: 30,
-            Gateway: "192.168.10.1",
-            Netmask: "255.255.255.0",
-            SystemImageID: "isharedisk",
-            SystemConfigID: "isharedisk_default",
-            SystemReductionID: "isharedisk_default_0",
-          },
-        ]),
-    });
+  // Show boot images for system disks and OS-compatible images for data disks.
+  it('Filters system and data disk image choices by purpose', async () => {
+    stubApi({ listGroups: async () => list([
+      { ID: 'g-1', Name: 'Classroom A', StartIP: '192.168.10.10', ClientMax: 30, Gateway: '192.168.10.1', Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default', SystemReductionID: 'isharedisk_default_0' },
+    ]) });
     renderPage();
-    await screen.findByText("教学一班");
-    await userEvent.click(screen.getByRole("button", { name: /New Group/ }));
-    const sys = await screen.findByLabelText("System Image");
-    const sysOptions = [...sys.querySelectorAll("option")].map((o) => o.value);
-    expect(sysOptions).toContain("isharedisk");
-    expect(sysOptions).not.toContain("games");
+    await screen.findByText('Classroom A');
+    await userEvent.click(screen.getByRole('button', { name: /New Group/ }));
+    const sys = await screen.findByLabelText('System Image');
+    const sysOptions = [...sys.querySelectorAll('option')].map(o => o.value);
+    expect(sysOptions).toContain('isharedisk');
+    expect(sysOptions).not.toContain('games');
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /Add Data Disk/ }),
-    );
-    const data = await screen.findByLabelText("New Data Disk 1 Image");
-    const dataOptions = [...data.querySelectorAll("option")].map(
-      (o) => o.value,
-    );
-    expect(dataOptions).toEqual(["games"]); // 只有 Windows Data Disks
+    await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+    const data = await screen.findByLabelText('New Data Disk 1 Image');
+    const dataOptions = [...data.querySelectorAll('option')].map(o => o.value);
+    expect(dataOptions).toEqual(['games']); // Only Windows data disks
   });
 
-  // 还没导入镜像时表单要明说无可绑定，不能看起来像可以提交。
-  it("真的没有镜像时才显示「无可用镜像」", async () => {
-    stubApi({
-      listImages: async () => list([]),
-      listConfigs: async () => list([]),
-      listReductions: async () => list([]),
-    });
+  // Clearly indicate when no image can be selected before an import.
+  it('Displays an empty-state message only when there are no images', async () => {
+    stubApi({ listImages: async () => list([]), listConfigs: async () => list([]), listReductions: async () => list([]) });
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
-    expect(await screen.findByText("No images available")).toBeTruthy();
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    expect(await screen.findByText('No images available')).toBeTruthy();
   });
 
-  // 表单默认值取自服务器网段，不能是代码里写死的地址。
-  it("新建分组的网络默认值来自服务器客户机网卡", async () => {
+  // Form network defaults come from the server subnet, not hard-coded values.
+  it('Uses the server client NIC for initial group network defaults', async () => {
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
-    expect((await screen.findByLabelText("Starting IP")).value).toBe(
-      "192.168.50.10",
-    );
-    expect(screen.getByLabelText("Subnet Mask").value).toBe("255.255.255.0");
-    expect(screen.getByLabelText("Gateway").value).toBe("");
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    expect((await screen.findByLabelText('Starting IP')).value).toBe('192.168.50.10');
+    expect(screen.getByLabelText('Subnet Mask').value).toBe('255.255.255.0');
+    expect(screen.getByLabelText('Gateway').value).toBe('');
     expect(await screen.findByText(/Same Subnet/)).toBeTruthy();
   });
 
-  // 区间不在客户机网段内时：状态行点名网卡、保存置灰，一键填入可用区间。
-  it("网段不在服务器客户机网卡时拦住并给出出路", async () => {
+  // For out-of-subnet ranges, identify the NIC, disable Save and offer a suggested range.
+  it('Blocks invalid subnets and offers a corrective action', async () => {
     const getNetwork = vi.fn(async () => NETWORK);
-    const createGroup = vi.fn(async () => ({ ID: "g-1" }));
+    const createGroup = vi.fn(async () => ({ ID: 'g-1' }));
     stubApi({ getNetwork, createGroup });
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
-    const start = await screen.findByLabelText("Starting IP");
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    const start = await screen.findByLabelText('Starting IP');
     await userEvent.clear(start);
-    await userEvent.type(start, "192.168.10.50");
+    await userEvent.type(start, '192.168.10.50');
     const status = await screen.findByText(/Outside the server client subnet/);
-    expect(status.parentElement.textContent).toContain("ndbr0");
-    expect(screen.getByRole("button", { name: "Save" }).disabled).toBe(true);
+    expect(status.parentElement.textContent).toContain('ndbr0');
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(true);
 
-    await userEvent.click(
-      screen.getByRole("button", { name: /Use 192\.168\.50\.10/ }),
-    );
-    await waitFor(() =>
-      expect(screen.getByLabelText("Starting IP").value).toBe("192.168.50.10"),
-    );
+    await userEvent.click(screen.getByRole('button', { name: /Use 192\.168\.50\.10/ }));
+    await waitFor(() => expect(screen.getByLabelText('Starting IP').value).toBe('192.168.50.10'));
     expect(await screen.findByText(/Same Subnet/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Save" }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(false);
   });
 
-  // 允许跨网段时同样的区间算中继分组：网关栏标明是中继地址，并可探测。
-  it("允许跨网段时按中继提示，网关可检测", async () => {
-    const probeNetwork = vi.fn(async () => ({
-      ip: "192.168.10.1",
-      reachable: true,
-      rtt_ms: 0.4,
-    }));
-    stubApi({
-      getNetwork: async () => ({ ...NETWORK, allow_cross_subnet: true }),
-      probeNetwork,
-    });
+  // With cross-subnet support enabled, classify the range as relayed and allow gateway tests.
+  it('Shows relay help and tests gateway when cross-subnet is enabled', async () => {
+    const probeNetwork = vi.fn(async () => ({ ip: '192.168.10.1', reachable: true, rtt_ms: 0.4 }));
+    stubApi({ getNetwork: async () => ({ ...NETWORK, allow_cross_subnet: true }), probeNetwork });
     renderPage();
-    await userEvent.click(
-      await screen.findByRole("button", { name: /New Group/ }),
-    );
-    const start = await screen.findByLabelText("Starting IP");
+    await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+    const start = await screen.findByLabelText('Starting IP');
     await userEvent.clear(start);
-    await userEvent.type(start, "192.168.10.50");
+    await userEvent.type(start, '192.168.10.50');
     expect(await screen.findByText(/Cross-subnet · DHCP Relay/)).toBeTruthy();
-    const gw = screen.getByLabelText("Gateway (Relay Address)");
-    await userEvent.type(gw, "192.168.10.1");
-    await userEvent.click(screen.getByRole("button", { name: "Test" }));
-    await waitFor(() =>
-      expect(probeNetwork).toHaveBeenCalledWith("192.168.10.1"),
-    );
+    const gw = screen.getByLabelText('Gateway (Relay Address)');
+    await userEvent.type(gw, '192.168.10.1');
+    await userEvent.click(screen.getByRole('button', { name: 'Test' }));
+    await waitFor(() => expect(probeNetwork).toHaveBeenCalledWith('192.168.10.1'));
     expect(await screen.findByText(/Reachable/)).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Save" }).disabled).toBe(false);
+    expect(screen.getByRole('button', { name: 'Save' }).disabled).toBe(false);
   });
 
-  // 已落在错误网段的分组要标出来并提供迁移，预览每台机器的新地址。
-  it("不在服务器网段的存量分组可一键改到服务器网段", async () => {
-    const group = {
-      ID: "g-1",
-      Name: "vmdk",
-      StartIP: "192.168.10.50",
-      ClientMax: 30,
-      Gateway: "192.168.10.1",
-      Netmask: "255.255.255.0",
-      DNS1: "223.5.5.5",
-      SystemImageID: "isharedisk",
-      SystemConfigID: "isharedisk_default",
-    };
-    const previewGroupNetwork = vi.fn(async () => ({
-      status: "same",
-      terminals: [
-        {
-          id: "t1",
-          name: "001",
-          mac: "00505625442C",
-          old_ip: "192.168.10.50",
-          new_ip: "192.168.50.50",
-        },
-      ],
-    }));
+  // Flag misplaced groups and preview each client's new IP before migration.
+  it('Moves existing out-of-subnet groups to the server subnet', async () => {
+    const group = { ID: 'g-1', Name: 'vmdk', StartIP: '192.168.10.50', ClientMax: 30, Gateway: '192.168.10.1', Netmask: '255.255.255.0', DNS1: '223.5.5.5', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' };
+    const previewGroupNetwork = vi.fn(async () => ({ status: 'same', terminals: [{ id: 't1', name: '001', mac: '00505625442C', old_ip: '192.168.10.50', new_ip: '192.168.50.50' }] }));
     const updateGroup = vi.fn(async () => group);
     stubApi({
       listGroups: async () => list([group]),
-      getNetwork: async (clientMax) => ({
-        ...NETWORK,
-        suggest: {
-          start_ip: "192.168.50.50",
-          client_max: clientMax || 30,
-          netmask: "255.255.255.0",
-          gateway: "",
-        },
-        groups: [
-          {
-            id: "g-1",
-            name: "vmdk",
-            start_ip: "192.168.10.50",
-            client_max: 30,
-            status: "blocked",
-          },
-        ],
-      }),
-      previewGroupNetwork,
-      updateGroup,
+      getNetwork: async (clientMax) => ({ ...NETWORK, suggest: { start_ip: '192.168.50.50', client_max: clientMax || 30, netmask: '255.255.255.0', gateway: '' }, groups: [{ id: 'g-1', name: 'vmdk', start_ip: '192.168.10.50', client_max: 30, status: 'blocked' }] }),
+      previewGroupNetwork, updateGroup,
     });
     renderPage();
-    expect(await screen.findByText("Blocked")).toBeTruthy();
-    await userEvent.click(
-      screen.getByRole("button", { name: /Move to Server Subnet/ }),
-    );
-    await waitFor(() =>
-      expect(previewGroupNetwork).toHaveBeenCalledWith(
-        "g-1",
-        expect.objectContaining({ start_ip: "192.168.50.50", client_max: 30 }),
-      ),
-    );
-    expect(await screen.findByText("192.168.50.50")).toBeTruthy();
-    await userEvent.click(
-      screen.getByRole("button", { name: "Confirm Change" }),
-    );
-    await waitFor(() =>
-      expect(updateGroup).toHaveBeenCalledWith(
-        "g-1",
-        expect.objectContaining({
-          start_ip: "192.168.50.50",
-          gateway: "",
-          system_image_id: "isharedisk",
-        }),
-      ),
-    );
+    expect(await screen.findByText('Blocked')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: /Move to Server Subnet/ }));
+    await waitFor(() => expect(previewGroupNetwork).toHaveBeenCalledWith('g-1', expect.objectContaining({ start_ip: '192.168.50.50', client_max: 30 })));
+    expect(await screen.findByText('192.168.50.50')).toBeTruthy();
+    await userEvent.click(screen.getByRole('button', { name: 'Confirm Change' }));
+    await waitFor(() => expect(updateGroup).toHaveBeenCalledWith('g-1', expect.objectContaining({ start_ip: '192.168.50.50', gateway: '', system_image_id: 'isharedisk' })));
   });
 
-  it("多节点时新建分组出现「存储节点」选择，提交带 storage_server_id", async () => {
+  it('Provides storage node selector for multi-node groups and submits storage_server_id', async () => {
     let sent = null;
     stubApi({
-      listClusterNodes: async () =>
-        list([
-          { id: "node-a", name: "主机A", online: true, ha_state: "active" },
-          { id: "node-b", name: "备机B", online: true, ha_state: "standby" },
-        ]),
-      createGroup: async (body) => {
-        sent = body;
-        return { ID: "g1", ...body };
-      },
+      listClusterNodes: async () => list([
+        { id: 'node-a', name: 'Server A', online: true, ha_state: 'active' },
+        { id: 'node-b', name: 'Server B', online: true, ha_state: 'standby' },
+      ]),
+      createGroup: async (body) => { sent = body; return { ID: 'g1', ...body }; },
     });
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "New Group" }));
-    const picker = await screen.findByLabelText("Storage Node");
-    // 默认自动均衡，运维不必先规划分组
-    expect(picker.value).toBe("");
-    expect(
-      Array.from(picker.options).some((o) =>
-        /Automatic balancing/.test(o.text),
-      ),
-    ).toBe(true);
-    await user.selectOptions(picker, "node-b");
-    await user.type(screen.getByLabelText("Group Name"), "放置组");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    const picker = await screen.findByLabelText('Storage Node');
+    // Automatic balancing is the default; placement needs no advance planning.
+    expect(picker.value).toBe('');
+    expect(Array.from(picker.options).some(o => /Automatic balancing/.test(o.text))).toBe(true);
+    await user.selectOptions(picker, 'node-b');
+    await user.type(screen.getByLabelText('Group Name'), 'Placement Group');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
     await waitFor(() => expect(sent).not.toBeNull());
-    expect(sent.storage_server_id).toBe("node-b");
+    expect(sent.storage_server_id).toBe('node-b');
   });
 
-  it("单节点时不出现「存储节点」选择", async () => {
+  it('Omits storage node selector on a standalone host', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "New Group" }));
-    await screen.findByLabelText("Group Name");
-    expect(screen.queryByLabelText("Storage Node")).toBeNull();
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    await screen.findByLabelText('Group Name');
+    expect(screen.queryByLabelText('Storage Node')).toBeNull();
   });
 
-  // 新建分组预填两个公共 DNS（可改），否则客户机有网关却解析不了域名。
-  it("新建分组预填两个 DNS，主备顺序按国内网络排", async () => {
+  // Prepopulate editable DNS servers so clients can resolve names.
+  it('Prepopulates two DNS addresses in preferred order', async () => {
     const user = userEvent.setup();
     renderPage();
-    await user.click(await screen.findByRole("button", { name: "New Group" }));
-    await screen.findByLabelText("Group Name");
+    await user.click(await screen.findByRole('button', { name: 'New Group' }));
+    await screen.findByLabelText('Group Name');
 
-    const dns1 = screen.getByLabelText("DNS1");
-    const dns2 = screen.getByLabelText("DNS2");
-    expect(dns1.value).toBe("114.114.114.114");
-    expect(dns2.value).toBe("223.5.5.5");
+    const dns1 = screen.getByLabelText('DNS1');
+    const dns2 = screen.getByLabelText('DNS2');
+    expect(dns1.value).toBe('114.114.114.114');
+    expect(dns2.value).toBe('223.5.5.5');
   });
 
-  // 改网段时要如实提示：运行中的客户机续租时会换地址，Windows 的 IP 一变 iSCSI 就断。
-  it("改网段的预览标出正在运行的机器，并说清后果", async () => {
+  // Warn that renewed DHCP leases on active Windows clients can break iSCSI connectivity.
+  it('Previews running clients and network-change consequences', async () => {
     const user = userEvent.setup();
-    // 分组要在客户机网段内，否则 save() 先被网段校验拦下
+    // Ensure test group initially passes network validation.
     stubApi({
-      listGroups: async () =>
-        list([
-          {
-            ID: "g-1",
-            Name: "教学一班",
-            StartIP: "192.168.50.100",
-            ClientMax: 10,
-            Gateway: "192.168.50.1",
-            Netmask: "255.255.255.0",
-            SystemImageID: "isharedisk",
-            SystemConfigID: "isharedisk_default",
-          },
-        ]),
+      listGroups: async () => list([
+        { ID: 'g-1', Name: 'Classroom A', StartIP: '192.168.50.100', ClientMax: 10, Gateway: '192.168.50.1', Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' },
+      ]),
     });
-    vi.spyOn(api, "previewGroupNetwork").mockResolvedValue({
-      status: "ok",
-      online_count: 1,
+    vi.spyOn(api, 'previewGroupNetwork').mockResolvedValue({
+      status: 'ok', online_count: 1,
       terminals: [
-        {
-          id: "t1",
-          name: "01号机",
-          mac: "AABBCCDDEE01",
-          old_ip: "192.168.50.100",
-          new_ip: "192.168.50.150",
-          online: true,
-        },
-        {
-          id: "t2",
-          name: "02号机",
-          mac: "AABBCCDDEE02",
-          old_ip: "192.168.50.101",
-          new_ip: "192.168.50.151",
-          online: false,
-        },
+        { id: 't1', name: 'Client 01', mac: 'AABBCCDDEE01', old_ip: '192.168.50.100', new_ip: '192.168.50.150', online: true },
+        { id: 't2', name: 'Client 02', mac: 'AABBCCDDEE02', old_ip: '192.168.50.101', new_ip: '192.168.50.151', online: false },
       ],
     });
     renderPage();
-    await user.click((await screen.findByText("教学一班")).closest("tr"));
-    await user.click(
-      await screen.findByRole("button", { name: /改网段|Edit/ }),
-    );
-    await screen.findByLabelText("Group Name");
-    const start = screen.getByLabelText("Starting IP");
+    await user.click((await screen.findByText('Classroom A')).closest('tr'));
+    await user.click(await screen.findByRole('button', { name: /Change subnet|Edit/ }));
+    await screen.findByLabelText('Group Name');
+    const start = screen.getByLabelText('Starting IP');
     await user.clear(start);
-    await user.type(start, "192.168.50.150");
-    await user.click(screen.getByRole("button", { name: "Save" }));
+    await user.type(start, '192.168.50.150');
+    await user.click(screen.getByRole('button', { name: 'Save' }));
 
-    const dlg = await screen.findByText(/台终端的地址跟着换/);
-    const card = dlg.closest(".card");
-    // 在线那台要看得出来
-    const row = Array.from(card.querySelectorAll("tbody tr")).find((tr) =>
-      tr.textContent.includes("AABBCCDDEE01"),
-    );
+    const dlg = await screen.findByText(/ client addresses will change/);
+    const card = dlg.closest('.card');
+    // Highlight the running client.
+    const row = Array.from(card.querySelectorAll('tbody tr')).find(tr => tr.textContent.includes('AABBCCDDEE01'));
     expect(within(row).getByText(/Running|Online/)).toBeTruthy();
-    // 后果要如实写，不能只说「下次开机生效」
+    // Describe lease renewal consequences, not merely next-boot effects.
     expect(card.textContent).toMatch(/lease renewal|disconnect|disconnect/);
   });
 
-  // 数据盘在新建 / 编辑弹窗里一起设置，不用建完分组再单独配一遍。
-  describe("数据盘随分组一起设置", () => {
-    const DATA_CONFIGS = {
-      games: [{ ID: "games_default", ImageID: "games", Name: "default" }],
-    };
+  // Configure data disks within group Create/Edit rather than as a separate step.
+  describe('Configure data disks with groups', () => {
+    const DATA_CONFIGS = { games: [{ ID: 'games_default', ImageID: 'games', Name: 'default' }] };
     const configsOf = async (img) => list(DATA_CONFIGS[img] || CONFIGS);
-    const GROUP = {
-      ID: "g-1",
-      Name: "教学一班",
-      StartIP: "192.168.50.100",
-      ClientMax: 10,
-      Gateway: "192.168.50.1",
-      Netmask: "255.255.255.0",
-      SystemImageID: "isharedisk",
-      SystemConfigID: "isharedisk_default",
-    };
+    const GROUP = { ID: 'g-1', Name: 'Classroom A', StartIP: '192.168.50.100', ClientMax: 10, Gateway: '192.168.50.1', Netmask: '255.255.255.0', SystemImageID: 'isharedisk', SystemConfigID: 'isharedisk_default' };
 
-    it("新建分组时一起添加数据盘，盘符默认填下一个空闲的", async () => {
-      const createGroup = vi.fn(async () => ({ ID: "g-new" }));
+    it('Adds a data disk when creating a group and chooses the next free drive letter', async () => {
+      const createGroup = vi.fn(async () => ({ ID: 'g-new' }));
       const createGroupDisk = vi.fn(async () => ({}));
       stubApi({ createGroup, createGroupDisk, listConfigs: configsOf });
       renderPage();
-      await userEvent.click(
-        await screen.findByRole("button", { name: /New Group/ }),
-      );
-      await userEvent.type(
-        await screen.findByLabelText("Group Name"),
-        "电竞区",
-      );
-      await userEvent.click(
-        screen.getByRole("button", { name: /Add Data Disk/ }),
-      );
-      expect(screen.getByLabelText("New Data Disk 1 Mount Target").value).toBe(
-        "D:",
-      );
-      await waitFor(() =>
-        expect(
-          screen.getByLabelText("New Data Disk 1 Configuration").value,
-        ).toBe("games_default"),
-      );
-      await userEvent.click(screen.getByRole("button", { name: "Save" }));
-      await waitFor(() =>
-        expect(createGroupDisk).toHaveBeenCalledWith("g-new", {
-          mount_target: "D:",
-          image_id: "games",
-          config_id: "games_default",
-        }),
-      );
+      await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+      await userEvent.type(await screen.findByLabelText('Group Name'), 'Gaming Zone');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      expect(screen.getByLabelText('New Data Disk 1 Mount Target').value).toBe('D:');
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(createGroupDisk).toHaveBeenCalledWith('g-new', { mount_target: 'D:', image_id: 'games', config_id: 'games_default' }));
       expect(createGroup).toHaveBeenCalledTimes(1);
     });
 
-    it("编辑时列出已有数据盘，可移除旧的、添加新的", async () => {
+    it('Edits group data disks by removing or adding disks', async () => {
       const updateGroup = vi.fn(async () => ({}));
       const deleteGroupDisk = vi.fn(async () => null);
       const createGroupDisk = vi.fn(async () => ({}));
       stubApi({
-        listGroups: async () => list([GROUP]),
-        listConfigs: configsOf,
-        updateGroup,
-        deleteGroupDisk,
-        createGroupDisk,
-        listGroupDisks: async () =>
-          list([
-            {
-              ID: "gd-1",
-              GroupID: "g-1",
-              MountTarget: "D:",
-              ImageID: "games",
-              ConfigID: "games_default",
-            },
-          ]),
+        listGroups: async () => list([GROUP]), listConfigs: configsOf, updateGroup, deleteGroupDisk, createGroupDisk,
+        listGroupDisks: async () => list([{ ID: 'gd-1', GroupID: 'g-1', MountTarget: 'D:', ImageID: 'games', ConfigID: 'games_default' }]),
       });
       renderPage();
-      await screen.findByText("教学一班");
-      // 卡片直接显示数据盘，不再要单独的「数据盘」按钮。
-      await waitFor(() => expect(screen.getByText("D:")).toBeTruthy());
-      expect(screen.queryByRole("button", { name: /^Data Disks$/ })).toBeNull();
+      await screen.findByText('Classroom A');
+      // Show data disks on the group card, without a separate Data Disks button.
+      await waitFor(() => expect(screen.getByText('D:')).toBeTruthy());
+      expect(screen.queryByRole('button', { name: /^Data Disks$/ })).toBeNull();
 
-      await userEvent.click(screen.getByRole("button", { name: /Edit/ }));
-      await screen.findByLabelText("Group Name");
-      await userEvent.click(
-        screen.getByRole("button", { name: /Add Data Disk/ }),
-      );
-      expect(screen.getByLabelText("New Data Disk 1 Mount Target").value).toBe(
-        "E:",
-      );
-      await userEvent.click(
-        screen.getByRole("button", { name: "Remove Data Disk D:" }),
-      );
-      await waitFor(() =>
-        expect(
-          screen.getByLabelText("New Data Disk 1 Configuration").value,
-        ).toBe("games_default"),
-      );
-      await userEvent.click(screen.getByRole("button", { name: "Save" }));
-      await waitFor(() =>
-        expect(createGroupDisk).toHaveBeenCalledWith("g-1", {
-          mount_target: "E:",
-          image_id: "games",
-          config_id: "games_default",
-        }),
-      );
+      await userEvent.click(screen.getByRole('button', { name: /Edit/ }));
+      await screen.findByLabelText('Group Name');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      expect(screen.getByLabelText('New Data Disk 1 Mount Target').value).toBe('E:');
+      await userEvent.click(screen.getByRole('button', { name: 'Remove Data Disk D:' }));
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      await waitFor(() => expect(createGroupDisk).toHaveBeenCalledWith('g-1', { mount_target: 'E:', image_id: 'games', config_id: 'games_default' }));
       expect(updateGroup).toHaveBeenCalled();
-      expect(deleteGroupDisk).toHaveBeenCalledWith("gd-1");
+      expect(deleteGroupDisk).toHaveBeenCalledWith('gd-1');
     });
 
-    it("卡片只列系统盘和数据盘，网络细节留在弹窗；数据盘说明点问号才展开", async () => {
+    it('Keeps network details in dialogs and disk help behind a tooltip', async () => {
       stubApi({
-        listGroups: async () => list([GROUP]),
-        listConfigs: configsOf,
-        listGroupDisks: async () =>
-          list([
-            {
-              ID: "gd-1",
-              GroupID: "g-1",
-              MountTarget: "D:",
-              ImageID: "games",
-              ConfigID: "games_default",
-            },
-          ]),
+        listGroups: async () => list([GROUP]), listConfigs: configsOf,
+        listGroupDisks: async () => list([{ ID: 'gd-1', GroupID: 'g-1', MountTarget: 'D:', ImageID: 'games', ConfigID: 'games_default' }]),
       });
       renderPage();
-      await screen.findByText("教学一班");
-      await waitFor(() => expect(screen.getByText("D:")).toBeTruthy());
-      expect(screen.queryByText("Subnet Mask")).toBeNull();
-      await userEvent.click(screen.getByRole("button", { name: /Edit/ }));
-      await screen.findByLabelText("Group Name");
-      expect(
-        screen.queryByText(
-          /Additional disks mounted alongside the system disk/,
-        ),
-      ).toBeNull();
-      await userEvent.click(
-        screen.getByRole("button", { name: "Data Disk Help" }),
-      );
-      expect(
-        screen.getByText(/Additional disks mounted alongside the system disk/),
-      ).toBeTruthy();
+      await screen.findByText('Classroom A');
+      await waitFor(() => expect(screen.getByText('D:')).toBeTruthy());
+      expect(screen.queryByText('Subnet Mask')).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: /Edit/ }));
+      await screen.findByLabelText('Group Name');
+      expect(screen.queryByText(/Additional disks mounted alongside the system disk/)).toBeNull();
+      await userEvent.click(screen.getByRole('button', { name: 'Data Disk Help' }));
+      expect(screen.getByText(/Additional disks mounted alongside the system disk/)).toBeTruthy();
     });
 
-    // 右上角三个数各带标签：在线 / 已分配 / 容量；按钮不再带数字，免得和它们混淆。
-    it("右上角是在线 / 已分配 / 容量，满员时容量标出来", async () => {
+    // Show labeled Online/Assigned/Capacity statistics without duplicating numbers in buttons.
+    it('Shows Online, Assigned and Capacity, highlighting full groups', async () => {
       stubApi({
-        listGroups: async () => list([{ ...GROUP, ClientMax: 2 }]),
-        listConfigs: configsOf,
-        listTerminals: async () =>
-          list([
-            {
-              ID: "t1",
-              Name: "01",
-              MAC: "AA",
-              GroupID: "g-1",
-              State: "online",
-            },
-            {
-              ID: "t2",
-              Name: "02",
-              MAC: "BB",
-              GroupID: "g-1",
-              State: "offline",
-            },
-          ]),
+        listGroups: async () => list([{ ...GROUP, ClientMax: 2 }]), listConfigs: configsOf,
+        listTerminals: async () => list([
+          { ID: 't1', Name: '01', MAC: 'AA', GroupID: 'g-1', State: 'online' },
+          { ID: 't2', Name: '02', MAC: 'BB', GroupID: 'g-1', State: 'offline' },
+        ]),
       });
       renderPage();
-      const card = (await screen.findByText("教学一班")).closest(".card");
-      const stat = (label) =>
-        within(card).getByText(label).parentElement.textContent;
-      await waitFor(() => expect(stat("Online")).toBe("1Online"));
-      expect(stat("Assigned")).toBe("2Assigned");
-      expect(stat("Capacity")).toBe("2Capacity");
-      expect(
-        within(card).getByText("Capacity").parentElement.getAttribute("title"),
-      ).toMatch(/full/);
-      expect(
-        within(card).getByRole("button", { name: /View Clients/ }),
-      ).toBeTruthy();
+      const card = (await screen.findByText('Classroom A')).closest('.card');
+      const stat = (label) => within(card).getByText(label).parentElement.textContent;
+      await waitFor(() => expect(stat('Online')).toBe('1Online'));
+      expect(stat('Assigned')).toBe('2Assigned');
+      expect(stat('Capacity')).toBe('2Capacity');
+      expect(within(card).getByText('Capacity').parentElement.getAttribute('title')).toMatch(/full/);
+      expect(within(card).getByRole('button', { name: /View Clients/ })).toBeTruthy();
     });
 
-    it("分组建好了但数据盘没加上：弹窗转为编辑，再保存只补加数据盘，不重复建分组", async () => {
-      const createGroup = vi.fn(async () => ({ ID: "g-new" }));
+    it('Retries failed disk creation without recreating the group', async () => {
+      const createGroup = vi.fn(async () => ({ ID: 'g-new' }));
       const updateGroup = vi.fn(async () => ({}));
       let fail = true;
-      const createGroupDisk = vi.fn(async () => {
-        if (fail) throw new Error("挂载目标重复");
-        return {};
-      });
-      stubApi({
-        createGroup,
-        updateGroup,
-        createGroupDisk,
-        listConfigs: configsOf,
-      });
+      const createGroupDisk = vi.fn(async () => { if (fail) throw new Error('Mount target already exists'); return {}; });
+      stubApi({ createGroup, updateGroup, createGroupDisk, listConfigs: configsOf });
       renderPage();
-      await userEvent.click(
-        await screen.findByRole("button", { name: /New Group/ }),
-      );
-      await userEvent.type(
-        await screen.findByLabelText("Group Name"),
-        "电竞区",
-      );
-      await userEvent.click(
-        screen.getByRole("button", { name: /Add Data Disk/ }),
-      );
-      await waitFor(() =>
-        expect(
-          screen.getByLabelText("New Data Disk 1 Configuration").value,
-        ).toBe("games_default"),
-      );
-      await userEvent.click(screen.getByRole("button", { name: "Save" }));
-      expect(
-        await screen.findByText(
-          /Group created; data disk D: could not be added/,
-        ),
-      ).toBeTruthy();
-      expect(screen.getByText("Edit Group")).toBeTruthy();
+      await userEvent.click(await screen.findByRole('button', { name: /New Group/ }));
+      await userEvent.type(await screen.findByLabelText('Group Name'), 'Gaming Zone');
+      await userEvent.click(screen.getByRole('button', { name: /Add Data Disk/ }));
+      await waitFor(() => expect(screen.getByLabelText('New Data Disk 1 Configuration').value).toBe('games_default'));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
+      expect(await screen.findByText(/Group created; data disk D: could not be added/)).toBeTruthy();
+      expect(screen.getByText('Edit Group')).toBeTruthy();
 
       fail = false;
-      await userEvent.click(screen.getByRole("button", { name: "Save" }));
+      await userEvent.click(screen.getByRole('button', { name: 'Save' }));
       await waitFor(() => expect(createGroupDisk).toHaveBeenCalledTimes(2));
       expect(createGroup).toHaveBeenCalledTimes(1);
       expect(updateGroup).toHaveBeenCalled();

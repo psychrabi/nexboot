@@ -13,11 +13,11 @@ import (
 )
 
 var (
-	ErrGroupDiskExists              = errs.Conflict("该挂载目标已存在")
-	ErrGroupDiskMountTargetRequired = errs.Invalid("挂载目标必填")
-	ErrGroupDiskBadLetter           = errs.Invalid("Windows 分组的数据盘盘符必须是 D: 到 Z: 的单个盘符")
-	ErrGroupDiskBadPath             = errs.Invalid("Linux 分组的数据盘挂载点要写成 /data 这样的绝对路径，不能是 / 或 /etc、/usr 等系统目录，也不能带 .. 或结尾的 /")
-	ErrGroupDiskMismatch            = errs.Invalid("数据盘的镜像与配置不匹配")
+	ErrGroupDiskExists              = errs.Conflict("This mount target already exists")
+	ErrGroupDiskMountTargetRequired = errs.Invalid("Mount target is required")
+	ErrGroupDiskBadLetter           = errs.Invalid("Data disk drive letter for Windows groups must be a single letter from D: through Z:")
+	ErrGroupDiskBadPath             = errs.Invalid("Linux data disks require an absolute mount path such as /data, not /, system directories such as /etc or /usr, .., or a trailing slash")
+	ErrGroupDiskMismatch            = errs.Invalid("Data disk image and configuration do not match")
 )
 
 type GroupDiskService struct {
@@ -36,8 +36,8 @@ type GroupDiskRequest struct {
 	ConfigID    string `json:"config_id"`
 }
 
-// GroupDataDisks 按决定 LUN 与盘符的顺序（存储顺序，每次读取一致）列出分组数据盘。
-// 启动路径把第 i 块导出为 DataDiskLUN(i)，凡需按 LUN 点名数据盘的地方（如超管机关机）都读同一列表。
+// GroupDataDisks lists group data disks in stable storage order, which determines their LUNs and drive letters.
+// Boot exports disk i as DataDiskLUN(i). All consumers, including Super Admin shutdown, use the same ordering.
 func GroupDataDisks(ctx context.Context, st store.Store, groupID string) ([]domain.GroupDisk, error) {
 	disks, err := st.GroupDisks().List(ctx)
 	if err != nil {
@@ -52,7 +52,7 @@ func GroupDataDisks(ctx context.Context, st store.Store, groupID string) ([]doma
 	return items, nil
 }
 
-// DataDiskLUN 返回分组第 i 块数据盘导出的 LUN。LUN 0 是系统盘，数据盘从 1 起；只在这里决定。
+// DataDiskLUN returns the export LUN for group data disk i; 0 is the system disk and data disks start at 1.
 func DataDiskLUN(index int) int { return index + 1 }
 
 func (s GroupDiskService) List(ctx context.Context, groupID string) (GroupDiskListResult, error) {
@@ -72,7 +72,7 @@ func (s GroupDiskService) List(ctx context.Context, groupID string) (GroupDiskLi
 func (s GroupDiskService) Create(ctx context.Context, groupID string, req GroupDiskRequest) (domain.GroupDisk, error) {
 	terminalAllocMu.Lock()
 	defer terminalAllocMu.Unlock()
-	if err := refuseSuperGroupChange(ctx, s.Store, strings.TrimSpace(groupID), "添加数据盘"); err != nil {
+	if err := refuseSuperGroupChange(ctx, s.Store, strings.TrimSpace(groupID), "add data disk"); err != nil {
 		return domain.GroupDisk{}, err
 	}
 
@@ -96,7 +96,7 @@ func (s GroupDiskService) Delete(ctx context.Context, id string) error {
 	if err != nil {
 		return err
 	}
-	if err := refuseSuperGroupChange(ctx, s.Store, disk.GroupID, "删除数据盘"); err != nil {
+	if err := refuseSuperGroupChange(ctx, s.Store, disk.GroupID, "delete data disk"); err != nil {
 		return err
 	}
 	return s.Store.GroupDisks().Delete(ctx, id)
@@ -112,7 +112,7 @@ func (s GroupDiskService) prepareGroupDisk(ctx context.Context, groupID string, 
 	if mountTarget == "" {
 		return domain.GroupDisk{}, ErrGroupDiskMountTargetRequired
 	}
-	// Windows 分组用真实盘符：注入客户机的开机脚本在启动时应用它，所以必须是规范化后的 D:–Z:。
+	// Windows groups use actual D:–Z: drive letters, normalized for the injected client startup script.
 	if group.SystemImageID != "" {
 		sysImg, err := s.Store.Images().Get(ctx, group.SystemImageID)
 		if err != nil {
@@ -138,9 +138,9 @@ func (s GroupDiskService) prepareGroupDisk(ctx context.Context, groupID string, 
 	if err != nil {
 		return domain.GroupDisk{}, err
 	}
-	// 旧记录可能仍指向「用途」出现前的系统镜像；新数据盘只能来自数据盘镜像。
+	// Legacy records may point to system images predating purpose tagging; new data disks must use data-purpose images.
 	if img.Purpose != domain.ImagePurposeData {
-		return domain.GroupDisk{}, errs.Invalid(fmt.Sprintf("%s 是系统盘镜像，不能作数据盘；请选数据盘镜像，或在镜像详情里把它的用途改为数据盘", img.Name))
+		return domain.GroupDisk{}, errs.Invalid(fmt.Sprintf("%s is a system disk image and cannot be used as a data disk. Select a data disk image or change its purpose in Image Management", img.Name))
 	}
 	cfg, err := s.Store.Configs().Get(ctx, configID)
 	if err != nil {
@@ -178,7 +178,7 @@ func (s GroupDiskService) now() time.Time {
 	return time.Now().UTC()
 }
 
-// 挂到这些目录上会遮住系统自己的文件。
+// Mounting over these directories would hide operating system files.
 var linuxSystemDirs = []string{"/bin", "/boot", "/dev", "/etc", "/lib", "/lib32", "/lib64", "/libx32",
 	"/proc", "/root", "/run", "/sbin", "/snap", "/sys", "/tmp", "/usr", "/var"}
 

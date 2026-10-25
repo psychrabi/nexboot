@@ -1,6 +1,6 @@
 -- +goose Up
--- 任务记下执行它的节点。写入者的库会在切换时被下一台接过去，库里的历史任务不一定
--- 是当前这台跑的，事后推断不出来，只能创建时记住。旧任务留空。
+-- Record the node that executed each task. After failover, the catalogue moves to a different writer; historical jobs
+-- may have run elsewhere, so record the node at creation time. Legacy tasks retain a blank value.
 ALTER TABLE tasks ADD COLUMN node TEXT NOT NULL DEFAULT '';
 
 -- +goose Down

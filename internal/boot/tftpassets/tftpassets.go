@@ -1,8 +1,8 @@
-// Package tftpassets 内嵌下发给 PXE 客户机的 iPXE/TFTP 启动文件，使单个二进制自给自足。
+// Package tftpassets embeds iPXE/TFTP boot files served to PXE clients, producing a self-contained binary.
 //
-// 不能用发行版 `ipxe` 包的文件：其 snponly.efi 内嵌了 `chain http://${next-server}/menu.ipxe?mac=${mac}`，
-// 会无视 DHCP option 67 下发的启动文件名。这里的文件不含内嵌脚本。
-// undionly.kpxe 是压缩的，grep 证明不了什么；用 scripts/build-undionly.sh 重建。
+// Do not use distribution ipxe assets: their snponly.efi contains an embedded chain script
+// that ignores the boot filename from DHCP option 67. These assets have no embedded scripts.
+// undionly.kpxe is compressed; grep is not a reliable check. Rebuild with scripts/build-undionly.sh.
 package tftpassets
 
 import (
@@ -16,11 +16,11 @@ import (
 //go:embed files/snponly.efi files/undionly.kpxe files/wimboot
 var files embed.FS
 
-// Names 列出内嵌文件，与 dnsmasq Renderer 在 TFTPRoot 下期望的一致
-// （BIOS 用 undionly.kpxe，UEFI 用 snponly.efi，wimboot 用于 WinPE 离线适配）。
+// Names lists embedded files as expected by the dnsmasq Renderer under TFTPRoot
+// (BIOS uses undionly.kpxe, UEFI snponly.efi, and wimboot supports offline WinPE adaptation).
 var Names = []string{"snponly.efi", "undionly.kpxe", "wimboot"}
 
-// WriteTo 把内嵌启动文件写到 dir 并覆盖已有文件。每次启动都调用，防止同路径的发行版文件悄悄顶替。
+// WriteTo writes embedded boot assets to dir and overwrites existing files at startup to prevent mismatched distribution assets.
 func WriteTo(dir string) error {
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		return fmt.Errorf("tftpassets: create %s: %w", dir, err)

@@ -12,19 +12,19 @@ import (
 	"github.com/tianwei/diskless/internal/store"
 )
 
-// ClientNetwork 是服务器面向教室的网络：dnsmasq 服务客户机的网卡、其 IPv4 网段、本机持有的全部地址，
-// 以及是否允许网段外的分组（交换机上有 DHCP 中继的现场才打开）。
-// 读不到网卡或客户机网卡无地址时 Known 为 false，此时不据此判定任何事。
+// ClientNetwork describes the server's client-facing network: the dnsmasq interface, IPv4 subnet and locally assigned addresses,
+// plus whether cross-subnet groups are supported (enable only when the switch provides DHCP relay).
+// Known is false if the interface or its IP is unavailable; classification must not rely on unknown data.
 type ClientNetwork struct {
 	Iface            string
 	Prefixes         []netip.Prefix
 	ServerAddrs      []netip.Addr
-	RouteGateway     netip.Addr // 服务器的默认网关（如有）
+	RouteGateway     netip.Addr // Server default gateway, if available
 	AllowCrossSubnet bool
 	Known            bool
 }
 
-// Contains 判断地址是否在某个客户机网段内。
+// Contains tests whether an IP belongs to the client subnet.
 func (n ClientNetwork) Contains(addr netip.Addr) bool {
 	for _, prefix := range n.Prefixes {
 		if prefix.Contains(addr) {
@@ -34,7 +34,7 @@ func (n ClientNetwork) Contains(addr netip.Addr) bool {
 	return false
 }
 
-// IsServerAddr 判断地址是否为服务器自身地址。
+// IsServerAddr tests whether an address belongs to the server.
 func (n ClientNetwork) IsServerAddr(addr netip.Addr) bool {
 	for _, a := range n.ServerAddrs {
 		if a == addr {
@@ -44,7 +44,7 @@ func (n ClientNetwork) IsServerAddr(addr netip.Addr) bool {
 	return false
 }
 
-// ServerAddrsInGroup 列出落在分组区间内的服务器地址，即分组保存后才加入的节点或 VIP。
+// ServerAddrsInGroup lists server/VIP addresses overlapping the group range, including newly joined nodes.
 func ServerAddrsInGroup(group domain.Group, net ClientNetwork) []netip.Addr {
 	pool, err := groupAddressPool(group.StartIP, group.ClientMax)
 	if err != nil {
@@ -59,7 +59,7 @@ func ServerAddrsInGroup(group domain.Group, net ClientNetwork) []netip.Addr {
 	return out
 }
 
-// AddressUsers 列出已在使用 ip 的对象：区间覆盖它的分组和持有它的客户机。读取失败时什么都不报。
+// AddressUsers lists groups covering an IP and clients assigned that IP. Failures yield no users.
 func AddressUsers(ctx context.Context, st store.Store, ip string) []string {
 	addr, err := parseRequiredIPv4(ip)
 	if err != nil {
@@ -69,7 +69,7 @@ func AddressUsers(ctx context.Context, st store.Store, ip string) []string {
 	if groups, err := st.Groups().List(ctx); err == nil {
 		for _, g := range groups {
 			if pool, err := groupAddressPool(g.StartIP, g.ClientMax); err == nil && pool.contains(ipv4Uint32(addr)) {
-				users = append(users, "分组「"+g.Name+"」的地址范围")
+				users = append(users, "address range of group " + g.Name)
 			}
 		}
 	}
@@ -80,27 +80,27 @@ func AddressUsers(ctx context.Context, st store.Store, ip string) []string {
 				if name == "" {
 					name = t.MAC
 				}
-				users = append(users, "客户机「"+name+"」")
+				users = append(users, "client " + name)
 			}
 		}
 	}
 	return users
 }
 
-// NetworkProvider 向 GroupService 提供判定分组用的客户机网络。
+// NetworkProvider supplies client network information to GroupService.
 type NetworkProvider func(context.Context) (ClientNetwork, error)
 
-// NetworkStatus 表示分组区间相对客户机网络的位置。
+// NetworkStatus classifies a group range relative to the server's client network.
 type NetworkStatus string
 
 const (
-	NetworkSame    NetworkStatus = "same"    // 在客户机网段内：DHCP 广播能到达服务器
-	NetworkRelay   NetworkStatus = "relay"   // 在网段外且现场有 DHCP 中继：允许，网关即中继
-	NetworkBlocked NetworkStatus = "blocked" // 在网段外且无中继：机器永远拿不到地址
-	NetworkUnknown NetworkStatus = "unknown" // 读不到服务器自身网络
+	NetworkSame    NetworkStatus = "same"    // Same subnet: DHCP broadcasts reach the server
+	NetworkRelay   NetworkStatus = "relay"   // Other subnet with DHCP relay: allowed; gateway is relay interface
+	NetworkBlocked NetworkStatus = "blocked" // Other subnet without relay: clients cannot get an address
+	NetworkUnknown NetworkStatus = "unknown" // Server network is unavailable
 )
 
-// ClassifyGroupNetwork 是判定分组区间能否被服务的唯一入口：表单状态行、新建/修改拒绝、告警和网络页都调用它。
+// ClassifyGroupNetwork is the shared validation used by forms, create/update, alarms and network settings.
 func ClassifyGroupNetwork(group domain.Group, net ClientNetwork) NetworkStatus {
 	if !net.Known || len(net.Prefixes) == 0 {
 		return NetworkUnknown
@@ -121,7 +121,7 @@ func ClassifyGroupNetwork(group domain.Group, net ClientNetwork) NetworkStatus {
 	return NetworkBlocked
 }
 
-// SuggestedRange 是产品为分组算出的区间：新分组表单的初始值，也是拒绝时给出的替代方案。
+// SuggestedRange is the generated client IP range used for initial form defaults and invalid-range alternatives.
 type SuggestedRange struct {
 	StartIP   string `json:"start_ip"`
 	ClientMax int    `json:"client_max"`
@@ -129,9 +129,9 @@ type SuggestedRange struct {
 	Gateway   string `json:"gateway"`
 }
 
-// SuggestGroupRange 在客户机网段内挑 count 个连续地址：先从主机号 .10 起，再从 .2 起，
-// 跳过服务器地址、网络/广播地址和其他分组区间（正在编辑的 exceptGroupID 不挡自己）。
-// 服务器默认网关在同网段时用作网关，否则不填，因为服务器不做路由。
+// SuggestGroupRange selects count consecutive addresses, searching from .10 then .2 in the client subnet,
+// excluding server, reserved and other group addresses (except the group currently being edited).
+// Suggest the server default gateway only if it belongs to the client subnet.
 func SuggestGroupRange(net ClientNetwork, others []domain.Group, count int, exceptGroupID string) (SuggestedRange, bool) {
 	if count <= 0 || len(net.Prefixes) == 0 {
 		return SuggestedRange{}, false
@@ -170,7 +170,7 @@ func SuggestGroupRange(net ClientNetwork, others []domain.Group, count int, exce
 				for n := start; n < start+uint32(count); n++ {
 					if blocked(n) {
 						fits = false
-						start = n // 跳过障碍
+						start = n // Skip occupied range
 						break
 					}
 				}
@@ -196,8 +196,8 @@ func netmaskString(bits int) string {
 	return ipv4String(mask)
 }
 
-// GroupOutsideClientNetwork 表示分组区间不在客户机网段内、又无 DHCP 中继而被拒绝。
-// 它点名网卡、网段和区间，并给出可用的区间或能让当前区间生效的开关。
+// GroupOutsideClientNetwork is reported for ranges outside the client subnet with no DHCP relay.
+// Include the NIC, subnet, rejected range and a usable alternative or required feature toggle.
 type GroupOutsideClientNetwork struct {
 	Group   domain.Group
 	Network ClientNetwork
@@ -211,20 +211,20 @@ func (e GroupOutsideClientNetwork) Error() string {
 		nets = append(nets, p.String())
 	}
 	sort.Strings(nets)
-	msg := fmt.Sprintf("分组 %s 的网段 %s–%s 不在服务器客户机网卡 %s（%s）的网段内，客户机将拿不到地址",
+	msg := fmt.Sprintf("Group %s range %s–%s is outside server client interface %s (%s); clients will not receive addresses",
 		e.Group.Name, ipv4String(pool.start), ipv4String(pool.end), e.Network.Iface, strings.Join(nets, "、"))
 	if e.Suggest != nil {
 		end, _ := groupAddressPool(e.Suggest.StartIP, e.Suggest.ClientMax)
-		msg += fmt.Sprintf("；改成 %s–%s", e.Suggest.StartIP, ipv4String(end.end))
+		msg += fmt.Sprintf("; use %s–%s instead", e.Suggest.StartIP, ipv4String(end.end))
 	} else {
-		msg += "；改到服务器网段"
+		msg += "; move the group to the server subnet"
 	}
-	return msg + "，或者客户机确实在别的 VLAN → 在系统参数打开「跨网段分组」"
+	return msg + ". If clients are on another VLAN, enable Cross-subnet Groups in System Settings"
 }
 
 func (e GroupOutsideClientNetwork) Is(target error) bool { return target == errs.ErrInvalid }
 
-// clientNetwork 通过 provider 读取客户机网络；没有 provider（测试或无此能力的节点）时不判定。
+// clientNetwork reads provider data; missing providers (tests or unsupported nodes) disable classification.
 func (s GroupService) clientNetwork(ctx context.Context) ClientNetwork {
 	if s.Network == nil {
 		return ClientNetwork{}
@@ -237,7 +237,7 @@ func (s GroupService) clientNetwork(ctx context.Context) ClientNetwork {
 	return net
 }
 
-// ensureGroupOnClientNetwork 拒绝无法被服务的区间。网关可以是服务器本身（双网卡服务器给教室做路由很常见），这里不判定网关。
+// ensureGroupOnClientNetwork rejects unreachable ranges. Gateway is not checked here because the server may route between NICs.
 func (s GroupService) ensureGroupOnClientNetwork(ctx context.Context, group domain.Group, others []domain.Group) error {
 	net := s.clientNetwork(ctx)
 	if ClassifyGroupNetwork(group, net) != NetworkBlocked {

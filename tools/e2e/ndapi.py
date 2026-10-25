@@ -55,7 +55,7 @@ def call(method, path, body=None):
     if _token is None:
         login()
     data = json.dumps(body).encode() if body is not None else None
-    # id 可能是中文（如镜像「教学一班」），urllib 不接受请求行里的非 ASCII 字节，需百分号编码。
+    # IDs may contain non-ASCII names (such as Classroom Café); URL-encode them because urllib requires ASCII request lines.
     req = urllib.request.Request(BASE + urllib.parse.quote(path, safe="/?&=%"), data=data, method=method)
     req.add_header("Authorization", "Bearer " + _token)
     if data:
@@ -86,10 +86,10 @@ def get_bytes(path):
 def ssh(cmd):
     """Read the server's own state — the pool, configfs, the journal.
 
-    非 root 登录时套一层 sudo -S，读同一个密码。交付现场未必开放 root 直登，
-    而这里跑的不只是读：清理要 `zfs destroy`、验证要 `mount`，普通用户做不到。
-    少这一层的后果是**静默的**——destroy 失败没人看见，备份池里留着上一轮的
-    数据，于是「首轮应当是全量」变成了增量，报出来像是备份逻辑错了。
+    Wrap commands in sudo -S for non-root SSH logins, using the same password. Some deployments prohibit direct root SSH,
+    and the harness needs privileges for zfs destroy and mount, not just read-only operations.
+    Without sudo, failed cleanup may be silent and leave old data in the backup pool.
+    A supposedly full initial backup then becomes incremental, falsely implicating backup logic.
     """
     if SSH_USER != "root":
         cmd = f"echo {shlex.quote(SSH_PASSWORD)} | sudo -S -p '' bash -c {shlex.quote(cmd)}"
@@ -139,8 +139,8 @@ def mount_probe(clone, script, attempts=6, delay=3):
     moment (the same udev lag the import bake has to wait out), and a probe that
     ran too early would report an empty disk as a missing file.
     """
-    # 分区号从 1 试到 4：真 Windows 系统分区在 part3/4，fixtures/mkwin.sh 的镜像只有 part1，
-    # 挂不上 ntfs3 的 EFI/MSR 自然跳过。
+    # Try partitions 1–4: real Windows system partitions may be part3/4, while the mkwin fixture has only part1.
+    # Skip EFI/MSR partitions that cannot mount as NTFS.
     for _ in range(attempts):
         out = ssh(
             'D=$(mktemp -d); for p in 1 2 3 4; do '
@@ -172,23 +172,23 @@ def section(title):
 def summary():
     """Print the tally and return an exit code.
 
-    A run that checked nothing is not a pass. `0/0 通过` with exit 0 reads as
+    A run that checked nothing is not a pass. Reporting `0/0 passed` with exit 0 suggests
     "everything is fine" to whoever is looking at the pipeline, when what
     actually happened is that the matrix never got far enough to test anything
     — a missing image, an unreachable node, a bad precondition. Being loud here
     is the whole point of the skip/summary split.
     """
     passed = sum(1 for r in results if r[2])
-    line = f"\n{passed}/{len(results)} 通过"
+    line = f"\n{passed}/{len(results)} passed"
     if skipped:
-        line += f"，{len(skipped)} 跳过"
+        line += f"，{len(skipped)} skipped"
     print(line)
     for cid, label, ok, detail in results:
         if not ok:
-            print("  失败:", cid, label, detail)
+            print("  failed:", cid, label, detail)
     for cid, label, why in skipped:
-        print("  跳过:", cid, label, why)
+        print("  skipped:", cid, label, why)
     if not results:
-        print("  没有执行任何检查——这不算通过，先看上面的跳过原因")
+        print("  No checks were executed. This is not a pass; review the skipped checks above.")
         return 1
     return 0 if passed == len(results) else 1

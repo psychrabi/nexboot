@@ -1,6 +1,6 @@
 -- +goose Up
--- 硬件画像整体下线：采集端每次开机免费归并，但下游（兼容矩阵 FR-F5/F6）已于
--- 0021 一并移除，此后没有任何流程读它——只剩采集、列表与改名。
+-- Retire hardware profiles: collection at boot is lightweight, but consumers (compatibility matrix FR-F5/F6) were already removed
+-- in migration 0021. No remaining functionality reads these records beyond collection/listing/renaming.
 ALTER TABLE terminals DROP COLUMN hardware_profile_id;
 DROP TABLE IF EXISTS hardware_profiles;
 

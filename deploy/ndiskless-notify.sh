@@ -1,7 +1,7 @@
 #!/bin/sh
-# keepalived 状态变更时通知 ndiskless 切换角色。只触发不等待：阻塞 notify 会拖累 VRRP 状态机。
-# master：拿到 VIP，重启为 active（启动路径会同步并重启 dnsmasq）。
-# backup/fault/stop：失去 VIP，重启为 standby（启动路径会停 dnsmasq、清导出）。
+# Notify ndiskless of keepalived role changes. Fire and return; blocking notify delays VRRP.
+# master: acquired VIP; restart as active (startup synchronizes and restarts dnsmasq).
+# backup/fault/stop: lost VIP; restart as standby (startup stops dnsmasq and clears exports).
 STATE="$1"
 TOKEN="$(cat /etc/ndiskless/cluster-token 2>/dev/null)"
 BASE="http://127.0.0.1:@API_PORT@"

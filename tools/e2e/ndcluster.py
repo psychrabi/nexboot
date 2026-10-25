@@ -117,7 +117,7 @@ def anon_get(base, path, timeout=10):
 
 
 def anon_post(base, path, body, timeout=15):
-    """完全不带凭据的 POST —— 用来断言一个免认证端点该拒绝的时候真的拒绝。"""
+    """Unauthenticated POST used to verify that an endpoint rejects requests when authorization is required."""
     data = json.dumps(body).encode()
     rq = urllib.request.Request(base + path, data=data, method="POST",
                                 headers={"Content-Type": "application/json"})
@@ -141,9 +141,9 @@ def ssh(node_host, cmd, timeout=90):
 
 
 def ssh_out(node_host, cmd, timeout=90):
-    """(读到了吗, 输出)。分开返回是必要的：ssh 本身连不上时 stdout 也是空串，
-    而空串会被断言当成「那台机器上什么都没有」——比报错更糟，因为它给出的是一个
-    看起来成立的结论。调用方必须能区分「读到了空」和「没读到」。"""
+    """(readable, output). Separate results are necessary because failed SSH also produces empty stdout,
+    which must not be mistaken for an empty directory on the remote host.
+    Callers need to distinguish a successful empty read from a failed read."""
     try:
         r = ssh(node_host, cmd, timeout)
     except Exception as e:
@@ -154,11 +154,11 @@ def ssh_out(node_host, cmd, timeout=90):
 
 
 def entry_base():
-    """管理入口：VIP 真的应答就用 VIP，否则用第一台。
+    """Use the VIP as management endpoint when responsive; otherwise use the first node.
 
-    单机形态没有 keepalived，VIP 是个不存在的地址；对它发的请求会一路超时，
-    而超时在调用方看来就是「什么都没查到」——矩阵会据此跳过自己，还报成通过。
-    探一下再决定，比假设拓扑便宜得多。"""
+    Standalone mode has no keepalived, so VIP may not exist and requests would time out,
+    causing test matrices to skip tests and misleadingly report success.
+    Probe the endpoint rather than assuming topology."""
     if VIP_BASE and NODES and VIP_BASE != NODES[0]:
         st, _ = anon_get(VIP_BASE, "/healthz", timeout=4)
         if st == 200:
@@ -214,15 +214,15 @@ _pool_of = {}
 
 
 def pool_of(node_host):
-    """那台机器**自己**的数据池名。
+    """The data pool name belonging to that specific node.
 
-    各节点的池名互不相干——目录里从不存带池名的绝对路径，池记录也按 (节点, 池名)
-    区分。套件里写死一个 ND_POOL 去 ssh 别的节点，等于假设全集群同名：真机上三台
-    分别叫 data / tank / data1，写死的那个在两台上根本不存在，于是断言查了个空目录
-    还「通过」（或者体面地 skip 掉）——都比红更糟，因为它们看起来是结论。
+    Node pool names are independent; catalogue paths do not embed pool names and records are keyed by (node, pool name).
+    Hard-coding ND_POOL across SSH hosts assumes uniform naming. A real cluster may use
+    data / tank / data1, so a hard-coded name may not exist on two nodes and tests inspect an empty directory
+    yet pass or skip rather than correctly report a test setup failure.
 
-    先读产品自己记的那份（/var/lib/ndiskless/data-pool，节点本地、不随目录复制），
-    这既精确又顺带钉住了那个机制；读不到再退回「顶层数据集」这个启发式。
+    Read the local /var/lib/ndiskless/data-pool first; it is not replicated with the catalogue.
+    Fall back to detecting a top-level dataset only when this authoritative record is unreadable.
     """
     if node_host in _pool_of:
         return _pool_of[node_host]
@@ -235,11 +235,11 @@ def pool_of(node_host):
 
 
 def wait_roster_online(base, want, seconds=300, step=10):
-    """等花名册里有 want 台且都在线。
+    """Wait until the cluster roster contains want nodes and all are online.
 
-    固定 sleep 是猜：心跳新鲜度有一百多秒的窗口，上一轮刚重启过节点的话，进程
-    早就好了、花名册却还标着离线。据此开跑，第一条断言就会说「只有两台在线」，
-    而那既不是产品的问题，也不是这一轮该测的东西。
+    A fixed sleep is unreliable: heartbeat freshness may lag service readiness for over a minute after restarts.
+    Launching too early can falsely report that only two nodes are online
+    even though the services are healthy; wait for roster convergence instead.
     """
     def ok():
         r = roster(base)

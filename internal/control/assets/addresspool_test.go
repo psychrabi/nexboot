@@ -10,7 +10,7 @@ func TestGroupAddressPoolBounds(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// 窗口为 .10 .11 .12，两端都包含
+	// Address range includes .10, .11 and .12 (inclusive).
 	for ip, want := range map[uint32]bool{
 		ipMustUint32(t, "192.168.50.9"):  false,
 		ipMustUint32(t, "192.168.50.10"): true,

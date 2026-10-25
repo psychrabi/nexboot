@@ -1,6 +1,6 @@
 -- +goose Up
--- 数据盘在线发布是自己的一类任务：运维要能在任务列表里认出它、看到它失败的原因。
--- 和以往一样，tasks 重建一遍来放宽 CHECK。
+-- Online data disk publishing has its own task type so operators can identify and troubleshoot failures.
+-- Rebuild tasks to extend its CHECK constraint.
 CREATE TABLE tasks_publish (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL CHECK (type IN ('import_image','create_config','delete_config','create_reduction','delete_reduction','merge_config','merge_reduction','super_stop','create_pool','destroy_pool','add_disk','migrate_disk','replace_disk','add_read_cache','remove_read_cache','add_write_cache','remove_write_cache','flush_cache','backup_dataset','image_health_check','detach_disk','mirror_upgrade','add_special','remove_special','add_spare','remove_spare','create_blank_image','export_image','publish_data_disk')),

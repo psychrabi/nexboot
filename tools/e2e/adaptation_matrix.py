@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
-"""超管机离线适配：把驱动集与适配脚本写进超管机的持久克隆。
+"""Super Admin offline adaptation: write the driver bundle and adaptation script into its persistent clone.
 
-服务端这一半（编排 + 落盘布局）只有真机能验证——单测能覆盖写了哪些文件，
-覆盖不了「克隆真的建出来了、文件真的落在 NTFS 上、终端记录跟着变了」。
-Windows 内 adapt.ps1 是否真的装上驱动仍需人工，见 docs/手测/超管机在线适配-手测.md。
+The server orchestration and on-disk layout need real-host validation: unit tests can inspect which files were requested,
+but not whether the clone exists, files reached NTFS, and terminal records were updated.
+Actual Windows driver installation by adapt.ps1 still requires manual verification; see the adaptation manual-test documentation.
 
-需要一个能通过体检的真实 Windows 镜像（ND_WINDOWS_SOURCE），会创建并删除
-自己的镜像/分组/终端——不要对生产池运行。
+Requires a real Windows image that passes health checks (ND_WINDOWS_SOURCE). This suite creates and removes
+its own image/group/client. Do not run against a production pool.
 """
 import os
 import sys
@@ -41,68 +41,68 @@ def cleanup():
 
 cleanup()
 
-section("A 准备超管机")
+section("A Prepare Super Admin client")
 call("POST", "/api/images/import", {"name": IMG, "source_path": SOURCE, "os_type": "windows"})
 task = task_of("task-import_image", timeout=900)
-check("A1", "镜像导入完成", task.get("Status") == "success", (task.get("Error") or "")[:160])
-time.sleep(10)  # 先等体检的临时克隆释放
+check("A1", "Image import completed", task.get("Status") == "success", (task.get("Error") or "")[:160])
+time.sleep(10)  # Wait for the health check's temporary clone to be released.
 
-# 网段按 ND_SSH_HOST 所在网段推：产品会硬拒不在客户机网卡网段内的分组。
+# Derive client subnet from ND_SSH_HOST; the server rejects groups outside the client NIC subnet.
 SEG = ".".join(SSH_HOST.split(".")[:3])
 st, group = call("POST", "/api/groups", {
-    "name": "e2e-适配班", "start_ip": f"{SEG}.200", "client_max": 10,
+    "name": "e2e-adaptation-group", "start_ip": f"{SEG}.200", "client_max": 10,
     "gateway": "", "netmask": "255.255.255.0",
     "system_image_id": IMG, "system_config_id": CFG,
     "system_reduction_id": reductions(CFG)[0]["ID"]})
-check("A2", "建分组", st == 201, str(group)[:120])
+check("A2", "Create group", st == 201, str(group)[:120])
 gid = group["ID"] if st == 201 else ""
-st, _ = call("POST", "/api/terminals", {"mac": MAC, "name": "适配机", "group_id": gid})
-check("A3", "建终端", st in (200, 201))
+st, _ = call("POST", "/api/terminals", {"mac": MAC, "name": "Adaptation Client", "group_id": gid})
+check("A3", "Create client", st in (200, 201))
 
-# 非超管机没有持久克隆可写。
+# Regular clients have no persistent writable clone.
 st, body = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": ""})
-check("A4", "普通终端不能注入（先要设为超管机）", st in (400, 409), f"HTTP {st} {str(body)[:100]}")
+check("A4", "Regular clients cannot receive injection (enable Super Admin first)", st in (400, 409), f"HTTP {st} {str(body)[:100]}")
 
 st, _ = call("POST", f"/api/terminals/{TERMINAL}/super", {})
-check("A5", "设为超管机", st in (200, 201, 204))
+check("A5", "Enable Super Admin", st in (200, 201, 204))
 
-section("B 注入：克隆与落盘布局")
+section("B Injection: clone and on-disk layout")
 st, result = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": ""})
-check("B1", "无驱动集也可注入（仅盘符脚本）", st in (200, 201), f"HTTP {st} {str(result)[:160]}")
-check("B2", "超管机持久克隆已建出", CLONE in ssh(f"zfs list -H -o name | grep SCLIENT || true"),
+check("B1", "Injection without a driver bundle installs only the drive-letter script", st in (200, 201), f"HTTP {st} {str(result)[:160]}")
+check("B2", "Super Admin persistent clone created", CLONE in ssh(f"zfs list -H -o name | grep SCLIENT || true"),
       ssh("zfs list -H -o name | grep SCLIENT || true"))
 
-# 像产品一样挂载克隆的 Windows 分区，检查实际写入的内容；这一半没有单元测试覆盖。
+# Mount the clone's Windows partition like the product and inspect files on disk; no unit test covers this.
 probe = mount_probe(CLONE,
                     'find Windows/System32/GroupPolicy -maxdepth 4 2>/dev/null; '
                     'echo "--scripts.ini--"; cat Windows/System32/GroupPolicy/Machine/Scripts/scripts.ini 2>/dev/null; '
                     'ls ndadapt 2>/dev/null | sed "s/^/--ndadapt--/"')
-check("B3", "适配脚本落在本地 GPO 启动目录", "Startup/adapt.ps1" in probe, probe.replace("\n", " | ")[:220])
-check("B4", "启动脚本由 ndadapt.cmd 注册", "0CmdLine=ndadapt.cmd" in probe, probe.replace("\n", " | ")[:160])
-check("B5", "gpsvc 能处理这份本地策略（gpt.ini 已写）", "GroupPolicy/gpt.ini" in probe)
+check("B3", "Adaptation script installed in local GPO startup directory", "Startup/adapt.ps1" in probe, probe.replace("\n", " | ")[:220])
+check("B4", "Startup script registered by ndadapt.cmd", "0CmdLine=ndadapt.cmd" in probe, probe.replace("\n", " | ")[:160])
+check("B5", "Local policy has gpt.ini for gpsvc", "GroupPolicy/gpt.ini" in probe)
 
 st, terminal = call("GET", f"/api/terminals/{TERMINAL}")
 pending = (terminal or {}).get("PendingBundleAt")
-check("B6", "终端记下了这次待适配", bool(pending), str(terminal)[:160])
+check("B6", "Client records pending adaptation", bool(pending), str(terminal)[:160])
 
 st, view = call("GET", f"/api/terminals/{TERMINAL}/inject-result")
-check("B7", "机器还没跑过时结果为未完成",
+check("B7", "Status remains incomplete until the client runs",
       st == 200 and view.get("done") is False and view.get("injected_at"),
       f"HTTP {st} {str(view)[:120]}")
 
-section("C 重复注入")
+section("C Repeated injection")
 st, body = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": ""})
-# 拒绝必须告诉操作者下一步怎么做。目前返回 400（其它状态冲突用 409），界面都会显示消息。
-check("C1", "已有待适配时拒绝覆盖，并说明怎么继续",
-      st in (400, 409) and "覆盖" in str(body), f"HTTP {st} {str(body)[:120]}")
+# Rejections must give actionable instructions. This API currently returns 400 (other conflicts use 409).
+check("C1", "Reject overwriting pending adaptation and explain recovery",
+      st in (400, 409) and any(x in str(body).lower() for x in ("overwrite", "\u8986\u76d6")), f"HTTP {st} {str(body)[:120]}")
 st, body = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": "", "overwrite": True})
-check("C2", "显式 overwrite 才重置克隆重来", st in (200, 201), f"HTTP {st} {str(body)[:120]}")
+check("C2", "Explicit overwrite resets the clone for retry", st in (200, 201), f"HTTP {st} {str(body)[:120]}")
 
-section("D 收尾")
+section("D Cleanup")
 st, _ = call("DELETE", f"/api/terminals/{TERMINAL}/super")
-check("D1", "取消超管", st in (200, 204))
+check("D1", "Disable Super Admin", st in (200, 204))
 cleanup()
-check("D2", "超管克隆随之回收", "SCLIENT-AABBCC223344" not in ssh("zfs list -H -o name || true"),
+check("D2", "Super Admin clone is cleaned up", "SCLIENT-AABBCC223344" not in ssh("zfs list -H -o name || true"),
       ssh("zfs list -H -o name | grep SCLIENT || true"))
 
 sys.exit(summary())

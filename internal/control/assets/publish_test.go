@@ -17,10 +17,10 @@ type fakePublishStorage struct {
 	storage.StorageAgent
 	req     storage.PublishDataDiskReq
 	called  bool
-	written []int64 // 每次问「写了多少」依次返回这些值
+	written []int64 // Return these byte counts on successive queries
 	result  storage.PublishDataDiskResult
 	err     error
-	noDisk  map[int]bool // 这些 LUN 在池里没有超管盘
+	noDisk  map[int]bool // LUNs without Super Admin clones in storage
 }
 
 func (f *fakePublishStorage) PublishDataDisk(_ context.Context, req storage.PublishDataDiskReq) (storage.PublishDataDiskResult, error) {
@@ -34,7 +34,7 @@ func (f *fakePublishStorage) PublishDataDisk(_ context.Context, req storage.Publ
 
 func (f *fakePublishStorage) SuperDiskWritten(_ context.Context, _ string, lun int) (int64, error) {
 	if f.noDisk[lun] {
-		// 真 zfs 在这台机器没有这块超管盘时就是这么答的
+		// Mimic real ZFS behavior when this client's Super Admin clone is absent.
 		return 0, errors.New("dataset does not exist")
 	}
 	if len(f.written) == 0 {
@@ -47,14 +47,14 @@ func (f *fakePublishStorage) SuperDiskWritten(_ context.Context, _ string, lun i
 	return v, nil
 }
 
-// 一台超管机 + 一块数据盘（D:），机器开着。
+// One running Super Admin client with a data disk mounted at D:.
 func seedPublishStore(t *testing.T) (store.Store, domain.Group, domain.Terminal) {
 	t.Helper()
 	ctx := context.Background()
 	st := newImageTestStore(t)
 	group := seedTerminalGroup(t, ctx, st, 5)
 	now := time.Now().UTC()
-	if err := st.Configs().Create(ctx, domain.Config{ID: "cfg-games", ImageID: "img-1", Name: "游戏盘", CreatedAt: now}); err != nil {
+	if err := st.Configs().Create(ctx, domain.Config{ID: "cfg-games", ImageID: "img-1", Name: "Games Disk", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.Reductions().Create(ctx, domain.Reduction{ID: "red-games-0", ConfigID: "cfg-games", Name: "@0", CreatedAt: now, Status: domain.ReductionStatusReady}); err != nil {
@@ -63,7 +63,7 @@ func seedPublishStore(t *testing.T) (store.Store, domain.Group, domain.Terminal)
 	if err := st.GroupDisks().Create(ctx, domain.GroupDisk{ID: "gd-1", GroupID: group.ID, ConfigID: "cfg-games", ImageID: "img-1", MountTarget: "D:"}); err != nil {
 		t.Fatal(err)
 	}
-	terminal := domain.Terminal{ID: "t-1", Name: "教师机", MAC: "001122334455", IP: "192.168.1.10", GroupID: group.ID,
+	terminal := domain.Terminal{ID: "t-1", Name: "Teacher PC", MAC: "001122334455", IP: "192.168.1.10", GroupID: group.ID,
 		IsSuper: true, State: domain.TerminalStateOnline}
 	if err := st.Terminals().Create(ctx, terminal); err != nil {
 		t.Fatal(err)
@@ -71,79 +71,79 @@ func seedPublishStore(t *testing.T) (store.Store, domain.Group, domain.Terminal)
 	return st, group, terminal
 }
 
-// 不关机发布数据盘：存成还原点并立即成为配置当前点，客户机下次开机生效。
+// Publishing without shutdown creates an applied restore point for clients' next boot.
 func TestPublishDataDiskSavesAndMakesItCurrent(t *testing.T) {
 	ctx := context.Background()
 	st, _, terminal := seedPublishStore(t)
 	pool := &fakePublishStorage{}
 	svc := TerminalService{Store: st, Storage: pool, QuietWindow: time.Millisecond}
 
-	res, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "装了永劫无间"})
+	res, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "Game installed"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !pool.called || pool.req.MAC != terminal.MAC || pool.req.LUN != 1 || pool.req.ConfigID != "cfg-games" {
-		t.Fatalf("交给存储层的请求 = %#v", pool.req)
+		t.Fatalf("Storage request = %#v", pool.req)
 	}
-	if pool.req.ReductionName != "@装了永劫无间" && !strings.HasPrefix(pool.req.ReductionName, "@") {
-		t.Fatalf("还原点名 = %q", pool.req.ReductionName)
+	if pool.req.ReductionName != "@Game installed" && !strings.HasPrefix(pool.req.ReductionName, "@") {
+		t.Fatalf("Restore point name = %q", pool.req.ReductionName)
 	}
 	if res.Reduction == nil {
-		t.Fatalf("结果里没有还原点：%#v", res)
+		t.Fatalf("Result is missing restore point：%#v", res)
 	}
-	// 还原点落库，并成为这个配置的当前点
+	// Persist the restore point and make it current.
 	if _, err := st.Reductions().Get(ctx, res.Reduction.ID); err != nil {
-		t.Fatalf("还原点没落库：%v", err)
+		t.Fatalf("Restore point was not persisted：%v", err)
 	}
 	cfg, err := st.Configs().Get(ctx, "cfg-games")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if cfg.DefaultReductionID == nil || *cfg.DefaultReductionID != res.Reduction.ID {
-		t.Fatalf("发布点没成为当前点：%#v", cfg.DefaultReductionID)
+		t.Fatalf("Published point was not made current：%#v", cfg.DefaultReductionID)
 	}
-	// 发布不改超管状态：装完这个还能接着装下一个
+	// Publishing must not disable Super Admin mode.
 	after, _ := st.Terminals().Get(ctx, terminal.ID)
 	if !after.IsSuper {
-		t.Fatal("发布之后这台还得是超管机")
+		t.Fatal("Client must remain Super Admin after publishing")
 	}
 }
 
-// 盘仍在写入时拒绝发布，否则整个分组拿到半成品；写入量由服务端采样判断。
+// Reject publishing disks still receiving writes to prevent distributing partial installs.
 func TestPublishDataDiskRefusesWhileTheDiskIsStillBeingWritten(t *testing.T) {
 	ctx := context.Background()
 	st, _, terminal := seedPublishStore(t)
-	pool := &fakePublishStorage{written: []int64{100, 4096}} // 两次采样之间还在涨
+	pool := &fakePublishStorage{written: []int64{100, 4096}} // Byte count increases between samples
 	svc := TerminalService{Store: st, Storage: pool, QuietWindow: time.Millisecond}
 
-	_, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "装了永劫无间"})
-	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "写入") {
-		t.Fatalf("应当拒绝并说清楚是盘在写：%v", err)
+	_, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "Game installed"})
+	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "still being written") {
+		t.Fatalf("Should reject and identify disk writes：%v", err)
 	}
 	if pool.called {
-		t.Fatal("盘还在写就不该动它")
+		t.Fatal("Disk must not change while writes are in progress")
 	}
 }
 
-// 发布成功但盘没装回：不能报失败，只在 Detail 里提示重启客户机。
+// If the disk cannot remount after a successful publish, report success with reboot guidance in Detail.
 func TestPublishDataDiskReportsAPublishedDiskThatDidNotComeBack(t *testing.T) {
 	ctx := context.Background()
 	st, _, terminal := seedPublishStore(t)
 	pool := &fakePublishStorage{err: storage.DiskNotReattached{LUN: 1, Err: errors.New("export failed")}}
 	svc := TerminalService{Store: st, Storage: pool, QuietWindow: time.Millisecond}
 
-	res, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "装了永劫无间"})
+	res, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "Game installed"})
 	if err != nil {
-		t.Fatalf("发布已经成功，不该报错：%v", err)
+		t.Fatalf("Publish succeeded and must not report an error：%v", err)
 	}
 	if res.Reduction == nil {
-		t.Fatalf("结果里没有还原点：%#v", res)
+		t.Fatalf("Result is missing restore point：%#v", res)
 	}
-	if !strings.Contains(res.Detail, "重启") {
-		t.Fatalf("要告诉运维该做什么：%q", res.Detail)
+	if !strings.Contains(res.Detail, "reboot") {
+		t.Fatalf("Give operator recovery instructions：%q", res.Detail)
 	}
 	if _, err := st.Reductions().Get(ctx, res.Reduction.ID); err != nil {
-		t.Fatalf("发布成功就该落库：%v", err)
+		t.Fatalf("Successful publication must persist：%v", err)
 	}
 }
 
@@ -153,52 +153,52 @@ func TestPublishDataDiskChecksTheMachineAndTheDisk(t *testing.T) {
 	pool := &fakePublishStorage{}
 	svc := TerminalService{Store: st, Storage: pool, QuietWindow: time.Millisecond}
 
-	// 不是超管机
+	// Not a Super Admin client
 	normal := terminal
 	normal.IsSuper = false
 	if err := st.Terminals().Update(ctx, normal); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "x"}); !errors.Is(err, ErrTerminalSuperRequired) {
-		t.Fatalf("只有超管机能发布：%v", err)
+		t.Fatalf("Only Super Admin clients can publish：%v", err)
 	}
 	if err := st.Terminals().Update(ctx, terminal); err != nil {
 		t.Fatal(err)
 	}
 
-	// 这块盘不是它分组里的
+	// This disk is not in the client's group
 	if _, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-nope", Name: "x"}); !errors.Is(err, errs.ErrInvalid) {
-		t.Fatalf("盘不属于这个分组要拒绝：%v", err)
+		t.Fatalf("Reject disks outside this group：%v", err)
 	}
 
-	// 名字和已有还原点重复
+	// Restore point name conflicts with an existing point
 	if _, err := svc.PublishDataDisk(ctx, terminal.ID, PublishDataDiskRequest{DiskID: "gd-1", Name: "0"}); err == nil {
-		t.Fatal("重名要拒绝")
+		t.Fatal("Reject duplicate restore point names")
 	}
 	if pool.called {
-		t.Fatal("校验没过就不该动存储")
+		t.Fatal("Validation must not mutate storage")
 	}
 }
 
-// 数据盘列表给出每块盘的当前点、未发布改动量与能否发布；
-// 未开过机的盘应标为不可发布，而不是报错或显示 0。
+// Data disk listing reports current point, unpublished written bytes and publish readiness.
+// A disk not yet booted should be not ready to publish, not a failure with zero changes.
 func TestSuperDisksTellsWhatEachDiskIsPublishingAndWhatIsPending(t *testing.T) {
 	ctx := context.Background()
 	st, group, terminal := seedPublishStore(t)
 	now := time.Now().UTC()
-	// 第二块盘：还没开过机，池里没有它的超管盘
-	if err := st.Configs().Create(ctx, domain.Config{ID: "cfg-doc", ImageID: "img-1", Name: "资料盘", CreatedAt: now}); err != nil {
+	// Second disk has not been booted and has no Super Admin clone.
+	if err := st.Configs().Create(ctx, domain.Config{ID: "cfg-doc", ImageID: "img-1", Name: "Documents Disk", CreatedAt: now}); err != nil {
 		t.Fatal(err)
 	}
 	if err := st.GroupDisks().Create(ctx, domain.GroupDisk{ID: "gd-2", GroupID: group.ID, ConfigID: "cfg-doc", ImageID: "img-1", MountTarget: "E:"}); err != nil {
 		t.Fatal(err)
 	}
-	// 游戏盘当前发布的点，取的是配置的当前应用点，显示运维起的名字
+	// The game disk's current point comes from its applied configuration and shows operator-supplied display name.
 	cfg, err := st.Configs().Get(ctx, "cfg-games")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := st.Reductions().Create(ctx, domain.Reduction{ID: "red-games-1", ConfigID: "cfg-games", Name: "@9yue14", DisplayName: "9月14日更新", CreatedAt: now, Status: domain.ReductionStatusReady}); err != nil {
+	if err := st.Reductions().Create(ctx, domain.Reduction{ID: "red-games-1", ConfigID: "cfg-games", Name: "@9yue14", DisplayName: "September 14 Update", CreatedAt: now, Status: domain.ReductionStatusReady}); err != nil {
 		t.Fatal(err)
 	}
 	current := "red-games-1"
@@ -213,34 +213,34 @@ func TestSuperDisksTellsWhatEachDiskIsPublishingAndWhatIsPending(t *testing.T) {
 		t.Fatal(err)
 	}
 	if res.Total != 2 {
-		t.Fatalf("两块数据盘都要列出来：%#v", res)
+		t.Fatalf("List both data disks：%#v", res)
 	}
 	games := res.Items[0]
-	if games.MountTarget != "D:" || games.LUN != 1 || games.ConfigName != "游戏盘" {
-		t.Fatalf("游戏盘那行 = %#v", games)
+	if games.MountTarget != "D:" || games.LUN != 1 || games.ConfigName != "Games Disk" {
+		t.Fatalf("Games Disk row = %#v", games)
 	}
-	if games.CurrentName != "9月14日更新" || games.Written != 13<<30 || !games.Ready {
-		t.Fatalf("要显示当前发布点和未发布改动：%#v", games)
+	if games.CurrentName != "September 14 Update" || games.Written != 13<<30 || !games.Ready {
+		t.Fatalf("Show current point and unpublished changes：%#v", games)
 	}
 	doc := res.Items[1]
 	if doc.MountTarget != "E:" || doc.Ready || doc.Written != 0 {
-		t.Fatalf("没开过机的盘应当是「还不能发布」：%#v", doc)
+		t.Fatalf("Never-booted disk should not be ready to publish：%#v", doc)
 	}
 
-	// 系统盘不在这张表里：它只能关机保存
+	// System disks are saved at shutdown and do not belong in this table.
 	for _, item := range res.Items {
 		if item.LUN == 0 {
-			t.Fatalf("系统盘不该出现在数据盘表里：%#v", item)
+			t.Fatalf("System disk should not appear in data disk list：%#v", item)
 		}
 	}
 
-	// 不是超管机就没有这张表
+	// Non-Super Admin clients have no data disk publication table.
 	normal := terminal
 	normal.IsSuper = false
 	if err := st.Terminals().Update(ctx, normal); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := (TerminalService{Store: st, Storage: pool}).SuperDisks(ctx, terminal.ID); !errors.Is(err, ErrTerminalSuperRequired) {
-		t.Fatalf("普通终端没有超管盘可列：%v", err)
+		t.Fatalf("Regular client has no Super Admin disks to list：%v", err)
 	}
 }

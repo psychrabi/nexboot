@@ -51,7 +51,7 @@ func seedRestorePointInto(t *testing.T, st *store.SQLStore) *store.SQLStore {
 	for _, err := range []error{
 		st.Images().Create(ctx, domain.Image{ID: "vmdk", Name: "vmdk", OSType: domain.OSTypeWindows, Purpose: domain.ImagePurposeSystem, State: domain.ImageStateNormal, MountScriptVersion: "v-win", CreatedAt: now}),
 		st.Configs().Create(ctx, domain.Config{ID: "vmdk_default", ImageID: "vmdk", Name: "default", DefaultReductionID: &red, CreatedAt: now}),
-		st.Reductions().Create(ctx, domain.Reduction{ID: red, ConfigID: "vmdk_default", Name: "@r1", DisplayName: "还原点1", Status: domain.ReductionStatusReady, CreatedAt: now}),
+		st.Reductions().Create(ctx, domain.Reduction{ID: red, ConfigID: "vmdk_default", Name: "@r1", DisplayName: "RestorePoint1", Status: domain.ReductionStatusReady, CreatedAt: now}),
 	} {
 		if err != nil {
 			t.Fatal(err)
@@ -64,7 +64,7 @@ func TestStreamReductionExportsThatRestorePoint(t *testing.T) {
 	agent := &copyingImageStorage{}
 	svc := ImageService{Store: seedRestorePoint(t), Storage: agent}
 	name, err := svc.ReductionExportName(context.Background(), "vmdk_default_r1", false)
-	if err != nil || name != "vmdk-还原点1.zfs" {
+	if err != nil || name != "vmdk-RestorePoint1.zfs" {
 		t.Fatalf("name = %q err = %v", name, err)
 	}
 	if err := svc.StreamReduction(context.Background(), "vmdk_default_r1", &bytes.Buffer{}, false); err != nil {
@@ -80,16 +80,16 @@ func TestSaveReductionAsImageKeepsTheSourcesKind(t *testing.T) {
 	st := seedRestorePoint(t)
 	agent := &copyingImageStorage{}
 	svc := ImageService{Store: st, Storage: agent}
-	res, err := svc.SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: " 教学机-办公版 "})
+	res, err := svc.SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: " Classroom-PC-Office "})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if agent.copyReq.ConfigID != "vmdk_default" || agent.copyReq.Snapshot != "r1" || agent.copyReq.Name != "教学机-办公版" ||
+	if agent.copyReq.ConfigID != "vmdk_default" || agent.copyReq.Snapshot != "r1" || agent.copyReq.Name != "Classroom-PC-Office" ||
 		agent.copyReq.OSType != domain.OSTypeWindows || agent.copyReq.Purpose != domain.ImagePurposeSystem {
 		t.Fatalf("copy req = %#v", agent.copyReq)
 	}
 	img, err := st.Images().Get(ctx, "vmdk2")
-	if err != nil || img.Name != "教学机-办公版" || img.MountScriptVersion != "v-win" {
+	if err != nil || img.Name != "Classroom-PC-Office" || img.MountScriptVersion != "v-win" {
 		t.Fatalf("image = %#v err = %v", img, err)
 	}
 	task, err := st.Tasks().Get(ctx, res.TaskID)
@@ -98,21 +98,21 @@ func TestSaveReductionAsImageKeepsTheSourcesKind(t *testing.T) {
 	}
 }
 
-// 另存为期间新镜像数据集先于库行出现，任务目标须是新镜像，一致性检查才不会把它当残留。
+// During Save As, the new dataset precedes its database row; task target must identify the new image to avoid orphan detection.
 func TestSaveReductionAsImageRecordsTheNewImageWhileCopying(t *testing.T) {
 	ctx := context.Background()
 	st := seedRestorePoint(t)
 	var midRunRef string
 	agent := &copyingImageStorage{onCopy: func(req storage.CopyReductionReq) {
 		req.OnTarget("vmdk2")
-		req.OnProgress(50, "复制 50%")
+		req.OnProgress(50, "Copying 50%")
 		active, err := st.Tasks().ListActive(ctx)
 		if err != nil || len(active) != 1 {
 			t.Fatalf("active = %#v err = %v", active, err)
 		}
 		midRunRef = active[0].TargetRef
 	}}
-	if _, err := (ImageService{Store: st, Storage: agent}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "教学机-办公版"}); err != nil {
+	if _, err := (ImageService{Store: st, Storage: agent}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "Classroom-PC-Office"}); err != nil {
 		t.Fatal(err)
 	}
 	if midRunRef != "vmdk2" {
@@ -139,7 +139,7 @@ func TestSaveReductionAsImageRefusesUpFront(t *testing.T) {
 	}
 }
 
-// 另存为在拷贝期间同样没有库行：同名的导入要当场拒绝，并在另存为结束后释放名字。
+// Save As temporarily lacks a database row; reject concurrent imports with the same name and release the claim upon completion.
 func TestImportIsRefusedWhileASaveAsOfTheSameNameCopies(t *testing.T) {
 	ctx := context.Background()
 	st := seedRestorePoint(t)
@@ -148,15 +148,15 @@ func TestImportIsRefusedWhileASaveAsOfTheSameNameCopies(t *testing.T) {
 		close(entered)
 		<-release
 	}}
-	res, err := (ImageService{Store: st, Storage: agent, Async: true}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "办公版"})
+	res, err := (ImageService{Store: st, Storage: agent, Async: true}).SaveReductionAsImage(ctx, "vmdk_default_r1", SaveAsImageRequest{Name: "OfficeEdition"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	<-entered
-	_, err = (ImageService{Store: st, Storage: &fakeImageStorage{}}).ImportImage(ctx, ImportImageRequest{Name: "办公版", SourcePath: "/var/lib/ndiskless/imports/a.zfs", OSType: domain.OSTypeWindows})
+	_, err = (ImageService{Store: st, Storage: &fakeImageStorage{}}).ImportImage(ctx, ImportImageRequest{Name: "OfficeEdition", SourcePath: "/var/lib/ndiskless/imports/a.zfs", OSType: domain.OSTypeWindows})
 	close(release)
 	waitTaskDone(t, st, res.TaskID)
-	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "办公版") || !strings.Contains(err.Error(), "另存为") {
-		t.Fatalf("另存为进行中时同名导入应点名拒绝，得到 %v", err)
+	if !errors.Is(err, errs.ErrConflict) || !strings.Contains(err.Error(), "OfficeEdition") || !strings.Contains(err.Error(), "save as image") {
+		t.Fatalf("A concurrent import during Save As must be rejected with the conflicting name; got %v", err)
 	}
 }

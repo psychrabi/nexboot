@@ -204,7 +204,7 @@ func TestDriverBundleLifecycle(t *testing.T) {
 		t.Fatalf("bundle = %#v", bundle)
 	}
 
-	// 被驱动包组引用的包不能删除
+	// Do not delete driver packs still referenced by bundles.
 	if err := service.DeletePack(ctx, nic.Pack.ID); !errors.Is(err, ErrDriverPackInUse) {
 		t.Fatalf("err = %v", err)
 	}
@@ -265,7 +265,7 @@ func TestDriverPackStatusToggle(t *testing.T) {
 	}
 }
 
-// 禁用必须在服务端生效：直接调 API 也不能把已禁用的包放进驱动包组注入超管机。
+// Enforce disabled packs on the server: direct API callers cannot add them to Super Admin injection bundles.
 func TestCreateBundleRejectsDisabledPack(t *testing.T) {
 	ctx := context.Background()
 	service := newDriverService(t)
@@ -285,7 +285,7 @@ func TestCreateBundleRejectsDisabledPack(t *testing.T) {
 	}
 }
 
-// 包文件位置由 id 推导而非存绝对路径，驱动目录挪动或数据库恢复到别的主机后仍能找到。
+// Derive pack locations from IDs, not absolute paths, so moving directories or restoring the DB remains safe.
 func TestDriverPackSurvivesDirectoryMove(t *testing.T) {
 	ctx := context.Background()
 	service := newDriverService(t)
@@ -300,7 +300,7 @@ func TestDriverPackSurvivesDirectoryMove(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// 操作者挪了驱动目录，行里仍是旧路径。
+	// The operator moved the driver directory, leaving stale stored paths.
 	moved := t.TempDir()
 	if err := os.Rename(filepath.Join(service.Dir, "packs"), filepath.Join(moved, "packs")); err != nil {
 		t.Fatal(err)

@@ -1,5 +1,5 @@
-// 页面共用的客户机网段计算：分组地址窗口是否在服务器客户机网段内。
-// 与服务端 assets.ClassifyGroupNetwork 一致，表单输入时先判，保存时以服务端为准。
+// Shared client subnet math: determine whether a group's IP allocation lies inside the server's client subnet.
+// Match assets.ClassifyGroupNetwork for form previews; server-side validation remains authoritative.
 
 export const ip4ToInt = (s) => {
   const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(String(s || '').trim());
@@ -20,7 +20,7 @@ export const prefixContains = (prefix, ip) => {
   return ((a & mask) >>> 0) === ((n & mask) >>> 0);
 };
 
-// 分组分配的地址窗口：start .. start+max-1。
+// Group allocation range: start through start+max-1.
 export const groupWindow = (startIP, clientMax) => {
   const start = ip4ToInt(startIP), max = Number(clientMax) || 0;
   if (start === null || max <= 0) return null;
@@ -38,11 +38,11 @@ export const classifyGroupNetwork = ({ start_ip, client_max }, network) => {
   return network.allow_cross_subnet ? 'relay' : 'blocked';
 };
 
-// 中继部署时交换机侧需要的配置，已填好服务器地址。
-export const relaySnippet = (serverAddr) => `请在客户机所在 VLAN 的三层接口上配置 DHCP 中继，指向 ${serverAddr}：
-  思科      ip helper-address ${serverAddr}
-  华为/H3C  dhcp select relay
+// Example switch-side DHCP relay configuration with the server address filled in.
+export const relaySnippet = (serverAddr) => `Configure DHCP relay on the client VLAN's Layer 3 interface, pointing to ${serverAddr}:
+  Cisco     ip helper-address ${serverAddr}
+  Huawei/H3C dhcp select relay
             dhcp relay server-ip ${serverAddr}
-  Linux     dnsmasq: dhcp-relay=<该网段网关>,${serverAddr}
-并保证客户机网段能路由到 ${serverAddr} 的 18080（HTTP）、69（TFTP）、3260（iSCSI）。
-分组的「网关」请填该 VLAN 的三层接口地址（即做中继的那台）。`;
+  Linux     dnsmasq: dhcp-relay=<subnet-gateway>,${serverAddr}
+Ensure the client subnet can route to ${serverAddr} on ports 18080 (HTTP), 69 (TFTP), and 3260 (iSCSI).
+Set the group's Gateway to this VLAN's Layer 3 relay interface address.`;

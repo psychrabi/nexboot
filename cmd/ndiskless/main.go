@@ -76,16 +76,16 @@ func managedUnits() []platform.ManagedUnit {
 	}
 	return []platform.ManagedUnit{
 		// 先写能力再写单元：运维关心的是客户机能否拿到地址、连上磁盘，而不是单元的 ActiveState。
-		{Key: "dnsmasq", Capability: "DHCP / PXE 引导", Label: "DNSMASQ · DHCP/TFTP/PXE",
+		{Key: "dnsmasq", Capability: "DHCP / PXE Boot", Label: "DNSMASQ · DHCP/TFTP/PXE",
 			Unit: unit("NDISKLESS_UNIT_DNSMASQ", "dnsmasq.service"), Critical: true, ActiveOnly: true},
 		// target.service 是 oneshot，开机加载 LIO 配置后即退出，它的 inactive 说明不了什么；
 		// 要看内核侧在不在，由 Probe 回答。
-		{Key: "iscsi", Capability: "客户机磁盘", Label: "iSCSI Target · LIO",
+		{Key: "iscsi", Capability: "Client Disks", Label: "iSCSI Target · LIO",
 			Unit: unit("NDISKLESS_UNIT_ISCSI", "target.service"), Critical: true,
 			OneShot: true, Probe: iscsi.Available},
-		{Key: "zfs", Capability: "存储", Label: "ZFS · 存储",
+		{Key: "zfs", Capability: "存储", Label: "ZFS · Storage",
 			Unit: unit("NDISKLESS_UNIT_ZFS", "zfs-zed.service"), Critical: true},
-		{Key: "ndiskless", Capability: "控制服务", Label: "ndiskless · 控制/引导",
+		{Key: "ndiskless", Capability: "Control Service", Label: "ndiskless · Control/Boot",
 			Unit: unit("NDISKLESS_UNIT_SELF", "ndiskless.service"), ReadOnly: true},
 	}
 }
@@ -132,7 +132,7 @@ func main() {
 				cfg.PortalAddr != "" && holdsAddr(cfg.PortalAddr),
 				[]ha.PeerStatusClient{peer})
 			if role != cfg.Role {
-				logger.Warn("角色标记说本机是主机，但对端正在服务且本机没有虚 IP：以备机身份启动",
+				logger.Warn("Role marker says active, but a peer is serving and this node lacks VIP; starting as standby",
 					"peer", cfg.PeerURL)
 				cfg.Role = role
 				// 记下降级时刻：本机仍持有 VIP 的话，自愈循环下一轮会再试着激活，探不到对端时
@@ -141,7 +141,7 @@ func main() {
 				if err := ha.WriteRoleState(roleFile, ha.RoleState{
 					Role: role, Epoch: rs.Epoch, SeenEpoch: rs.SeenEpoch, DemotedAt: &demotedAt,
 				}); err != nil {
-					logger.Warn("启动角色未能落盘，本轮仍按备机运行", "error", err)
+					logger.Warn("Could not persist startup role; continuing as standby for this session", "error", err)
 				}
 			}
 		}
@@ -151,7 +151,7 @@ func main() {
 		if _, p, err := net.SplitHostPort(cfg.Addr); err == nil {
 			port = p
 		}
-		gate.Close("本节点为备机", writerHint(cfg.PortalAddr, nodeSelfAddr(cfg), cfg.PeerURL, port))
+		gate.Close("This node is standby", writerHint(cfg.PortalAddr, nodeSelfAddr(cfg), cfg.PeerURL, port))
 	}
 
 	st, err := store.Open(context.Background(), cfg.DBDSN)
@@ -300,8 +300,8 @@ func main() {
 		// 故意不致命：这行只是池归属和集群花名册的账，单机功能都不依赖它。
 		// 退出会把记账问题变成 systemd 最终放弃的崩溃循环（如 machine-id 重置后的
 		// "UNIQUE constraint failed: servers.ip"）。报错、继续服务，让运维修这行。
-		logger.Error("节点身份登记失败：集群功能（放置、复制、节点列表）可能异常，"+
-			"单机功能不受影响。请检查 servers 表中是否有占用本机地址的过期记录",
+		logger.Error("Failed to register node identity. Cluster features (placement, replication, node list) may be impaired; "+
+			"standalone functionality is unaffected. Check the servers table for stale records using this node's address",
 			"error", err, "node_id", cfg.NodeID, "ip", nodeRow.IP)
 	}
 	// 产品安装前就建好的池也是本机的池：要登记，否则一边用它服务镜像一边报没有存储。

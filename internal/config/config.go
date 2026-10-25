@@ -25,23 +25,23 @@ type Config struct {
 	JWTSecret     string
 	BootstrapUser string
 	BootstrapPass string
-	// NodeID 是本机在库里的名字，servers、pools 和克隆都挂在它下面。取自 machine-id，天然稳定，
-	// 改地址或把 portal 移到 VIP 都不会让目录换键。
+	// NodeID is the local node's stable database identity from machine-id; servers, pools and clones reference it.
+	// Changing the address or moving the portal to VIP does not change database keys.
 	NodeID string
-	// PortalAddr 是客户机访问本节点磁盘和启动端点的地址，即写进 sanhook 的地址。默认取启动 URL 的主机名；HA 下为 VIP。
+	// PortalAddr is the client-facing boot and disk address placed in sanhook. Defaults to the boot URL host; HA uses VIP.
 	PortalAddr string
-	// Role 是本进程的初始角色：默认 "all"；HA 下由角色标记改为 "active" 或 "standby"。
+	// Role is the initial process role: "all" by default or "active"/"standby" from the HA role marker.
 	Role string
-	// PeerURL 是集群汇合点：VIP 的 API 基址（普通双机时为对端的）。为空表示单机。
+	// PeerURL is the cluster rendezvous API address (VIP or peer in a two-node setup); empty means standalone.
 	PeerURL string
-	// NodeAddr 是本节点自己的可达 IP，供其他节点和被放置的客户机回拨，从不是 VIP。为空时回落到 PortalAddr（单机时二者相同）。
+	// NodeAddr is the node's own reachable IP, never VIP. If empty, falls back to PortalAddr (the same on standalone hosts).
 	NodeAddr string
-	// ClusterToken 用于节点间复制通道等集群接口的认证。
+	// ClusterToken authenticates inter-node replication channels and other cluster APIs.
 	ClusterToken string
-	// ReplicationInterval 同时决定主机打标记和备机拉取的节奏。
+	// ReplicationInterval controls both active-node snapshots and standby pulls.
 	ReplicationInterval time.Duration
-	// ReplicationRateMBPerSec 限制批量复制流（新节点首次全量同步、promote 后重建），免得挤占共享上行链路上
-	// 客户机的 iSCSI 流量。0 表示不限速。
+	// ReplicationRateMBPerSec limits bulk transfers during first sync and post-promotion rebuilding
+	// to protect iSCSI bandwidth on shared uplinks. Zero means unlimited.
 	ReplicationRateMBPerSec int
 }
 
@@ -95,7 +95,7 @@ func Load(args []string) Config {
 	return cfg
 }
 
-// hostOfURL 返回 URL 的主机名部分，解析失败时为 ""。
+// hostOfURL extracts the hostname from a URL, returning an empty string on parse failure.
 func hostOfURL(raw string) string {
 	u, err := url.Parse(strings.TrimSpace(raw))
 	if err != nil {
@@ -104,8 +104,8 @@ func hostOfURL(raw string) string {
 	return u.Hostname()
 }
 
-// machineNodeID 派生稳定的节点身份：/etc/machine-id 的前 12 个十六进制字符，没有时回落到主机名。
-// 库里的 servers、pools、克隆都以它为键，稳定是关键。
+// machineNodeID derives a stable ID from the first 12 hex characters of /etc/machine-id, falling back to hostname.
+// Servers, pools and clones use that key, so its stability is essential.
 func machineNodeID() string {
 	if b, err := os.ReadFile("/etc/machine-id"); err == nil {
 		if id := strings.TrimSpace(string(b)); len(id) >= 12 {

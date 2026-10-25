@@ -1,16 +1,16 @@
 #!/bin/bash
-# 造一个能过导入体检的最小「Windows 形状」镜像，给 boot_matrix / backup_matrix 当镜像源。
-# 阻断项只有 Windows/System32 和 drivers/msiscsi.sys（见 internal/storage/local/inspect.go 的
-# inspectWindows）；网卡 INF 和 Boot/BCD 只是 WARN，一并放进去让体检全绿。
-# 它不能真正启动，那两个矩阵也不依赖镜像内容。1G 稀疏文件，实占几 MB，省得宿主机多备 60G。
-# 用法：sudo ./mkwin.sh /var/lib/ndiskless/imports/winmin.raw 1G
-# 依赖：parted、ntfs-3g（mkfs.ntfs）、losetup
+# Build a minimal Windows-shaped image that passes import health checks for boot_matrix and backup_matrix.
+# Blocking health checks require Windows/System32 and drivers/msiscsi.sys (see inspectWindows in
+# internal/storage/local/inspect.go). NIC INF and Boot/BCD are warnings, included for a clean report.
+# This image is not bootable. The test matrices do not require its contents. A sparse 1 GiB file consumes only a few MiB.
+# Usage: sudo ./mkwin.sh /var/lib/ndiskless/imports/winmin.raw 1G
+# Dependencies: parted, ntfs-3g (mkfs.ntfs), losetup
 set -euo pipefail
 OUT=${1:-/var/lib/ndiskless/imports/winmin.raw}
 SIZE=${2:-1G}
-[ "$(id -u)" -eq 0 ] || { echo "要 root：挂载与 losetup 都需要" >&2; exit 1; }
+[ "$(id -u)" -eq 0 ] || { echo "Root privileges are required for mount and losetup" >&2; exit 1; }
 for c in parted mkfs.ntfs losetup; do
-  command -v "$c" >/dev/null || { echo "缺 $c（apt install parted ntfs-3g）" >&2; exit 1; }
+  command -v "$c" >/dev/null || { echo "Missing $c (install with apt install parted ntfs-3g)" >&2; exit 1; }
 done
 
 mkdir -p "$(dirname "$OUT")"
@@ -49,4 +49,4 @@ umount "$MNT"
 losetup -d "$LOOP"
 rmdir "$MNT"
 trap - EXIT
-echo "  已生成 $OUT  表观 $(du -h --apparent-size "$OUT" | cut -f1)  实占 $(du -h "$OUT" | cut -f1)"
+echo "  Created $OUT  Apparent $(du -h --apparent-size "$OUT" | cut -f1)  Actual disk usage $(du -h "$OUT" | cut -f1)"
