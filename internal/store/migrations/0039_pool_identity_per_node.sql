@@ -1,14 +1,14 @@
 -- +goose Up
--- 池 ID 原来只由池名派生（pool-<name>）。数据池按惯例每台都叫 tank，而目录库
--- 是整体复制的——三台的 pools 表是同一张表，于是三个池压成一行，谁最后写谁就
--- 成了主人，另外两台在界面上没有任何存储，尽管它们的盘正给客户机供着。
+-- Pool IDs were previously derived only from names (pool-<name>). Multiple nodes commonly name their data pool tank,
+-- but the catalogue is replicated across all nodes. Three identically named pools collapsed into one shared record,
+-- owned by the last writer, hiding the other two nodes' storage despite their disks serving clients.
 --
--- 这里把已有的记录改成按节点区分的 ID（pool-<node>--<name>）。只能改到「已经
--- 在表里的那一行」；其余节点的池本来就没有记录，它们会在下次启动时由既有的
--- 「接管产品外准备好的数据池」流程用新规则各自登记一行。
--- pool_disks.pool_id 有外键指向 pools(id)，且只声明了 ON DELETE CASCADE。改 ID
--- 时父子两张表必然有一瞬间对不上：先改子表，父行还是旧 ID；先改父表，子行指向
--- 的父行已经没了。把外键检查推迟到提交时，两张表一起改完再校验。
+-- Assign node-specific IDs (pool-<node>--<name>) to existing rows. Only already-persisted rows can be updated.
+-- Previously hidden pools have no rows and will be registered when their nodes next boot using the existing
+-- external-data-pool adoption process with the new identity format.
+-- pool_disks.pool_id references pools(id) with ON DELETE CASCADE. Updating IDs temporarily makes one table
+-- inconsistent regardless of which side is updated first. Defer foreign key checks until commit
+-- so both parent and child IDs can be updated together.
 PRAGMA defer_foreign_keys = ON;
 
 UPDATE pool_disks
