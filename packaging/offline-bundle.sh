@@ -1,8 +1,8 @@
 #!/bin/bash
-# 打完全离线的安装包：ndiskless .deb 加全部依赖 .deb，供不能上网的 PXE/iSCSI 隔离网段安装。
-# 必须在与目标相同的 Ubuntu 版本（24.04）上运行，依赖包与版本绑定；只有打包机需要联网。
+# Create an offline installation bundle with ndiskless .deb and all dependency packages for isolated PXE/iSCSI networks.
+# Build on the same Ubuntu release as the target (24.04); only the packaging host needs Internet access.
 #
-# 用法：DEB=<path-to-ndiskless.deb> packaging/offline-bundle.sh [outdir]
+# Usage: DEB=<path-to-ndiskless.deb> packaging/offline-bundle.sh [outdir]
 set -euo pipefail
 
 here=$(cd "$(dirname "$0")" && pwd)
@@ -19,11 +19,11 @@ trap 'rm -rf "$stage"' EXIT
 mkdir -p "$stage/packages/deps"
 cp "$deb" "$stage/packages/"
 
-# 按 Depends 下载每个依赖及其递归依赖。
+# Download every Depends package and its transitive dependencies.
 deps=$(dpkg-deb -f "$deb" Depends | tr ',' '\n' | sed -E 's/\|.*//; s/\(.*\)//; s/^[[:space:]]*//; s/[[:space:]]*$//' | awk 'NF')
 echo "resolving dependencies for: $(echo "$deps" | tr '\n' ' ')"
 ( cd "$stage/packages/deps"
-  # --reinstall 让本机已装的包也会被下载；再补上递归闭包，目标机不需要访问镜像源。
+  # --reinstall also downloads installed packages, ensuring the target needs no package mirror.
   apt-get install --yes --download-only --reinstall \
     -o Dir::Cache::archives="$(pwd)" $deps >/dev/null 2>&1 || true
   apt-get download $(apt-cache depends --recurse --no-recommends --no-suggests \
@@ -54,21 +54,21 @@ echo "  (HA pair: add --peer <ip> --vip <ip> --cluster-token <s> --chap-secret <
 INSTALL
 chmod 0755 "$stage/install.sh"
 
-cat > "$stage/现场卡片.txt" <<CARD
-NexBoot 离线安装（Ubuntu $rel / amd64）
+cat > "$stage/INSTALLATION.txt" <<CARD
+NexBoot Offline Installation (Ubuntu $rel / amd64)
 
-前提：这台机器在专用的管理/PXE 网段里，不需要联网。
+Prerequisite: this machine is on a dedicated management/PXE network; Internet access is not required.
 
-1) 解压后进目录，装：
+1) Extract the bundle, enter its directory, and install:
      sudo ./install.sh
-2) 配置这台机器（选盘、设管理员口令）：
-     sudo ndiskless-configure --bootstrap-password '你的口令' \\
+2) Configure this host (select disks and set the administrator password):
+     sudo ndiskless-configure --bootstrap-password 'your-password' \\
             --create-pool tank --pool-disks /dev/sdX
-   组主备再加： --peer 对端IP --vip 虚IP \\
-            --cluster-token 同一个令牌 --chap-secret 同一个密钥
-3) 浏览器打开 http://本机IP:8080
+   For HA, also add: --peer PEER_IP --vip VIRTUAL_IP \\
+            --cluster-token SHARED_TOKEN --chap-secret SHARED_SECRET
+3) Open http://HOST_IP:8080 in your browser
 
-升级：先在备机 dpkg -i 新包并重启，确认接管后再动主机。
+Upgrade: install the new package on standby first, reboot and verify takeover before upgrading the active host.
 CARD
 
 install -d -m 0755 "$outdir"
