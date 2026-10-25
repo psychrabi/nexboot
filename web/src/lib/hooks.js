@@ -115,7 +115,7 @@ export function usePolling(fn, { intervalMs, active = true } = {}) {
     const id = setInterval(async () => {
       if (inflight) return;
       inflight = true;
-      try { await fn(); } catch { /* 下次重试 */ }
+      try { await fn(); } catch { /* Retry on next poll. */ }
       inflight = false;
     }, intervalMs);
     return () => clearInterval(id);
