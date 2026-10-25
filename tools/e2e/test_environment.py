@@ -60,7 +60,7 @@ def run_cli(script, vip=None, addresses=()):
 if __name__ == "__main__":
     for script in ("reset.py", "wait_settled.py"):
         result = run_cli(script)
-        assert result.returncode != 0 and "请先设置 ND_VIP" in result.stderr, (
+        assert result.returncode != 0 and "Set ND_VIP" in result.stderr, (
             script, result.returncode, result.stdout, result.stderr)
         for addresses, found in ((["203.0.113.80", "203.0.113.8"], True),
                                  (["203.0.113.80"], False)):
