@@ -1,5 +1,5 @@
 -- +goose Up
--- 另存为新镜像是自己的一类任务，任务列表里要认得出来。与以往一样重建 tasks 放宽 CHECK。
+-- Saving as a new image is a distinct task type. Rebuild tasks to extend its CHECK constraint.
 CREATE TABLE tasks_copy (
   id TEXT PRIMARY KEY,
   type TEXT NOT NULL CHECK (type IN ('import_image','create_config','delete_config','create_reduction','delete_reduction','merge_config','merge_reduction','super_stop','create_pool','destroy_pool','add_disk','migrate_disk','replace_disk','add_read_cache','remove_read_cache','add_write_cache','remove_write_cache','flush_cache','backup_dataset','image_health_check','detach_disk','mirror_upgrade','add_special','remove_special','add_spare','remove_spare','create_blank_image','export_image','publish_data_disk','copy_image')),
