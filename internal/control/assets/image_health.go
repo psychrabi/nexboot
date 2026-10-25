@@ -11,21 +11,21 @@ import (
 	"github.com/tianwei/diskless/internal/storage"
 )
 
-// ErrImageHealthBlocked 是 C-12 门禁：最新体检为阻断级的镜像不能绑定到分组。
-var ErrImageHealthBlocked = errs.Invalid("镜像体检结果为阻断级")
+// ErrImageHealthBlocked enforces C-12: images with a blocking health report cannot be assigned to groups.
+var ErrImageHealthBlocked = errs.Invalid("Image health report indicates a blocking failure")
 
 type HealthCheckResult struct {
 	TaskID string `json:"task_id"`
 }
 
-// dropHealthReport 删除数据盘的体检报告：数据盘上没有系统可检，残留报告会持续告警。
+// dropHealthReport removes reports for data disks, which contain no bootable OS to inspect.
 func (s ImageService) dropHealthReport(ctx context.Context, imageID string) {
 	if old, err := s.Store.ImageHealthReports().GetByImage(ctx, imageID); err == nil {
 		_ = s.Store.ImageHealthReports().Delete(ctx, old.ID)
 	}
 }
 
-// RunHealthCheck 为镜像发起 image_health_check 任务。
+// RunHealthCheck launches an image_health_check task.
 func (s ImageService) RunHealthCheck(ctx context.Context, imageID string) (HealthCheckResult, error) {
 	img, err := s.Store.Images().Get(ctx, imageID)
 	if err != nil {
@@ -33,7 +33,7 @@ func (s ImageService) RunHealthCheck(ctx context.Context, imageID string) (Healt
 	}
 	if img.Purpose == domain.ImagePurposeData {
 		s.dropHealthReport(ctx, img.ID)
-		return HealthCheckResult{}, errs.Invalid(fmt.Sprintf("「%s」是数据盘，里面没有系统，不需要体检", img.Name))
+		return HealthCheckResult{}, errs.Invalid(fmt.Sprintf("%s is a data disk with no operating system; a health check is not applicable", img.Name))
 	}
 	task, err := s.runner().Run(ctx, domain.TaskTypeImageHealthCheck, img.ID, func(ctx context.Context, task domain.Task) error {
 		return s.executeHealthCheck(ctx, task, img)
@@ -72,7 +72,7 @@ func (s ImageService) executeHealthCheck(ctx context.Context, task domain.Task, 
 		NICPCIIDs:      report.NICPCIIDs,
 		CreatedAt:      s.now(),
 	}
-	// 每个镜像只保留最新一份报告，重跑覆盖旧报告。
+	// Retain only the latest health report per image; new checks overwrite old reports.
 	if _, err := s.Store.ImageHealthReports().GetByImage(ctx, img.ID); err == nil {
 		if err := s.Store.ImageHealthReports().Update(ctx, record); err != nil {
 			return err
@@ -92,7 +92,7 @@ func (s ImageService) executeHealthCheck(ctx context.Context, task domain.Task, 
 	return s.Store.Tasks().Update(ctx, task)
 }
 
-// healthCheckSource 按镜像 → 默认配置 → 最新就绪还原点解析，返回 (configID, zfs 快照名)。
+// healthCheckSource resolves Image → Default Configuration → Latest Ready Restore Point and returns (configID, ZFS snapshot).
 func (s ImageService) healthCheckSource(ctx context.Context, imageID string) (string, string, error) {
 	configs, err := s.Store.Configs().ListByImage(ctx, imageID)
 	if err != nil {
