@@ -55,7 +55,7 @@ func (s TerminalService) PublishDataDisk(ctx context.Context, id string, req Pub
 	}
 	disk, lun, ok := findDataDisk(disks, req.DiskID)
 	if !ok {
-		return PublishDataDiskResult{}, errs.Invalid("分组 " + group.Name + " does not contain this data disk. Refresh and try again")
+		return PublishDataDiskResult{}, errs.Invalid("Group " + group.Name + " does not contain this data disk. Refresh and try again")
 	}
 	cfg, err := s.Store.Configs().Get(ctx, disk.ConfigID)
 	if err != nil {
