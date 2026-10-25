@@ -81,7 +81,7 @@ def refused_well(resp):
     """Expected rejection: HTTP 409 identifying the image and conflicting operation."""
     st, body = resp
     text = str(body)
-    return st == 409 and NAME in text and "Please wait for the task to complete" in text
+    return st == 409 and NAME in text and any(x in text for x in ("Please wait for the task to complete", "\u8bf7\u7b49\u8be5\u4efb\u52a1\u5b8c\u6210"))
 
 
 def cleanup_leftovers():
@@ -112,7 +112,7 @@ try:
         skip("1b", "Rejected request identifies image and active operation", "No collision: each previous request finished before the next arrived")
     else:
         check("1b", "All rejected requests return 409 and identify the image/operation",
-              all(refused_well(r) and "Create restore point" in str(r[1]) for r in refused), str(refused[0])[:140])
+              all(refused_well(r) and any(x in str(r[1]) for x in ("Create restore point", "\u521b\u5efa\u8fd8\u539f\u70b9")) for r in refused), str(refused[0])[:140])
     tasks = settled(accepted)
     check("1c", "All accepted tasks succeeded", len(tasks) == len(accepted) and all(t["Status"] == "success" for t in tasks.values()),
           str([(t.get("Status"), (t.get("Error") or "")[:60]) for t in tasks.values()]))
