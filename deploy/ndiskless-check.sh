@@ -1,29 +1,29 @@
 #!/bin/sh
-# keepalived 健康探针，是否该持有 VIP 由 /healthz 判断。「连不上」和「答不健康」要分开：
-#   200          健康，持有 VIP。
-#   其它 HTTP 码 服务自认不健康，立刻让出 VIP。
-#   连不上       可能正在切换角色（写标记后退出、由 systemd 拉起，有两三秒无应答）。
-#                判成故障会形成「切换→探针失败→再切换」的振荡，所以切换标记 15 秒内仍放行。
+# keepalived health probe: /healthz decides VIP ownership. Distinguish unreachable from unhealthy:
+#   200          Healthy; retain VIP.
+#   Other HTTP   Service reports unhealthy; release VIP immediately.
+#   Unreachable  Role transition may be in progress (a brief systemd restart).
+#                Avoid VIP flapping by allowing a 15-second grace period after a role switch.
 URL=http://127.0.0.1:@API_PORT@/healthz
 SWITCH=/run/ndiskless.switching
 WINDOW=15
 
-# keepalived 超时会杀脚本并判失败，最坏路径须在预算内：1 + 0.5 + 1 = 2.5s < timeout 5s。
+# keepalived kills timed-out scripts; worst case is 1 + 0.5 + 1 = 2.5s, below its 5s timeout.
 code=$(curl -s -o /dev/null -w '%{http_code}' -m 1 "$URL" 2>/dev/null)
 case "$code" in
   200) exit 0 ;;
-  000) ;;        # 连不上，下面判断是不是切换窗口
-  *)   exit 1 ;; # 服务明确说自己不健康
+  000) ;;        # Unreachable: check the transition grace period below
+  *)   exit 1 ;; # Explicitly unhealthy
 esac
 
 if [ -f "$SWITCH" ]; then
   now=$(date +%s)
   stamped=$(stat -c %Y "$SWITCH" 2>/dev/null || echo 0)
   if [ $((now - stamped)) -lt "$WINDOW" ]; then
-    # 多数切换一两秒内就重新监听，再探一次。
+    # Most transitions resume listening within a second or two; retry once.
     sleep 0.5
     [ "$(curl -s -o /dev/null -w '%{http_code}' -m 1 "$URL" 2>/dev/null)" = "200" ] && exit 0
-    exit 0   # 仍在窗口内：等下一轮探测，别为一次重启搬走 VIP
+    exit 0   # In grace period: wait for next probe instead of migrating VIP on a restart
   fi
 fi
 exit 1
