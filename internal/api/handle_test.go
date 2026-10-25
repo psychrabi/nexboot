@@ -12,7 +12,7 @@ import (
 	"github.com/tianwei/diskless/internal/control/errs"
 )
 
-// call 经 chi 运行 handler，{id} 解析与生产环境一致。
+// call executes handlers via chi so {id} parsing matches production.
 func call(t *testing.T, method, path string, body string, register func(r chi.Router)) *httptest.ResponseRecorder {
 	t.Helper()
 	r := chi.NewRouter()
@@ -24,7 +24,7 @@ func call(t *testing.T, method, path string, body string, register func(r chi.Ro
 }
 
 func TestHandleFunnelsClassifiedErrors(t *testing.T) {
-	// 统一出口的意义所在：分类过的错误绝不能被压平成 500。
+	// Centralized mapping must preserve classified errors rather than convert them to HTTP 500.
 	for _, tc := range []struct {
 		name string
 		err  error
@@ -76,13 +76,13 @@ func TestHandleIDPassesPathParamAndStatus(t *testing.T) {
 }
 
 func TestNotFoundOptionKeepsChineseMessage(t *testing.T) {
-	// store 自带的文本（`groups "x": not found`）是给开发者看的；该选项保留路由一贯面向运维的提示。
+	// Storage errors such as `groups "x": not found` are developer-facing; route overrides produce user-facing messages.
 	w := call(t, http.MethodGet, "/x/nope", "", func(r chi.Router) {
 		r.Get("/x/{id}", handleID(func(context.Context, string) (struct{}, error) {
 			return struct{}{}, errors.New(`groups "nope": not found`)
-		}, notFound("分组不存在")))
+		}, notFound("Group not found")))
 	})
-	// 裸错误：选项不能生效，统一出口给 500。
+	// Unclassified errors still map to HTTP 500.
 	if w.Code != http.StatusInternalServerError {
 		t.Fatalf("bare error: status = %d", w.Code)
 	}
@@ -90,15 +90,15 @@ func TestNotFoundOptionKeepsChineseMessage(t *testing.T) {
 	w = call(t, http.MethodGet, "/x/nope", "", func(r chi.Router) {
 		r.Get("/x/{id}", handleID(func(context.Context, string) (struct{}, error) {
 			return struct{}{}, errs.ErrNotFound
-		}, notFound("分组不存在")))
+		}, notFound("Group not found")))
 	})
-	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "分组不存在") {
+	if w.Code != http.StatusNotFound || !strings.Contains(w.Body.String(), "Group not found") {
 		t.Fatalf("status = %d body = %q", w.Code, w.Body.String())
 	}
 }
 
 func TestHandleErrIDStatusShapes(t *testing.T) {
-	// 204 不发响应体；其余回 {"status":"ok"}。
+	// 204 omits a body; other successful handlers return {"status":"ok"}.
 	w := call(t, http.MethodDelete, "/x/1", "", func(r chi.Router) {
 		r.Delete("/x/{id}", handleErrID(func(context.Context, string) error { return nil }))
 	})
@@ -130,7 +130,7 @@ func TestHandleErrIDInDecodesAndFunnels(t *testing.T) {
 }
 
 func TestHandleReqStillFunnels(t *testing.T) {
-	// handleReq 同样必须走统一出口。
+	// handleReq must use the same centralized error mapper.
 	w := call(t, http.MethodGet, "/x", "", func(r chi.Router) {
 		r.Get("/x", handleReq(func(*http.Request) (struct{}, error) {
 			return struct{}{}, errs.ErrConflict
