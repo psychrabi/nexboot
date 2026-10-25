@@ -56,7 +56,7 @@ func TestHandleInRejectsBadJSON(t *testing.T) {
 	if w.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d", w.Code)
 	}
-	if !strings.Contains(w.Body.String(), "请求格式错误") {
+	if !strings.Contains(w.Body.String(), "Invalid request format") {
 		t.Fatalf("body = %q", w.Body.String())
 	}
 }
