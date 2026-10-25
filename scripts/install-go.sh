@@ -12,8 +12,8 @@ DNSMASQ_BASE_CONF=/etc/dnsmasq.d/00-ndiskless-base.conf
 IMPORT_DIR=$DATA_DIR/imports
 
 INSTALL_DEPS=0
-# --provisioned：.deb 已放好二进制和 unit，ndiskless-configure 只做现场配置（env、池、HA、启动）。
-# 默认 0 为源码/tarball 安装，全部自己铺。
+# --provisioned: the .deb already installed the binary and unit; ndiskless-configure only handles site configuration (env, pool, HA, startup).
+# Default 0 installs everything from source/tarball.
 PROVISIONED=0
 BINARY=
 POOL=tank
@@ -23,7 +23,7 @@ BOOTSTRAP_USER=admin
 BOOTSTRAP_PASSWORD=
 CREATE_POOL=
 POOL_DISKS=
-# HA 选项：--peer/--vip/--cluster-token 让本机加入主备集群；不给则为单机。
+# HA options --peer/--vip/--cluster-token configure membership in an active/standby cluster; omit for standalone.
 PEER_IP=
 VIP=
 CLUSTER_TOKEN=
@@ -127,7 +127,7 @@ parse_args() {
   while [ "$#" -gt 0 ]; do
     case "$1" in
       --install-deps) INSTALL_DEPS=1 ;;
-      # 由 .deb 包装命令 ndiskless-configure 传入：二进制和 unit 已就位，只做现场配置。
+      # Passed by the .deb wrapper ndiskless-configure: binary and service unit already exist; only configure this host.
       --provisioned) PROVISIONED=1 ;;
       --binary) shift; BINARY=${1:-} ;;
       --pool) shift; POOL=${1:-} ;;
@@ -138,7 +138,7 @@ parse_args() {
       --bootstrap-password) shift; BOOTSTRAP_PASSWORD=${1:-} ;;
       --create-pool) shift; CREATE_POOL=${1:-} ;;
       --pool-disks) shift; POOL_DISKS=${1:-} ;;
-      # 逗号分隔可给多个，所有节点都参与 VRRP；只给一个即双机。
+      # Multiple peers may be comma-separated; all nodes participate in VRRP. One peer creates a two-node configuration.
       --peer) shift; PEER_IP=${1:-} ;;
       --vip) shift; VIP=${1:-} ;;
       --cluster-token) shift; CLUSTER_TOKEN=${1:-} ;;
@@ -154,7 +154,7 @@ parse_args() {
   done
 }
 
-# is_ipv4 只接受每段都在 0..255 的点分四段地址。
+# is_ipv4 accepts four dotted decimal octets, each in 0..255.
 is_ipv4() {
   local ip=$1 part parts
   [[ "$ip" =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]] || return 1
@@ -168,40 +168,40 @@ has_control_chars() {
   [[ "$1" =~ [[:cntrl:]] ]]
 }
 
-# validate_args 必须在写任何文件之前运行：错误的值（如带 /24 的 VIP）若到 keepalived 步骤才失败，
-# 集群配置已经落盘，节点会以没有 keepalived 的备机身份重启，控制台也无法再纳管它。
+# validate_args must run before writing files. Invalid values, such as a VIP containing /24, must be rejected before keepalived setup
+# or the host can restart as standby without keepalived and become impossible to adopt from the console.
 validate_args() {
   local peer peers name_ok='^[A-Za-z][A-Za-z0-9_.:-]*$' token_ok='^[A-Za-z0-9._:+=@-]+$'
   if [ -n "$VIP" ]; then
-    is_ipv4 "$VIP" || die "--vip 不是合法的 IPv4 地址：只填地址本身，不带掩码和端口，例如 192.168.10.250"
+    is_ipv4 "$VIP" || die "--vip must be a valid IPv4 address without mask or port, e.g. 192.168.10.250"
   fi
   if [ -n "$PEER_IP" ]; then
-    has_control_chars "$PEER_IP" && die "--peer 里有换行等控制字符：多个节点用逗号分隔，每个只填地址本身"
+    has_control_chars "$PEER_IP" && die "--peer contains control characters. Separate multiple nodes by commas; specify bare addresses only"
     IFS=, read -r -a peers <<< "$PEER_IP"
     for peer in "${peers[@]}"; do
       peer=$(trim "$peer")
       [ -n "$peer" ] || continue
-      is_ipv4 "$peer" || die "--peer 里的「${peer}」不是合法的 IPv4 地址：多个节点用逗号分隔，每个只填地址本身"
+      is_ipv4 "$peer" || die "Invalid IPv4 address in --peer: ${peer}. Separate nodes by commas; specify bare addresses only"
     done
   fi
   if [ -n "$NODE_ADDR" ]; then
-    is_ipv4 "$NODE_ADDR" || die "--node-addr 不是合法的 IPv4 地址：填本机在客户机网段上的地址"
+    is_ipv4 "$NODE_ADDR" || die "--node-addr must be the local IPv4 address on the client subnet"
   fi
   if [ -n "$POOL" ]; then
-    [[ "$POOL" =~ $name_ok ]] || die "--pool 的池名不可用：只能用字母、数字和 _ - . :，并以字母开头"
+    [[ "$POOL" =~ $name_ok ]] || die "--pool name must start with a letter and contain only letters, digits, underscores, hyphens, dots and colons"
   fi
   if [ -n "$CREATE_POOL" ]; then
-    [[ "$CREATE_POOL" =~ $name_ok ]] || die "--create-pool 的池名不可用：只能用字母、数字和 _ - . :，并以字母开头"
+    [[ "$CREATE_POOL" =~ $name_ok ]] || die "--create-pool name must start with a letter and contain only letters, digits, underscores, hyphens, dots and colons"
   fi
   if [ -n "$CLUSTER_TOKEN" ]; then
-    [[ "$CLUSTER_TOKEN" =~ $token_ok ]] || die "--cluster-token 含有不允许的字符：只能用字母、数字和 . _ - : + = @"
+    [[ "$CLUSTER_TOKEN" =~ $token_ok ]] || die "--cluster-token may contain only letters, digits and . _ - : + = @"
   fi
-  has_control_chars "$JWT_SECRET" && die "--jwt-secret 里有换行等控制字符，请重新设置"
-  has_control_chars "$CHAP_SECRET" && die "--chap-secret 里有换行等控制字符，请重新设置"
-  has_control_chars "$BOOTSTRAP_PASSWORD" && die "--bootstrap-password 里有换行等控制字符，请重新设置"
+  has_control_chars "$JWT_SECRET" && die "--jwt-secret contains control characters; set another value"
+  has_control_chars "$CHAP_SECRET" && die "--chap-secret contains control characters; set another value"
+  has_control_chars "$BOOTSTRAP_PASSWORD" && die "--bootstrap-password contains control characters; set another value"
   case "$HA_ROLE" in
     active|standby) ;;
-    *) die "--ha-role 只能是 active 或 standby" ;;
+    *) die "--ha-role must be active or standby" ;;
   esac
   return 0
 }
@@ -228,9 +228,9 @@ install_deps() {
 
   log "installing runtime packages"
   apt-get -o DPkg::Lock::Timeout=600 update
-  # dnsmasq-utils 提供 dhcp_release，用于终端删除、改 IP、换组后释放旧租约。
-  # 缺了它 dnsmasq 会因旧租约拒发保留地址（"not using configured address X because it is leased to Y"），
-  # 但不会让任何操作失败。
+  # dnsmasq-utils provides dhcp_release to drop obsolete leases after client deletion, IP changes or group transfers.
+  # Without it, dnsmasq may reject reserved addresses still leased elsewhere ("not using configured address X because it is leased to Y"),
+  # even if the operation itself reports success.
   apt-get -o DPkg::Lock::Timeout=600 install -y curl dnsmasq dnsmasq-utils qemu-utils targetcli-fb zfsutils-linux
 
   if ! modprobe zfs >/dev/null 2>&1; then
@@ -241,7 +241,7 @@ install_deps() {
 
   modprobe target_core_mod
   modprobe iscsi_target_mod
-  # ndiskless 直接写 LIO configfs（启动路径不走 targetcli），没人会自动加载这些模块，需持久化到重启后。
+  # ndiskless writes LIO configfs directly (without targetcli on boot); ensure kernel modules persist across reboot.
   printf 'target_core_mod\niscsi_target_mod\n' > /etc/modules-load.d/ndiskless.conf
 
   systemctl enable zfs-import.target >/dev/null 2>&1 || true
@@ -332,15 +332,15 @@ detect_boot_url() {
   BOOT_URL="http://$host:$port/boot?mac=\${net0/mac}"
 }
 
-# ensure_dirs 创建 write_env 和服务需要的状态目录。--provisioned 下没有 install_binary 建目录，
-# 缺 /etc/ndiskless 会让 write_env 失败。幂等。
+# ensure_dirs creates directories required by write_env and services. Provisioned installs skip install_binary,
+# so ensure /etc/ndiskless exists. This step is idempotent.
 ensure_dirs() {
   install -d -m 0755 "$DATA_DIR" "$ENV_DIR" "$IMPORT_DIR"
 }
 
-# prepare_runtime 做 install_deps 中与 apt 无关的主机准备：加载并持久化 LIO 模块、启用池自动导入、
-# 写 dnsmasq 基础配置（让 systemd-resolved 保留 :53）。每次安装都跑，保证不带 --install-deps 的 .deb 安装可用。
-# 幂等；模块加载失败只告警，纯控制节点不需要提供 iSCSI。
+# prepare_runtime performs host setup independent of apt: load/persist LIO modules, enable pool auto-import,
+# and write base dnsmasq configuration (keeping :53 for systemd-resolved). Run on every install, including .deb without --install-deps.
+# Idempotent; module load errors warn only because controller-only nodes need not host iSCSI.
 prepare_runtime() {
   modprobe target_core_mod 2>/dev/null || warn "could not load target_core_mod; load it before serving iSCSI clients"
   modprobe iscsi_target_mod 2>/dev/null || true
@@ -362,15 +362,15 @@ install_binary() {
   install -m 0755 "$BINARY" "$PREFIX/$APP"
 }
 
-# 本脚本管理的 env 键；文件里其余键归运维所有，重跑时保留。
+# Environment keys managed by this script. Preserve other operator-managed keys on reinstall.
 MANAGED_ENV_KEYS='^NDISKLESS_(ADDR|DB_DSN|POOL|IMPORT_DIR|DNSMASQ_CONF|BOOT_URL|BOOTSTRAP_USERNAME|BOOTSTRAP_PASSWORD|JWT_SECRET|CHAP_SECRET|ROLE|PEER_URL|CLUSTER_TOKEN|PORTAL_ADDR|NODE_ADDR)='
 
-# resolve_chap_secret 决定本机的 iSCSI CHAP 密钥并输出（"" 为演示模式）。各节点密钥不一致时，
-# 客户机切到另一台后无法登录自己的盘，比演示模式更糟，因此：
-#   给了 --chap-secret        直接用（集群里由运维保证各节点一致）
-#   env 里已有                保留（重跑、升级不得换密钥）
-#   单机且未给                生成一个
-#   集群（--peer）且未给      留空：各节点随机生成的值必然不同
+# resolve_chap_secret determines this host's iSCSI CHAP secret (empty means demo mode). Different node secrets prevent
+# clients from authenticating after failover, so follow this precedence:
+#   --chap-secret provided     Use it; operator ensures cluster-wide consistency.
+#   Existing env secret        Reuse it across upgrades/reconfiguration.
+#   Standalone without secret  Generate one.
+#   Cluster peer without it   Leave blank; randomly generated per-node secrets would diverge.
 resolve_chap_secret() {
   if [ -n "$CHAP_SECRET" ]; then
     printf '%s' "$CHAP_SECRET"
@@ -387,9 +387,9 @@ resolve_chap_secret() {
   printf ''
 }
 
-# 集群令牌：显式给了就用；否则沿用 env 里已有的（重跑、升级不得更换）；都没有才生成新的
-# （建集群的第一台），加入的节点由界面/纳管带入主机的值。
-# 必须在 write_env 之前确定，否则写进 env 的是空值，节点之间无法互认。
+# Cluster token: use an explicit value, otherwise reuse env across upgrades; generate only if neither exists
+# (on the first cluster node). Adopted nodes receive the active node's token through the UI.
+# Resolve it before write_env to prevent an empty stored token that breaks node authentication.
 resolve_cluster_token() {
   [ -n "$VIP" ] || return 0
   if [ -z "$CLUSTER_TOKEN" ] && [ -f "$ENV_FILE" ] && grep -q "^NDISKLESS_CLUSTER_TOKEN=" "$ENV_FILE"; then
@@ -403,7 +403,7 @@ resolve_cluster_token() {
 }
 
 write_env() {
-  # 重跑安装（单机转集群、界面入盟、升级）不要求重新输入管理员口令：显式参数优先，否则沿用 env。
+  # Reconfiguration and upgrades preserve the administrator password unless explicitly overridden.
   local bootstrap_password
   bootstrap_password=$BOOTSTRAP_PASSWORD
   if [ -z "$bootstrap_password" ] && [ -f "$ENV_FILE" ] && grep -q '^NDISKLESS_BOOTSTRAP_PASSWORD=' "$ENV_FILE"; then
@@ -412,8 +412,8 @@ write_env() {
   fi
   [ -n "$bootstrap_password" ] || die "--bootstrap-password is required"
   local jwt_secret preserved peer_url
-  # 重跑不得更换签名密钥：换了会让所有已登录的操作员掉线，且集群内一台签发的令牌要能在另一台验证。
-  # 优先级：--jwt-secret > env 已有值 > 随机生成。
+  # Preserve the signing key across installs to keep sessions valid and permit cross-node token verification.
+  # Priority: --jwt-secret, then existing env value, then random generation.
   if [ -n "$JWT_SECRET" ]; then
     jwt_secret=$JWT_SECRET
   elif [ -f "$ENV_FILE" ] && grep -q '^NDISKLESS_JWT_SECRET=' "$ENV_FILE"; then
@@ -424,7 +424,7 @@ write_env() {
   fi
   local chap_secret
   chap_secret=$(resolve_chap_secret)
-  # 保留运维手工调整的键（复制速率、驱动目录等）。
+  # Retain operator-edited keys such as replication rate and driver directory.
   preserved=
   if [ -f "$ENV_FILE" ]; then
     preserved=$(grep -vE "$MANAGED_ENV_KEYS" "$ENV_FILE" | grep -vE '^\s*(#|$)' || true)
@@ -443,7 +443,7 @@ NDISKLESS_JWT_SECRET=$jwt_secret
 NDISKLESS_CHAP_SECRET=$chap_secret
 EOF
   if [ -n "$VIP" ]; then
-    # 没有对端时集合点就是 VIP 本身，本机即写入者；这也让产品知道本机已在集群中，不会重复受理创建集群。
+    # With no peer, VIP is the rendezvous address and this node is the writer; this also prevents duplicate cluster creation.
     peer_url="http://${VIP}:${ADDR##*:}"
     [ -z "$PEER_IP" ] || peer_url="http://${PEER_IP%%,*}:${ADDR##*:}"
     cat >> "$ENV_FILE" <<EOF
@@ -452,7 +452,7 @@ NDISKLESS_PEER_URL=$peer_url
 NDISKLESS_CLUSTER_TOKEN=$CLUSTER_TOKEN
 NDISKLESS_PORTAL_ADDR=$VIP
 EOF
-    # NODE_ADDR 是本机自己的可达 IP（其它节点和客户机连接用，不是 VIP）；多节点集群必填。
+    # NODE_ADDR is the host's own reachable IP for peers and clients, not VIP; required in multi-node clusters.
     if [ -n "${NODE_ADDR:-}" ]; then
       echo "NDISKLESS_NODE_ADDR=$NODE_ADDR" >> "$ENV_FILE"
     fi
@@ -462,25 +462,25 @@ EOF
   if [ -n "$preserved" ]; then
     printf '%s\n' "$preserved" >> "$ENV_FILE"
   fi
-  # 明确告知 CHAP 状态：它决定网段里任何人能否挂载客户机的盘。
+  # Report CHAP status explicitly because it controls who can mount client disks on the subnet.
   if [ -z "$chap_secret" ]; then
     warn "iSCSI CHAP off (demo mode): any host on the client network that guesses a target IQN can attach a client's disk. Pass --chap-secret (the SAME value on every node) to turn on per-client auth."
   elif [ -n "$CHAP_SECRET" ]; then
     log "iSCSI CHAP on (secret from --chap-secret)."
   elif [ -z "$VIP" ]; then
-    log "iSCSI CHAP on (generated a secret for this single node). Nodes added from the console (服务器管理 → 添加节点) receive it automatically; only a command-line join needs --chap-secret with this node's NDISKLESS_CHAP_SECRET from $ENV_FILE."
+    log "iSCSI CHAP on (generated a secret for this single node). Nodes added from the console (Server Management → Add Node) receive it automatically; only a command-line join needs --chap-secret with this node's NDISKLESS_CHAP_SECRET from $ENV_FILE."
   else
     log "iSCSI CHAP on (kept the existing secret)."
   fi
 }
 
-# 启动时角色标记优先于 env 默认值，曾被降级的机器会一直以备机起来，即使已持有 VIP。
-# 显式 --ha-role 是运维的决定，写入标记；epoch 沿用不重置，它是防止陈旧主机胜出的栅栏。
+# At startup, the persisted role marker overrides env defaults; a demoted host may otherwise start as standby even while holding VIP.
+# An explicit --ha-role updates the marker while preserving epoch, the fence against stale active nodes.
 seed_role_marker() {
   [ -n "$VIP" ] || return 0
   local file="$DATA_DIR/ha-role" epoch=0
   if [ -f "$file" ]; then
-    # 用 [0-9][0-9]* 而非 [0-9]\+：BSD sed 不认 \+，匹配不到会把 epoch 重置为 0。
+    # Use [0-9][0-9]* instead of [0-9]\+: BSD sed may not support \+, which can accidentally reset epoch to 0.
     epoch=$(sed -n 's/.*"epoch"[[:space:]]*:[[:space:]]*\([0-9][0-9]*\).*/\1/p' "$file" | head -1)
     [ -n "$epoch" ] || epoch=0
   fi
@@ -488,7 +488,7 @@ seed_role_marker() {
   log "role marker: $HA_ROLE (epoch $epoch)"
 }
 
-# nd_deploy_dir 定位 deploy/ 资产：源码/tarball 安装在 scripts/ 旁边，.deb 安装在 /opt/ndiskless/deploy。
+# nd_deploy_dir locates deploy assets beside scripts for source builds or under /opt/ndiskless/deploy for .deb installs.
 nd_deploy_dir() {
   local d
   d=$(cd "$(dirname "$0")/../deploy" 2>/dev/null && pwd) && { printf '%s' "$d"; return; }
@@ -496,8 +496,8 @@ nd_deploy_dir() {
   die "deploy/ assets not found (looked next to scripts/ and in /opt/ndiskless/deploy)"
 }
 
-# write_service 安装 deploy/ 里唯一的 unit，不另写内联副本，避免两份不一致
-# （例如缺了 zfs-import.target/zfs.target 的启动顺序）。
+# write_service installs the single authoritative unit from deploy instead of maintaining an inline duplicate
+# that might miss ordering dependencies such as zfs-import.target/zfs.target.
 write_service() {
   install -m 0644 "$(nd_deploy_dir)/ndiskless.service" "$SERVICE_FILE"
 }
@@ -520,11 +520,11 @@ health_check() {
     return 0
   fi
 
-  # /healthz 回答的是「该不该持有 VIP」，新装的备机等情况会如实返回 503。
-  # 装机只需确认服务在监听：能应答就算装好，非 200 时打印原因供人判断。
+  # /healthz reports VIP eligibility; a newly installed standby can correctly return 503.
+  # Installation only requires a listening service; print details for non-200 responses.
   local code body
   for _ in $(seq 1 20); do
-    # || true 不能省：set -e 下服务未起时 curl 返回 7，会让脚本在此静默中止。
+    # Keep || true because curl exit 7 under set -e would silently stop installation before the service starts.
     code=$(curl -s -o /dev/null -w '%{http_code}' -m 3 "http://127.0.0.1:$port/healthz" 2>/dev/null || true)
     if [ "$code" = "200" ]; then
       log "health check ok: http://127.0.0.1:$port/healthz"
@@ -541,27 +541,27 @@ health_check() {
   die "health check failed"
 }
 
-# 建新集群（给了 --vip 没给 --peer）前确认 VIP 未被占用。否则两个集群共用一个 VRRP 组和虚 IP，
-# 令牌不同互拒通告，各自成为 MASTER，同一地址挂在两台机器上。
-# 此时应保持本机出厂态，到已有集群的控制台里添加它。
+# Before creating a cluster (--vip without --peer), ensure VIP is unclaimed; two clusters with the same VRRP group and VIP
+# may reject each other's advertisements and both become MASTER with the same address.
+# In that case, leave this host unconfigured and adopt it through the existing cluster's console.
 refuse_if_vip_taken() {
   [ -n "$VIP" ] || return 0
-  [ -z "$PEER_IP" ] || return 0   # 明确指了对端 = 加入已知集群，不是新建
+  [ -z "$PEER_IP" ] || return 0   # An explicit peer means joining an existing cluster, not creating one.
   command -v curl >/dev/null 2>&1 || return 0
   local port=${ADDR##*:} body
   body=$(curl -s --max-time 3 "http://$VIP:$port/internal/cluster/identity" 2>/dev/null) || return 0
   [ -n "$body" ] || return 0
-  die "虚 IP $VIP 已经被一个集群占用（它回应了 $VIP:$port）。不要在这里新建集群——
-     请让本机保持出厂态（不要传 --vip），然后到那个集群的控制台「添加节点」里把它加进来。
-     如果确认那个集群已经作废，先把它停掉或换一个虚 IP。"
+  die "Virtual IP $VIP is already owned by a cluster (responded at $VIP:$port). Do not create a new cluster here —
+     Leave this host in its factory state (omit --vip), then use Add Node in the existing cluster console.
+     If that cluster is decommissioned, stop it first or choose another virtual IP."
 }
 
 setup_keepalived() {
-  # 集群模式由 --vip 触发而非 --peer：第一台没有对端，单播列表为空，直接成为 MASTER；
-  # 后续节点加入时由服务按花名册补齐对端。
+  # Cluster mode is selected by --vip, not --peer; the first node has no peers and initially becomes MASTER.
+  # The service populates additional peers from the cluster roster as they join.
   [ -n "$VIP" ] || return 0
-# standby_rank 给出本机地址在集群地址中的序号（从 0 起），让备机 VRRP 优先级互不相同：
-# 最小地址为 100，其余递增，仍远低于主机的 150。
+# standby_rank assigns an ordered index to each node IP to give standbys distinct VRRP priorities:
+# lowest address gets 100 and others increment, remaining below the active node's 150.
 standby_rank() {
   local self=$1 peers=${2:-} rank
   rank=$(printf '%s\n%s\n' "$self" "$(printf '%s' "$peers" | tr ',' '\n')" \
@@ -576,21 +576,21 @@ standby_rank() {
   local iface self_ip port deploy_dir
   port=${ADDR##*:}
   deploy_dir=$(cd "$(dirname "$0")/../deploy" 2>/dev/null && pwd) || die "deploy/ directory not found next to scripts/"
-  # 面向客户机的网卡是 VIP 所在 /24 的那块。
+  # The client-facing network interface is the one in the VIP's /24 subnet.
   iface=$(ip -o -4 addr show | awk -v vip="$VIP" '{ split($4, a, "/"); split(a[1], ip, "."); split(vip, v, "."); if (ip[1]==v[1] && ip[2]==v[2] && ip[3]==v[3]) { print $2; exit } }')
   [ -n "$iface" ] || die "no interface on the VIP's /24 ($VIP); bring the client NIC up first"
   self_ip=$(ip -o -4 addr show dev "$iface" | awk '{split($4,a,"/"); print a[1]; exit}')
 
-  # 持有目录的节点必须赢得选举，否则新装节点的空目录会被复制覆盖真实镜像。
-  # 备机优先级按地址排序而不是统一 100：三台时两台备机同优先级会同时宣告 MASTER，
-  # 以相同 epoch 双双成为写入者。
+  # The node holding the real catalogue must win election so a new node's empty catalogue cannot overwrite images.
+  # Rank standby priorities by address instead of setting them all to 100. Equal priorities in a three-node cluster
+  # can cause two standbys to become MASTER at the same epoch.
   local priority=100
   if [ "$HA_ROLE" = "active" ]; then
     priority=150
   else
     priority=$((100 + $(standby_rank "$self_ip" "$PEER_IP")))
   fi
-  # 每个对端一行：所有节点都参与 VRRP，否则第三台起的节点永远无法接管。
+  # Add one line per peer so all nodes participate in VRRP and any standby can take over.
   local peer_block
   peer_block=$(printf '%s' "$PEER_IP" | tr ',' '\n' | sed 's/^[[:space:]]*//; s/[[:space:]]*$//' \
                | awk 'NF { lines[++n] = "        " $0 } END { for (i = 1; i <= n; i++) printf "%s%s", lines[i], (i < n ? "\\n" : "") }')
@@ -603,11 +603,11 @@ standby_rank() {
   sed "s/@API_PORT@/$port/" "$deploy_dir/ndiskless-notify.sh" > /etc/keepalived/ndiskless-notify.sh
   chmod 755 /etc/keepalived/ndiskless-check.sh /etc/keepalived/ndiskless-notify.sh
 
-  # 两个权威 DHCP 会互相 NAK 对方的客户机，dnsmasq 不能自行启动：由主机配置同步启动，备机启动时停掉。
+  # Competing authoritative DHCP services can NAK each other's clients; only the active node should start dnsmasq.
   systemctl disable dnsmasq >/dev/null 2>&1 || true
   if [ "$DEFER_KEEPALIVED" -eq 1 ]; then
-    # 界面入盟：写入者的对端列表里还没有本机，收不到通告会自选为主。先不开 VRRP 并标记待加入，
-    # 等写入者的对端列表包含本机后由 ndiskless 启动 keepalived。
+    # During UI adoption, this node may not yet be in the writer's peer list. Avoid self-election by deferring VRRP
+    # until the active node recognizes it, then let ndiskless start keepalived.
     systemctl disable --now keepalived >/dev/null 2>&1 || true
     touch "$ENV_DIR/keepalived.pending"
     log "keepalived configured but not started (join pending): the service starts it once the writer lists this node"
@@ -626,13 +626,13 @@ main() {
   ensure_pool
   check_port
   detect_boot_url
-  # TFTP 启动文件已内嵌在二进制里，每次启动写到 /srv/tftp，这里无需准备。
-  # --provisioned 下跳过二进制和 unit 的安装。
+  # TFTP boot assets are embedded in the binary and written to /srv/tftp at startup.
+  # --provisioned skips binary and unit installation.
   if [ "$PROVISIONED" -eq 0 ]; then
     install_binary
   fi
-  # VIP 占用检查必须在写任何东西之前：否则 env 里留下半截集群配置，机器既不属于任何集群，
-  # 也不再是出厂态，无法被纳管。
+  # Check VIP ownership before writing anything; otherwise partial env configuration can leave this host outside all clusters
+  # and no longer adoptable as a factory-state node.
   refuse_if_vip_taken
   ensure_dirs
   prepare_runtime
@@ -651,7 +651,7 @@ main() {
   if [[ "$port" =~ ^[0-9]+$ ]]; then
     log "open http://<server-ip>:$port"
   fi
-  # 这里不打离线包，确有离线安装需求时再加。
+  # Offline bundles are produced separately when required.
 }
 
 main "$@"
