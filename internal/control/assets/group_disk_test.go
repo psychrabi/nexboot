@@ -10,7 +10,7 @@ import (
 	"github.com/tianwei/diskless/internal/store"
 )
 
-// seedDataImage 添加一个带默认配置和 @0 的数据盘镜像，供分组数据盘使用。
+// seedDataImage creates a data disk image with default configuration and @0 snapshot.
 func seedDataImage(t *testing.T, ctx context.Context, st store.Store, imageID, configID string, os domain.OSType) {
 	t.Helper()
 	now := time.Now().UTC()
@@ -33,7 +33,7 @@ func TestGroupDiskServiceRejectsDuplicateMountTarget(t *testing.T) {
 	seedDataImage(t, ctx, st, "games", "games_default", domain.OSTypeWindows)
 	service := GroupDiskService{Store: st}
 
-	// Windows 分组里 "d" 规范化为 "D:"，所以 "D:" 与它冲突。
+	// Windows group drive letter d normalizes to D:, which conflicts with existing D:.
 	disk, err := service.Create(ctx, group.ID, GroupDiskRequest{MountTarget: "d", ImageID: "games", ConfigID: "games_default"})
 	if err != nil {
 		t.Fatal(err)
@@ -61,7 +61,7 @@ func TestGroupDiskServiceRejectsConfigImageMismatch(t *testing.T) {
 	group := seedTerminalGroup(t, ctx, st, 3)
 	seedDataImage(t, ctx, st, "img-2", "img-2_default", domain.OSTypeLinux)
 
-	// 数据盘镜像搭配别的镜像的配置：不匹配。
+	// A data disk image cannot use a configuration from another image.
 	_, err := (GroupDiskService{Store: st}).Create(ctx, group.ID, GroupDiskRequest{MountTarget: "E:", ImageID: "img-2", ConfigID: "cfg-1"})
 	if !errors.Is(err, ErrGroupDiskMismatch) {
 		t.Fatalf("mismatch err = %v", err)
