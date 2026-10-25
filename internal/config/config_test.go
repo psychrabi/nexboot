@@ -6,8 +6,8 @@ import (
 	"testing"
 )
 
-// 节点身份与 portal 地址是两回事：id 是本机在库里的名字（稳定，改地址不变），portal 是客户机访问磁盘的地址（HA 下为 VIP）。
-// 未设置时 portal 回落到启动 URL 的主机名，id 回落到 machine-id。
+// Node identity and portal address are distinct: stable ID keys database records while portal is the client-facing disk address (VIP for HA).
+// Without overrides, portal defaults to boot URL hostname and ID to machine-id.
 func TestLoadSplitsNodeIdentityFromPortal(t *testing.T) {
 	for _, key := range []string{"NDISKLESS_NODE_ID", "NDISKLESS_PORTAL_ADDR", "NDISKLESS_ROLE", "NDISKLESS_BOOT_URL"} {
 		t.Setenv(key, "")
@@ -34,7 +34,7 @@ func TestLoadSplitsNodeIdentityFromPortal(t *testing.T) {
 	}
 }
 
-// machineNodeID 多次调用必须一致，且没有 /etc/machine-id 时也不为空（回落到主机名）。
+// machineNodeID must remain stable and fall back to hostname if /etc/machine-id is missing.
 func TestMachineNodeIDStableAndNonEmpty(t *testing.T) {
 	a, b := machineNodeID(), machineNodeID()
 	if a == "" || a != b {
