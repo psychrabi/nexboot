@@ -43,12 +43,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--max-lines", type=int, default=60,
                         help="Maximum matching lines to print (default: 60)")
+    parser.add_argument("--frontend-tests-only", action="store_true",
+                        help="Check only web frontend test files")
     args = parser.parse_args()
     root = Path(__file__).resolve().parent.parent
     affected = defaultdict(list)
     checked = 0
 
     for relative, path in tracked_files(root):
+        if args.frontend_tests_only and not (
+            relative.startswith("web/") and relative.endswith(".test.jsx")
+        ):
+            continue
         try:
             raw = path.read_bytes()
         except (OSError, PermissionError):

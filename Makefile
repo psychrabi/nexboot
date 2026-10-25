@@ -77,6 +77,7 @@ verify: fmt-check vet test build-static
 	@echo "  Backend verification passed (gofmt / vet / go test / static build)"
 
 verify-web: test-web
-	@echo "  Frontend verification passed (vitest / vite build)"
+	python3 scripts/check-english.py --frontend-tests-only
+	@echo "  Frontend verification passed (vitest / vite build / English test text)"
 
 verify-all: verify verify-web

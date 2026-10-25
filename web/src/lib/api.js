@@ -1,6 +1,6 @@
-// Go 后端 API 的轻量 fetch 封装。
-// 领域结构体没有 json tag，实体字段为 PascalCase（ID、Name、OSType、MAC、IP、State、IsSuper、Capacity…）。
-// 列表接口返回 { items, total }。
+// Lightweight fetch client for the Go backend API.
+// Domain structs use PascalCase (ID, Name, OSType, MAC, IP, State, IsSuper, Capacity) without JSON tags.
+// List endpoints return { items, total }.
 
 const TOKEN_KEY = 'nd_token';
 const USER_KEY = 'nd_user';
@@ -24,7 +24,7 @@ export function clearSession() {
   localStorage.removeItem(USER_KEY);
 }
 
-// 请求返回 401 时触发，外壳据此回到登录页。
+// A 401 session-expiration event causes the shell to return to login.
 export const onUnauthorized = (() => {
   const target = new EventTarget();
   return {
@@ -42,25 +42,25 @@ async function request(path, { method = 'GET', body, formData, raw } = {}) {
   if (token) headers.Authorization = `Bearer ${token}`;
   let payload;
   if (formData !== undefined) {
-    payload = formData; // multipart 边界由浏览器设置
+    payload = formData; // Browser supplies multipart boundary
   } else if (body !== undefined) {
     headers['Content-Type'] = 'application/json';
     payload = JSON.stringify(body);
   }
   const res = await fetch(path, { method, headers, body: payload });
   if (res.status === 401) {
-    // 登录接口的 401 是密码不对而非会话过期，原样展示后端的说法。
+    // Login 401 means invalid credentials, not session expiry; show the backend message.
     if (path === '/api/login') {
       const text = (await res.text().catch(() => '')).trim();
-      throw new Error(text || '用户名或密码错误');
+      throw new Error(text || 'Invalid username or password');
     }
     clearSession();
     onUnauthorized.emit();
-    throw new Error('登录已失效，请重新登录');
+    throw new Error('Session expired. Please sign in again');
   }
   if (!res.ok) {
     const text = (await res.text().catch(() => '')).trim();
-    throw new Error(text || `请求失败 (${res.status})`);
+    throw new Error(text || `Request failed (${res.status})`);
   }
   if (raw) return res;
   if (res.status === 204) return null;
@@ -70,14 +70,14 @@ async function request(path, { method = 'GET', body, formData, raw } = {}) {
 }
 
 export const api = {
-  // --- 认证 ---
+  // --- Authentication ---
   async login(username, password) {
     const data = await request('/api/login', { method: 'POST', body: { username, password } });
     setSession(data.token, data.user);
     return data;
   },
 
-  // --- 镜像 / 配置 / 还原点 ---
+  // --- Images / configurations / restore points ---
   listImages: () => request('/api/images'),
   getImage: (id) => request(`/api/images/${encodeURIComponent(id)}`),
   importImage: (body) => request('/api/images/import', { method: 'POST', body }),
@@ -87,11 +87,11 @@ export const api = {
   exportImage: (id) => request(`/api/images/${encodeURIComponent(id)}/export`, { method: 'POST' }),
   exportReduction: (id) => request(`/api/reductions/${encodeURIComponent(id)}/export`, { method: 'POST' }),
   deleteImage: (id) => request(`/api/images/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  // 从本机上传镜像：分片 + 断点续传，几十 G 的文件不能一次 POST。
+  // Browser image uploads are chunked and resumable; multi-gigabyte files cannot be sent in one POST.
   beginUpload: (body) => request('/api/images/uploads', { method: 'POST', body }),
   uploadStatus: (id) => request(`/api/images/uploads/${encodeURIComponent(id)}`),
   abortUpload: (id) => request(`/api/images/uploads/${encodeURIComponent(id)}`, { method: 'DELETE' }),
-  // 分片用原生 fetch：request() 按 JSON 处理 body，而分片是二进制且须带 Content-Range。
+  // Upload binary chunks with native fetch and Content-Range; request() serializes JSON bodies.
   uploadChunk: async (id, offset, blob, signal) => {
     const res = await fetch(`/api/images/uploads/${encodeURIComponent(id)}`, {
       method: 'PATCH',
@@ -102,7 +102,7 @@ export const api = {
       },
       body: blob,
     });
-    if (!res.ok) throw new Error((await res.text()) || `上传失败 (${res.status})`);
+    if (!res.ok) throw new Error((await res.text()) || `Upload failed (${res.status})`);
     return res.json();
   },
   exportImageTicket: (id, compress) =>
@@ -113,29 +113,29 @@ export const api = {
   getRuntime: () => request('/api/runtime'),
   getSettings: () => request('/api/settings'),
   saveSettings: (body) => request('/api/settings', { method: 'PUT', body }),
-  // 客户机网络：面向客户机的网卡、是否允许跨网段分组、clientMax 台机器的建议地址窗口。
+  // Client networking: serving interface, cross-subnet groups, and suggested IP range for clientMax devices.
   getHA: () => request('/api/ha'),
   getReplication: () => request('/api/replication'),
   plannedSwitch: () => request('/api/ha/planned-switch', { method: 'POST' }),
   setHARate: (mbps) => request('/api/ha/rate', { method: 'POST', body: { mbps } }),
-  // 建集群只需一个 VIP，集群令牌由产品生成。
+  // Cluster creation needs only VIP; the product generates the cluster token.
   createCluster: (body) => request('/api/cluster/create', { method: 'POST', body }),
-  // 同网段内尚未配置的节点，供控制台列出可加入的机器。
+  // Discover unconfigured nodes on the client subnet that can join the cluster.
   discoverNodes: () => request('/api/cluster/discover'),
   adoptNode: (body) => request('/api/cluster/adopt', { method: 'POST', body }),
   listClusterNodes: () => request('/api/cluster/nodes'),
   listClusterServices: () => request('/api/cluster/services'),
-  // 把报废机器移出节点表，不可逆，界面上须先核对地址。
+  // Removing a decommissioned node is irreversible; confirm its address in the UI.
   forgetClusterNode: (node) =>
     request(`/api/cluster/nodes/${encodeURIComponent(node)}`, { method: 'DELETE' }),
   listClusterPools: () => request('/api/cluster/pools'),
   clusterServiceAction: (node, key, action) =>
     request(`/api/cluster/nodes/${encodeURIComponent(node)}/services/${encodeURIComponent(key)}/action`,
       { method: 'POST', body: { action } }),
-  // 池写操作在盘所在节点执行，须点名节点；不点名即本机。
+  // Execute pool mutations on the owning node; omitted target means local.
   clusterPoolPath: (node, suffix = '') =>
     `/api/cluster/nodes/${encodeURIComponent(node)}/pools${suffix}`,
-  // 建池要列目标机器自己的盘：同一个 /dev/sdb 在每台机器上是不同的盘。
+  // List target-node disks for pool creation; /dev/sdb refers to different hardware on each node.
   listClusterDisks: (node) => request(`/api/cluster/nodes/${encodeURIComponent(node)}/disks`),
   clusterDestroyPool: (node, id) =>
     request(`/api/cluster/nodes/${encodeURIComponent(node)}/pools/${encodeURIComponent(id)}`, { method: 'DELETE' }),
@@ -173,7 +173,7 @@ export const api = {
   deleteReduction: (reductionId) =>
     request(`/api/reductions/${encodeURIComponent(reductionId)}`, { method: 'DELETE' }),
 
-  // --- 分组 ---
+  // --- Groups ---
   listGroups: () => request('/api/groups'),
   getGroup: (id) => request(`/api/groups/${encodeURIComponent(id)}`),
   defaultGroup: () => request('/api/groups/default'),
@@ -185,7 +185,7 @@ export const api = {
   createGroupDisk: (groupId, body) => request(`/api/groups/${encodeURIComponent(groupId)}/disks`, { method: 'POST', body }),
   deleteGroupDisk: (id) => request(`/api/group-disks/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // --- 客户机 ---
+  // --- Clients ---
   listTerminals: () => request('/api/terminals'),
   getTerminal: (id) => request(`/api/terminals/${encodeURIComponent(id)}`),
   createTerminal: (body) => request('/api/terminals', { method: 'POST', body }),
@@ -198,13 +198,13 @@ export const api = {
   enableSuper: (id) => request(`/api/terminals/${encodeURIComponent(id)}/super`, { method: 'POST' }),
   disableSuper: (id) => request(`/api/terminals/${encodeURIComponent(id)}/super`, { method: 'DELETE' }),
   stopSuper: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/super/stop`, { method: 'POST', body }),
-  // 数据盘在线发布：机器不关机，只有这块盘脱机几秒
+  // Publish data disks online: briefly take only the selected disk offline.
   superDisks: (id) => request(`/api/terminals/${encodeURIComponent(id)}/super/disks`),
   publishDataDisk: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/super/publish`, { method: 'POST', body }),
   injectDriver: (id, body) => request(`/api/terminals/${encodeURIComponent(id)}/inject-driver`, { method: 'POST', body }),
   injectResult: (id) => request(`/api/terminals/${encodeURIComponent(id)}/inject-result`),
 
-  // --- 存储池 ---
+  // --- Storage Pools ---
   listPools: () => request('/api/pools'),
   listDisks: () => request('/api/storage/disks'),
   getPool: (id) => request(`/api/pools/${encodeURIComponent(id)}`),
@@ -224,7 +224,7 @@ export const api = {
   removeWriteCache: (id, body) => request(`/api/pools/${encodeURIComponent(id)}/write-cache/remove`, { method: 'POST', body }),
   flushWriteCache: (id) => request(`/api/pools/${encodeURIComponent(id)}/write-cache/flush`, { method: 'POST' }),
 
-  // --- 驱动 ---
+  // --- Drivers ---
   listDriverPacks: () => request('/api/driver-packs'),
   uploadDriverPack: (formData) => request('/api/driver-packs', { method: 'POST', formData }),
   setDriverPackStatus: (id, status) =>
@@ -238,7 +238,7 @@ export const api = {
   downloadDriverBundle: (id) =>
     request(`/api/driver-bundles/${encodeURIComponent(id)}/archive`, { raw: true }),
 
-  // --- 告警 ---
+  // --- Alerts ---
   listAlarms: ({ status = '', severity = '', page = 1, size = 50 } = {}) => {
     const p = new URLSearchParams({ page: String(page), size: String(size) });
     if (status) p.set('status', status);
@@ -248,7 +248,7 @@ export const api = {
   ackAlarm: (id) => request(`/api/alarms/${encodeURIComponent(id)}/ack`, { method: 'POST' }),
   deleteAlarm: (id) => request(`/api/alarms/${encodeURIComponent(id)}`, { method: 'DELETE' }),
 
-  // --- 审计 / 日志 ---
+  // --- Audit / Logs ---
   listLogs: ({ type = '', user = '', module = '', status = '', q = '', from = '', to = '', page = 1, size = 20 } = {}) => {
     const p = new URLSearchParams({ page: String(page), size: String(size) });
     if (type) p.set('type', type);
@@ -261,7 +261,7 @@ export const api = {
     return request(`/api/logs?${p.toString()}`);
   },
 
-  // --- 服务器与服务 ---
+  // --- Servers and Services ---
   getServer: () => request('/api/server'),
   listServices: () => request('/api/services'),
   serviceAction: (key, action) =>
@@ -269,13 +269,13 @@ export const api = {
   serviceLogs: (key, lines = 200) =>
     request(`/api/services/${encodeURIComponent(key)}/logs?lines=${lines}`),
 
-  // --- 备份 ---
+  // --- Backup ---
   getBackupStatus: () => request('/api/backup/status'),
   listClusterBackups: () => request('/api/cluster/backups'),
   saveBackupConfig: (body) => request('/api/backup/config', { method: 'PUT', body }),
   runBackup: () => request('/api/backup/run', { method: 'POST' }),
 
-  // --- 用户 ---
+  // --- Users ---
   listUsers: () => request('/api/users'),
   createUser: (body) => request('/api/users', { method: 'POST', body }),
   updateUser: (id, body) => request(`/api/users/${encodeURIComponent(id)}`, { method: 'PUT', body }),
@@ -283,9 +283,9 @@ export const api = {
   changeUserPassword: (id, body) => request(`/api/users/${encodeURIComponent(id)}/password`, { method: 'POST', body }),
 
 
-  // --- 硬件档案 ---
+  // --- Hardware Inventory ---
 
-  // --- 任务 ---
+  // --- Tasks ---
   getTask: (id) => request(`/api/tasks/${encodeURIComponent(id)}`),
   listTasks: () => request('/api/tasks'),
   listTaskHistory: ({ page = 1, size = 20, status = '' } = {}) => {
