@@ -13,8 +13,8 @@ type BootBuilder interface {
 	Build(domain.Terminal, domain.Group, domain.Image, storage.LUNInfo) (string, error)
 }
 
-// Builder 生成 iPXE 启动脚本。CHAPSecret 非空时写入按 MAC 派生的 iSCSI 登录凭据，
-// 与导出端用同一密钥派生；为空即 demo mode，不写登录行。
+// Builder generates iPXE boot scripts. A nonempty CHAPSecret adds MAC-derived iSCSI credentials
+// using the same derivation as the target; an empty secret enables demo mode without authentication.
 type Builder struct{ CHAPSecret string }
 
 func (b Builder) Build(t domain.Terminal, g domain.Group, img domain.Image, lun storage.LUNInfo) (string, error) {
@@ -36,10 +36,10 @@ func (b Builder) Build(t domain.Terminal, g domain.Group, img domain.Image, lun 
 	}
 	windows := img.OSType == domain.OSTypeWindows
 	if windows {
-		// 失败回报要走网关才能到跨网段的服务器，先记下再清。
+		// Preserve the gateway for failure reporting to servers on other subnets before clearing settings.
 		lines = append(lines, "set nd-gateway ${netX/gateway}", "set netX/gateway 0.0.0.0")
 	}
-	// CHAP 必须在 sanhook 之前设置：iPXE 在 sanhook 登录时读取 username/password。
+	// Set CHAP credentials before sanhook; iPXE reads username/password during login.
 	if iscsi.CHAPEnabled(b.CHAPSecret) {
 		creds := iscsi.CHAPCredentials(b.CHAPSecret, t.MAC)
 		lines = append(lines, "set username "+creds.Username, "set password "+creds.Password)
@@ -60,7 +60,7 @@ func (b Builder) Build(t domain.Terminal, g domain.Group, img domain.Image, lun 
 	if windows {
 		lines = append(lines, "set netX/gateway ${nd-gateway}")
 	}
-	// 相对地址落回下发本脚本的那台服务器。
+	// Relative URLs resolve against the server that supplied this script.
 	lines = append(lines,
 		"echo Boot failed at ${nd-stage} (error ${nd-errno}), reported to the server",
 		"imgfetch /boot/failed?mac=${net0/mac}&stage=${nd-stage}&err=${nd-errno}&platform=${platform} || echo Could not reach the server",
