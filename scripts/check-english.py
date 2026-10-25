@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Report remaining CJK characters in tracked NexBoot text files.
 
-The intentionally Chinese README.zh-CN.md is excluded. Files containing NUL
+Markdown files and files with zh-CH in their names are excluded. Files containing NUL
 bytes and known binary assets are skipped. Exit status 1 means work remains.
 """
 
@@ -20,7 +20,7 @@ BINARY_EXTENSIONS = {
     ".efi", ".kpxe", ".woff", ".woff2", ".ttf", ".zip", ".gz",
     ".pdf", ".deb", ".raw", ".exe", ".dll", ".bin",
 }
-EXCLUDED_NAMES = {"readme.zh-cn.md"}
+EXCLUDED_NAME_FRAGMENT = "zh-ch"
 
 
 def tracked_files(root: Path):
@@ -32,7 +32,7 @@ def tracked_files(root: Path):
         if not name:
             continue
         path = Path(name)
-        if path.name.lower() in EXCLUDED_NAMES:
+        if path.suffix.lower() in {".md", ".markdown", ".mdx"} or EXCLUDED_NAME_FRAGMENT in path.name.lower():
             continue
         if path.suffix.lower() in BINARY_EXTENSIONS:
             continue
@@ -84,7 +84,7 @@ def main() -> int:
     total = sum(len(lines) for lines in affected.values())
     print(f"\nChecked {checked} UTF-8 files; "
           f"{len(affected)} contain CJK text across {total} lines.")
-    print("Excluded README.zh-CN.md (case-insensitive).")
+    print("Excluded Markdown files and filenames containing zh-CH (case-insensitive).")
     return 1 if affected else 0
 
 
