@@ -94,7 +94,7 @@ section("C Repeated injection")
 st, body = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": ""})
 # Rejections must give actionable instructions. This API currently returns 400 (other conflicts use 409).
 check("C1", "Reject overwriting pending adaptation and explain recovery",
-      st in (400, 409) and "overwrite" in str(body), f"HTTP {st} {str(body)[:120]}")
+      st in (400, 409) and any(x in str(body).lower() for x in ("overwrite", "\u8986\u76d6")), f"HTTP {st} {str(body)[:120]}")
 st, body = call("POST", f"/api/terminals/{TERMINAL}/inject-driver", {"bundle_id": "", "overwrite": True})
 check("C2", "Explicit overwrite resets the clone for retry", st in (200, 201), f"HTTP {st} {str(body)[:120]}")
 
