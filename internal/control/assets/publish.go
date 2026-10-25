@@ -11,21 +11,21 @@ import (
 	"github.com/tianwei/diskless/internal/store"
 )
 
-// PublishDataDiskRequest 指定超管机的一块数据盘及发布后还原点的名称。
+// PublishDataDiskRequest identifies a Super Admin data disk and the resulting restore-point name.
 type PublishDataDiskRequest struct {
 	DiskID string `json:"disk_id"`
 	Name   string `json:"name"`
 }
 
-// PublishDataDiskResult 携带新还原点。发布成功但后续步骤失败时填 Detail，
-// 已成功的发布不能报成失败。
+// PublishDataDiskResult includes the new restore point and optional Detail when a later step fails,
+// so an already completed publish is not incorrectly reported as failed.
 type PublishDataDiskResult struct {
 	TaskID    string            `json:"task_id,omitempty"`
 	Reduction *domain.Reduction `json:"reduction,omitempty"`
 	Detail    string            `json:"detail,omitempty"`
 }
 
-// quietWindow 是数据盘发布前须保持无写入的时长。
+// quietWindow is the required write-free interval before publishing a disk.
 const quietWindow = 3 * time.Second
 
 func (s TerminalService) quietWindow() time.Duration {
@@ -35,8 +35,8 @@ func (s TerminalService) quietWindow() time.Duration {
 	return quietWindow
 }
 
-// PublishDataDisk 在超管机不关机的情况下，把一块数据盘存为其配置的还原点并设为当前，
-// 客户机下次开机生效。系统盘没有这条路径，只能关机后保存。
+// PublishDataDisk snapshots a Super Admin data disk without shutdown and makes the point current for its configuration,
+// effective at client next boot. System disks require shutdown to save.
 func (s TerminalService) PublishDataDisk(ctx context.Context, id string, req PublishDataDiskRequest) (PublishDataDiskResult, error) {
 	terminal, err := s.Store.Terminals().Get(ctx, id)
 	if err != nil {
@@ -55,7 +55,7 @@ func (s TerminalService) PublishDataDisk(ctx context.Context, id string, req Pub
 	}
 	disk, lun, ok := findDataDisk(disks, req.DiskID)
 	if !ok {
-		return PublishDataDiskResult{}, errs.Invalid("分组 " + group.Name + " 不存在该数据盘，请刷新后重试")
+		return PublishDataDiskResult{}, errs.Invalid("分组 " + group.Name + " does not contain this data disk. Refresh and try again")
 	}
 	cfg, err := s.Store.Configs().Get(ctx, disk.ConfigID)
 	if err != nil {
@@ -92,7 +92,7 @@ func (s TerminalService) PublishDataDisk(ctx context.Context, id string, req Pub
 }
 
 func (s TerminalService) executePublish(ctx context.Context, task domain.Task, terminal domain.Terminal, disk domain.GroupDisk, cfg domain.Config, lun int, name, displayName string) (PublishDataDiskResult, error) {
-	// 池与数据库在此一起变更，中间不能插入复制轮次（见 storage.ChangeCatalogue）。
+	// Pool and database must change together, without interleaved replication cycles (see storage.ChangeCatalogue).
 	defer storage.ChangeCatalogue()()
 	if err := s.requireQuietDisk(ctx, terminal, lun, disk.MountTarget); err != nil {
 		return PublishDataDiskResult{}, err
@@ -101,12 +101,12 @@ func (s TerminalService) executePublish(ctx context.Context, task domain.Task, t
 		MAC: terminal.MAC, LUN: lun, ConfigID: cfg.ID, ReductionName: name, MountTarget: disk.MountTarget})
 	detail := ""
 	if err != nil {
-		// 已发布但盘没装回：报失败会让操作者重复发布，实际只需重启客户机。
+		// If publishing succeeded but remount failed, avoid reporting failure and triggering duplicate publishes; reboot the client.
 		var notBack storage.DiskNotReattached
 		if !errors.As(err, &notBack) {
 			return PublishDataDiskResult{}, err
 		}
-		detail = "已发布；" + disk.MountTarget + " 未重新挂载，重启客户机后恢复"
+		detail = "Published; " + disk.MountTarget + " did not remount; reboot the client to restore access"
 	}
 	reduction := out.Reduction
 	reduction.ConfigID = cfg.ID
@@ -116,7 +116,7 @@ func (s TerminalService) executePublish(ctx context.Context, task domain.Task, t
 		if err := tx.Reductions().Create(ctx, reduction); err != nil {
 			return err
 		}
-		// 发布即下发给客户机：与「设为当前」一样把该点设为当前。
+		// Publishing sets the restore point as current, making it available to clients on next boot.
 		if err := setConfigCurrent(ctx, tx, cfg.ID, reduction.ID); err != nil {
 			return err
 		}
@@ -134,11 +134,11 @@ func (s TerminalService) executePublish(ctx context.Context, task domain.Task, t
 	return PublishDataDiskResult{Reduction: &reduction, Detail: detail}, nil
 }
 
-// requireQuietDisk 拒绝发布仍在写入的盘：快照按原样截取，安装到一半发布会让所有
-// 客户机拿到半成品。通过两次采样写入字节数判断，不依赖客户机内部。
+// requireQuietDisk rejects disks still receiving writes; publishing a snapshot mid-install would distribute
+// incomplete contents to every client. Detect writes by sampling bytes twice, without a client agent.
 func (s TerminalService) requireQuietDisk(ctx context.Context, terminal domain.Terminal, lun int, mount string) error {
 	if s.Storage == nil || terminal.State != domain.TerminalStateOnline {
-		return nil // 关机的机器不可能在写
+		return nil // A shut-down client cannot be writing.
 	}
 	first, err := s.Storage.SuperDiskWritten(ctx, terminal.MAC, lun)
 	if err != nil {
@@ -154,7 +154,7 @@ func (s TerminalService) requireQuietDisk(ctx context.Context, terminal domain.T
 		return err
 	}
 	if second != first {
-		return errs.Conflict(mount + " 正在写入，请等待写入完成后再发布")
+		return errs.Conflict(mount + " is still being written. Wait for writes to finish before publishing")
 	}
 	return nil
 }
@@ -168,7 +168,7 @@ func findDataDisk(disks []domain.GroupDisk, id string) (domain.GroupDisk, int, b
 	return domain.GroupDisk{}, 0, false
 }
 
-// SuperDiskItem 是控制台展示的一块超管机数据盘：挂载点、当前发布的还原点及之后的变更量。
+// SuperDiskItem exposes a Super Admin data disk's mount target, current published point and pending writes.
 type SuperDiskItem struct {
 	DiskID      string `json:"disk_id"`
 	LUN         int    `json:"lun"`
@@ -177,7 +177,7 @@ type SuperDiskItem struct {
 	ConfigName  string `json:"config_name"`
 	CurrentName string `json:"current_name"`
 	Written     int64  `json:"written"`
-	// Ready 为 false 表示该盘分给分组后，这台机器还没以超管机开过机，尚无可发布的盘。
+	// Ready=false means the client has not booted as Super Admin since the disk was assigned.
 	Ready bool `json:"ready"`
 }
 
@@ -186,7 +186,7 @@ type SuperDiskListResult struct {
 	Total int             `json:"total"`
 }
 
-// SuperDisks 列出超管机的数据盘。系统盘不在其中，它靠关机保存而非发布。
+// SuperDisks lists Super Admin data disks; system disks are saved on shutdown rather than through publish.
 func (s TerminalService) SuperDisks(ctx context.Context, id string) (SuperDiskListResult, error) {
 	terminal, err := s.Store.Terminals().Get(ctx, id)
 	if err != nil {
@@ -211,7 +211,7 @@ func (s TerminalService) SuperDisks(ctx context.Context, id string) (SuperDiskLi
 			}
 		}
 		if s.Storage != nil {
-			// 出错说明池里还没有这块盘（未以超管机开过机），Ready 保持 false。
+			// Missing pool data indicates the client has not booted this disk in Super Admin mode; keep Ready=false.
 			if written, err := s.Storage.SuperDiskWritten(ctx, terminal.MAC, item.LUN); err == nil {
 				item.Written, item.Ready = written, true
 			}
