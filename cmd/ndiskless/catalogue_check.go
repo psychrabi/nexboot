@@ -10,8 +10,8 @@ import (
 	"github.com/tianwei/diskless/internal/store"
 )
 
-// dbCopyMissing 在临时文件上打开复制来的库副本（本节点接任后要服务的目录），列出其中记着而池里没有的东西。
-// 检查进行不下去时一律答「没缺」：完全没有副本由 PrepareActiveDB 自己拒绝，池不可读则健康检查会失败。
+// dbCopyMissing opens the replicated database copy from a temporary file and identifies records whose datasets are missing from the pool.
+// On inconclusive checks, report nothing missing: PrepareActiveDB rejects absent copies and pool health checks catch unreadable storage.
 func dbCopyMissing(ctx context.Context, copyPath string, agent storage.StorageAgent, logger *slog.Logger) []string {
 	data, err := os.ReadFile(copyPath)
 	if err != nil {
