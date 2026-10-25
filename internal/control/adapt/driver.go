@@ -19,19 +19,19 @@ import (
 )
 
 var (
-	ErrDriverPackInvalid          = errs.Invalid("驱动包必须是包含至少一个 .inf 的 zip")
-	ErrDriverPackInUse            = errs.Conflict("驱动包已被驱动集引用")
-	ErrDriverBundleInvalid        = errs.Invalid("驱动集名称与启动关键网卡驱动包必填")
-	ErrDriverBundleExists         = errs.Conflict("驱动集已存在")
-	ErrDriverPackCategory         = errs.Invalid("驱动集只能包含启动关键网卡类驱动包")
-	ErrDriverPackDisabled         = errs.Invalid("驱动包已禁用，请先启用后再加入驱动集")
-	ErrDriverInjectionUnavailable = errs.Conflict("驱动注入未配置，无法固化驱动")
-	ErrDriverStatusInvalid        = errs.Invalid("驱动包状态无效")
-	ErrDriverBundleMixedOS        = errs.Invalid("驱动集内驱动包的操作系统类型必须一致")
-	ErrDriverCategoryInvalid      = errs.Invalid("驱动包类别无效")
+	ErrDriverPackInvalid          = errs.Invalid("Driver pack must be a ZIP containing at least one .inf file")
+	ErrDriverPackInUse            = errs.Conflict("Driver pack is referenced by a driver bundle")
+	ErrDriverBundleInvalid        = errs.Invalid("Driver bundle name and a boot-critical NIC driver pack are required")
+	ErrDriverBundleExists         = errs.Conflict("Driver bundle already exists")
+	ErrDriverPackCategory         = errs.Invalid("Driver bundles may contain only boot-critical NIC driver packs")
+	ErrDriverPackDisabled         = errs.Invalid("Driver pack is disabled. Enable it before adding it to a bundle")
+	ErrDriverInjectionUnavailable = errs.Conflict("Driver injection is not configured; drivers cannot be finalized")
+	ErrDriverStatusInvalid        = errs.Invalid("Invalid driver pack status")
+	ErrDriverBundleMixedOS        = errs.Invalid("All packs in a driver bundle must target the same OS")
+	ErrDriverCategoryInvalid      = errs.Invalid("Invalid driver pack category")
 )
 
-// staleDriverAge 之前的驱动包在列表中标为有风险。
+// Driver packs older than staleDriverAge are marked as potentially risky.
 const staleDriverAge = 5 * 365 * 24 * time.Hour
 
 type DriverService struct {
@@ -102,7 +102,7 @@ func (s DriverService) UploadPack(ctx context.Context, req UploadDriverPackReque
 			}
 			d, err := driverinf.Parse(data)
 			if err != nil {
-				continue // 容忍混入的非驱动 inf 文件
+				continue // Ignore unrelated INF files inside the archive.
 			}
 			parsed = append(parsed, d)
 		}
@@ -188,7 +188,7 @@ func (s DriverService) SetPackStatus(ctx context.Context, id string, status doma
 	return pack, nil
 }
 
-// SetRecommended 把一个驱动包设为推荐版本，并清掉同类别、HWID 覆盖有重叠的其它包的推荐标记。
+// SetRecommended marks a pack as recommended and clears conflicting recommendations with overlapping category/HWIDs.
 func (s DriverService) SetRecommended(ctx context.Context, id string) (domain.DriverPack, error) {
 	pack, err := s.Store.DriverPacks().Get(ctx, id)
 	if err != nil {
@@ -271,7 +271,7 @@ func (s DriverService) CreateBundle(ctx context.Context, req DriverBundleRequest
 		if pack.Category != domain.DriverCategoryBootCriticalNIC {
 			return DriverBundleItem{}, ErrDriverPackCategory
 		}
-		// 禁用由服务端把关：即使调用方直接指定，已禁用的包也不能进入超管机。
+		// Enforce disabled-pack validation on the server even when the caller supplies a pack ID directly.
 		if pack.Status == domain.DriverPackDisabled {
 			return DriverBundleItem{}, ErrDriverPackDisabled
 		}
@@ -364,7 +364,7 @@ func (s DriverService) DeleteBundle(ctx context.Context, id string) error {
 	})
 }
 
-// BundleArchive 把驱动包组打成一个 zip，每个成员包一个目录，供超管适配工具使用。
+// BundleArchive packages driver packs into one ZIP with a directory per member for the Super Admin adapter.
 func (s DriverService) BundleArchive(ctx context.Context, id string) (string, []byte, error) {
 	bundle, err := s.Store.DriverBundles().Get(ctx, id)
 	if err != nil {
@@ -548,8 +548,8 @@ func hwidsOverlap(set map[string]bool, others []string) bool {
 	return false
 }
 
-// packPath 由包 id 和当前驱动目录推导文件位置，不信任行里存的路径：存绝对路径时
-// 目录一挪或数据库恢复到布局不同的主机就失效。旧行记录的路径在文件确实存在时仍然采用。
+// packPath resolves storage locations from the pack ID and current driver root rather than trusting persisted absolute paths,
+// which break after migrations or restoration to different hosts. Existing stored paths remain valid if their files exist.
 func (s DriverService) packPath(pack domain.DriverPack) string {
 	derived := filepath.Join(s.driverDir(), "packs", pack.ID+".zip")
 	if pack.StoragePath != "" && pack.StoragePath != derived {
@@ -574,7 +574,7 @@ func (s DriverService) now() time.Time {
 	return time.Now().UTC()
 }
 
-// uniqueStrings 去空白、去空、去重；assets 包里有同样的私有实现，复制一份好过跨域 import。
+// uniqueStrings trims whitespace, removes empties and deduplicates. A local copy avoids cross-domain imports.
 func uniqueStrings(values []string) []string {
 	seen := map[string]bool{}
 	var out []string
