@@ -7,8 +7,8 @@ import (
 	"syscall"
 )
 
-// sourceDataSize 返回源文件实际占用的字节数：取文件长度与已分配块中较小者，
-// 稀疏 raw 镜像按实际数据计。读不到文件时返回 false。
+// sourceDataSize reports actual source usage as the minimum of file length and allocated blocks,
+// counting only allocated data for sparse raw images. Returns false for inaccessible files.
 func sourceDataSize(path string) (int64, bool) {
 	info, err := os.Stat(path)
 	if err != nil || !info.Mode().IsRegular() {
